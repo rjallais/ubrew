@@ -151,6 +151,7 @@ fn walkAndRelocate(
     frameworks: *std.ArrayList([]const u8),
 ) !void {
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
@@ -203,7 +204,6 @@ fn walkAndRelocate(
             else => {},
         }
     }
-    dir.close(io);
 }
 
 /// Inspect `path`; if it is a Mach-O binary, run install_name_tool for any

@@ -668,7 +668,15 @@ fn runInstall(alloc: std.mem.Allocator, args: []const []const u8) void {
                 phases[pi].store(@intFromEnum(Phase.failed), .release);
                 continue;
             };
-            threads.append(alloc, t) catch continue;
+            threads.append(alloc, t) catch {
+                // Couldn't track this handle. The worker is already running and
+                // borrows `phases` / `formulae.items` / `names`; if we let it
+                // outlive runInstall we get a use-after-free. Joining inline
+                // serializes one slot but keeps lifetimes sound.
+                t.join();
+                had_error.store(true, .release);
+                continue;
+            };
         }
 
         // Live progress on TTY, plain wait otherwise
@@ -1034,6 +1042,9 @@ fn fullInstallOne(
             phase.store(@intFromEnum(Phase.linking), .release);
             linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
+                had_error.store(true, .release);
+                phase.store(@intFromEnum(Phase.failed), .release);
+                return;
             };
             nb.postinstall.runPostInstall(alloc, f) catch |err| {
                 stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
