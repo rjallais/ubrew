@@ -6,6 +6,11 @@
 // 3. Use patchelf --set-rpath when changes needed
 // 4. Replace placeholders in .pc, .cmake, .la text files
 // 5. No codesign step (Linux doesn't need it)
+//
+// Note: every std.process.run call below threads the caller's `io` rather
+// than std.Io.Threaded.global_single_threaded.io(). Zig 0.16's process
+// subsystem rejects the unsynchronized singleton with a vtable mismatch
+// that surfaces as error.CopyFailed (see issue #276).
 
 const std = @import("std");
 const placeholder = @import("../platform/placeholder.zig");
@@ -20,10 +25,9 @@ const ELF_MAGIC = [4]u8{ 0x7f, 'E', 'L', 'F' };
 const TEXT_EXTS = [_][]const u8{ ".pc", ".cmake", ".la", ".sh", ".cfg" };
 
 /// Relocate all ELF files and text configs in a keg.
-pub fn relocateKeg(alloc: std.mem.Allocator, _io: std.Io, name: []const u8, version: []const u8) !void {
-    _ = _io;
-    hasPatchelf(alloc) catch {
-        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf not found — attempting auto-install...\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _tmp) catch {}; });
+pub fn relocateKeg(alloc: std.mem.Allocator, io: std.Io, name: []const u8, version: []const u8) !void {
+    hasPatchelf(alloc, io) catch {
+        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf not found — attempting auto-install...\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
 
         // Try without sudo first (works in containers/root), then with sudo
         const install_cmds = [_][]const []const u8{
@@ -39,7 +43,7 @@ pub fn relocateKeg(alloc: std.mem.Allocator, _io: std.Io, name: []const u8, vers
             &.{ "sudo", "pacman", "-S", "--noconfirm", "patchelf" },
         };
         for (install_cmds) |cmd| {
-            const result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+            const result = std.process.run(alloc, io, .{
                 .argv = cmd,
             }) catch continue;
             alloc.free(result.stdout);
@@ -48,12 +52,12 @@ pub fn relocateKeg(alloc: std.mem.Allocator, _io: std.Io, name: []const u8, vers
         }
 
         // Always recheck — handles race condition in parallel installs
-        hasPatchelf(alloc) catch {
-            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: {s}: could not install patchelf — ELF binary relocation skipped\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _tmp) catch {}; });
-            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: install patchelf manually (e.g. apt install patchelf) and re-run: nb reinstall {s}\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _tmp) catch {}; });
+        hasPatchelf(alloc, io) catch {
+            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: {s}: could not install patchelf — ELF binary relocation skipped\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
+            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: install patchelf manually (e.g. apt install patchelf) and re-run: nb reinstall {s}\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
             return error.PatchelfNotFound;
         };
-        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf installed successfully\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _tmp) catch {}; });
+        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf installed successfully\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
     };
 
     var keg_buf: [512]u8 = undefined;
@@ -63,7 +67,7 @@ pub fn relocateKeg(alloc: std.mem.Allocator, _io: std.Io, name: []const u8, vers
     for (ELF_DIRS) |subdir| {
         var sub_buf: [512]u8 = undefined;
         const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, subdir }) catch continue;
-        walkAndRelocate(alloc, sub_path) catch {};
+        walkAndRelocate(alloc, io, sub_path) catch {};
     }
 
     // Also relocate text config files in lib/pkgconfig, lib/cmake, etc.
@@ -71,17 +75,17 @@ pub fn relocateKeg(alloc: std.mem.Allocator, _io: std.Io, name: []const u8, vers
     for (text_dirs) |subdir| {
         var sub_buf: [512]u8 = undefined;
         const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, subdir }) catch continue;
-        walkAndRelocateText(sub_path) catch {};
+        walkAndRelocateText(io, sub_path) catch {};
     }
 
     // Also check .la files in lib/ directly
     var lib_buf: [512]u8 = undefined;
     const lib_path = std.fmt.bufPrint(&lib_buf, "{s}/lib", .{keg_dir}) catch return;
-    relocateLaFiles(lib_path) catch {};
+    relocateLaFiles(io, lib_path) catch {};
 }
 
-fn hasPatchelf(alloc: std.mem.Allocator) !void {
-    const result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+fn hasPatchelf(alloc: std.mem.Allocator, io: std.Io) !void {
+    const result = std.process.run(alloc, io, .{
         .argv = &.{ "patchelf", "--version" },
     }) catch return error.PatchelfNotFound;
     defer alloc.free(result.stdout);
@@ -92,33 +96,33 @@ fn hasPatchelf(alloc: std.mem.Allocator) !void {
     }
 }
 
-fn walkAndRelocate(alloc: std.mem.Allocator, dir_path: []const u8) !void {
-    var dir = std.Io.Dir.openDirAbsolute(std.Io.Threaded.global_single_threaded.io(), dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(std.Io.Threaded.global_single_threaded.io());
+fn walkAndRelocate(alloc: std.mem.Allocator, io: std.Io, dir_path: []const u8) !void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (iter.next(std.Io.Threaded.global_single_threaded.io()) catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         var child_buf: [2048]u8 = undefined;
         const child_path = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
 
         switch (entry.kind) {
-            .directory => walkAndRelocate(alloc, child_path) catch {},
-            .file => relocateFile(alloc, child_path),
+            .directory => walkAndRelocate(alloc, io, child_path) catch {},
+            .file => relocateFile(alloc, io, child_path),
             else => {},
         }
     }
 }
 
-fn walkAndRelocateText(dir_path: []const u8) !void {
-    var dir = std.Io.Dir.openDirAbsolute(std.Io.Threaded.global_single_threaded.io(), dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(std.Io.Threaded.global_single_threaded.io());
+fn walkAndRelocateText(io: std.Io, dir_path: []const u8) !void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (iter.next(std.Io.Threaded.global_single_threaded.io()) catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) {
             var child_buf: [2048]u8 = undefined;
             const child_path = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-            walkAndRelocateText(child_path) catch {};
+            walkAndRelocateText(io, child_path) catch {};
             continue;
         }
         if (entry.kind != .file) continue;
@@ -127,49 +131,48 @@ fn walkAndRelocateText(dir_path: []const u8) !void {
             if (std.mem.endsWith(u8, entry.name, ext)) {
                 var path_buf: [2048]u8 = undefined;
                 const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch break;
-                _ = placeholder.relocateTextFile(std.Io.Threaded.global_single_threaded.io(), file_path);
+                _ = placeholder.relocateTextFile(io, file_path);
                 break;
             }
         }
     }
 }
 
-fn relocateLaFiles(dir_path: []const u8) !void {
-    var dir = std.Io.Dir.openDirAbsolute(std.Io.Threaded.global_single_threaded.io(), dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(std.Io.Threaded.global_single_threaded.io());
+fn relocateLaFiles(io: std.Io, dir_path: []const u8) !void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (iter.next(std.Io.Threaded.global_single_threaded.io()) catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".la")) continue;
         var path_buf: [2048]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-        _ = placeholder.relocateTextFile(std.Io.Threaded.global_single_threaded.io(), file_path);
+        _ = placeholder.relocateTextFile(io, file_path);
     }
 }
 
-fn relocateFile(alloc: std.mem.Allocator, path: []const u8) void {
-    var file = std.Io.Dir.openFileAbsolute(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return;
-    defer file.close(std.Io.Threaded.global_single_threaded.io());
+fn relocateFile(alloc: std.mem.Allocator, io: std.Io, path: []const u8) void {
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
 
     // Read ELF header to detect format
     var header: [16]u8 = undefined;
-    const n = file.readPositionalAll(std.Io.Threaded.global_single_threaded.io(), &header, 0) catch return;
+    const n = file.readPositionalAll(io, &header, 0) catch return;
     if (n < 16) return;
     if (!std.mem.eql(u8, header[0..4], &ELF_MAGIC)) return;
 
     // Always attempt interpreter fixup — bottles may have hardcoded
     // /home/linuxbrew/.linuxbrew/ paths without @@HOMEBREW markers
-    patchInterpreter(alloc, path);
+    patchInterpreter(alloc, io, path);
 
     // Only do rpath/needed if placeholders are present (saves subprocess cost)
-    if (!elfContainsPlaceholder(file)) return;
+    if (!elfContainsPlaceholder(io, file)) return;
 
-    patchelfRelocateRpathAndNeeded(alloc, path);
+    patchelfRelocateRpathAndNeeded(alloc, io, path);
 }
 
-fn elfContainsPlaceholder(file: std.Io.File) bool {
-    const _io = std.Io.Threaded.global_single_threaded.io();
+fn elfContainsPlaceholder(io: std.Io, file: std.Io.File) bool {
     var buf: [65536]u8 = undefined;
     var overlap: usize = 0;
     const needle = "@@HOMEBREW";
@@ -178,7 +181,7 @@ fn elfContainsPlaceholder(file: std.Io.File) bool {
             const src = buf[buf.len - overlap ..];
             std.mem.copyForwards(u8, buf[0..overlap], src);
         }
-        const n = file.readStreaming(_io, &.{buf[overlap..]}) catch return false;
+        const n = file.readStreaming(io, &.{buf[overlap..]}) catch return false;
         if (n == 0) break;
         const total = overlap + n;
         if (std.mem.indexOf(u8, buf[0..total], needle) != null) return true;
@@ -187,9 +190,9 @@ fn elfContainsPlaceholder(file: std.Io.File) bool {
     return false;
 }
 
-fn patchelfRelocateRpathAndNeeded(alloc: std.mem.Allocator, path: []const u8) void {
+fn patchelfRelocateRpathAndNeeded(alloc: std.mem.Allocator, io: std.Io, path: []const u8) void {
     // 1. Fix RPATH
-    const rpath_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--print-rpath", path } }) catch return;
+    const rpath_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--print-rpath", path } }) catch return;
     defer alloc.free(rpath_result.stderr);
     defer alloc.free(rpath_result.stdout);
 
@@ -199,14 +202,14 @@ fn patchelfRelocateRpathAndNeeded(alloc: std.mem.Allocator, path: []const u8) vo
             const new_rpath = placeholder.replacePlaceholders(alloc, current_rpath) catch return;
             defer alloc.free(new_rpath);
 
-            const set_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--set-rpath", new_rpath, path } }) catch return;
+            const set_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--set-rpath", new_rpath, path } }) catch return;
             alloc.free(set_result.stdout);
             alloc.free(set_result.stderr);
         }
     }
 
     // 2. Fix DT_NEEDED entries with placeholders
-    const needed_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--print-needed", path } }) catch return;
+    const needed_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--print-needed", path } }) catch return;
     defer alloc.free(needed_result.stderr);
 
     var lines_iter = std.mem.splitScalar(u8, needed_result.stdout, '\n');
@@ -216,7 +219,7 @@ fn patchelfRelocateRpathAndNeeded(alloc: std.mem.Allocator, path: []const u8) vo
         if (placeholder.hasPlaceholder(lib)) {
             const new_lib = placeholder.replacePlaceholders(alloc, lib) catch continue;
             defer alloc.free(new_lib);
-            const replace_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--replace-needed", lib, new_lib, path } }) catch continue;
+            const replace_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--replace-needed", lib, new_lib, path } }) catch continue;
             alloc.free(replace_result.stdout);
             alloc.free(replace_result.stderr);
         }
@@ -224,8 +227,8 @@ fn patchelfRelocateRpathAndNeeded(alloc: std.mem.Allocator, path: []const u8) vo
     alloc.free(needed_result.stdout);
 }
 
-fn patchInterpreter(alloc: std.mem.Allocator, path: []const u8) void {
-    const result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--print-interpreter", path } }) catch return;
+fn patchInterpreter(alloc: std.mem.Allocator, io: std.Io, path: []const u8) void {
+    const result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--print-interpreter", path } }) catch return;
     defer alloc.free(result.stderr);
     defer alloc.free(result.stdout);
 
@@ -239,29 +242,29 @@ fn patchInterpreter(alloc: std.mem.Allocator, path: []const u8) void {
         // Fall through to detectInterpreter for the correct system path
     } else if (placeholder.replacePlaceholders(alloc, current)) |resolved| {
         defer alloc.free(resolved);
-        if (std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), resolved, .{})) |_| {
-            const set_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--set-interpreter", resolved, path } }) catch return;
+        if (std.Io.Dir.accessAbsolute(io, resolved, .{})) |_| {
+            const set_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--set-interpreter", resolved, path } }) catch return;
             alloc.free(set_result.stdout);
             alloc.free(set_result.stderr);
             return;
         } else |_| {}
     } else |_| {}
 
-    const new_interp = detectInterpreter(path) orelse return;
+    const new_interp = detectInterpreter(io, path) orelse return;
 
-    const set_result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .argv = &.{ "patchelf", "--set-interpreter", new_interp, path } }) catch return;
+    const set_result = std.process.run(alloc, io, .{ .argv = &.{ "patchelf", "--set-interpreter", new_interp, path } }) catch return;
     alloc.free(set_result.stdout);
     alloc.free(set_result.stderr);
 }
 
 /// Read the ELF e_machine field to pick the correct dynamic linker for the
 /// binary's actual architecture (not the architecture nb was compiled for).
-fn detectInterpreter(path: []const u8) ?[]const u8 {
-    var file = std.Io.Dir.openFileAbsolute(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return null;
-    defer file.close(std.Io.Threaded.global_single_threaded.io());
+fn detectInterpreter(io: std.Io, path: []const u8) ?[]const u8 {
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
 
     var header: [20]u8 = undefined;
-    const n = file.readPositionalAll(std.Io.Threaded.global_single_threaded.io(), &header, 0) catch return null;
+    const n = file.readPositionalAll(io, &header, 0) catch return null;
     if (n < 20) return null;
     if (!std.mem.eql(u8, header[0..4], &ELF_MAGIC)) return null;
 

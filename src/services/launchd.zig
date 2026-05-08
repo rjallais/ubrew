@@ -14,10 +14,10 @@ pub const Service = struct {
     keg_version: []const u8,
 };
 
-pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
+pub fn discoverServices(alloc: std.mem.Allocator, io: std.Io) ![]Service {
     var services: std.ArrayList(Service) = .empty;
     defer services.deinit(alloc);
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = io;
 
     var cellar = std.Io.Dir.openDirAbsolute(lib_io, paths.CELLAR_DIR, .{ .iterate = true }) catch return try services.toOwnedSlice(alloc);
     defer cellar.close(lib_io);
@@ -76,8 +76,8 @@ pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
     return try services.toOwnedSlice(alloc);
 }
 
-pub fn isRunning(alloc: std.mem.Allocator, label: []const u8) bool {
-    const result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+pub fn isRunning(alloc: std.mem.Allocator, io: std.Io, label: []const u8) bool {
+    const result = std.process.run(alloc, io, .{
         .argv = &.{ "launchctl", "list", label },
     }) catch return false;
     alloc.free(result.stdout);
@@ -127,8 +127,8 @@ pub fn isPlistSafe(content: []const u8, keg_prefix: []const u8) bool {
     return true;
 }
 
-pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn start(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const lib_io = io;
 
     // Read and validate the plist file before loading
     const plist_file = std.Io.Dir.openFileAbsolute(lib_io, plist_path, .{}) catch return error.LaunchctlFailed;
@@ -155,8 +155,8 @@ pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
     if (switch (result.term) { .exited => |c| c != 0, else => true }) return error.LaunchctlFailed;
 }
 
-pub fn stop(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const result = std.process.run(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+pub fn stop(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const result = std.process.run(alloc, io, .{
         .argv = &.{ "launchctl", "unload", "-w", plist_path },
     }) catch return error.LaunchctlFailed;
     alloc.free(result.stdout);

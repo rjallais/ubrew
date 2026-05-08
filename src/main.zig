@@ -968,7 +968,7 @@ fn fullInstallOne(
             var fv_buf: [256]u8 = undefined;
             const fv = f.effectiveVersion(&fv_buf);
             phase.store(@intFromEnum(Phase.installing), .release);
-            nb.store.materializeFromRelocated(source_cache_key, f.name, fv) catch break :fast;
+            nb.store.materializeFromRelocated(g_io, source_cache_key, f.name, fv) catch break :fast;
             phase.store(@intFromEnum(Phase.linking), .release);
             linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
@@ -976,7 +976,7 @@ fn fullInstallOne(
                 phase.store(@intFromEnum(Phase.failed), .release);
                 return;
             };
-            nb.postinstall.runPostInstall(alloc, f) catch |err| {
+            nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
                 stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
             };
             phase.store(@intFromEnum(Phase.done), .release);
@@ -1037,7 +1037,7 @@ fn fullInstallOne(
             const fv = nb.store.detectEntryVersion(f.bottle_sha256, f.name, f.version, &fv_buf) orelse
                 nb.cellar.detectKegVersion(f.name, f.version, &fv_buf) orelse
                 f.version;
-            nb.store.materializeFromRelocated(f.bottle_sha256, f.name, fv) catch break :fast;
+            nb.store.materializeFromRelocated(g_io, f.bottle_sha256, f.name, fv) catch break :fast;
             // Relocated snapshot found — skip steps 4/4b, go straight to link+post-install
             phase.store(@intFromEnum(Phase.linking), .release);
             linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
@@ -1046,13 +1046,13 @@ fn fullInstallOne(
                 phase.store(@intFromEnum(Phase.failed), .release);
                 return;
             };
-            nb.postinstall.runPostInstall(alloc, f) catch |err| {
+            nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
                 stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
             };
             phase.store(@intFromEnum(Phase.done), .release);
             return;
         }
-        nb.cellar.materialize(f.bottle_sha256, f.name, f.version) catch |err| {
+        nb.cellar.materialize(g_io, f.bottle_sha256, f.name, f.version) catch |err| {
             stderr.print("nb: {s}: materialize failed: {}\n", .{ f.name, err }) catch {};
             had_error.store(true, .release);
             phase.store(@intFromEnum(Phase.failed), .release);
@@ -1080,7 +1080,7 @@ fn fullInstallOne(
         f.source_sha256
     else
         f.bottle_sha256;
-    nb.store.saveRelocatedEntry(relocated_cache_key, f.name, actual_ver) catch {};
+    nb.store.saveRelocatedEntry(g_io, relocated_cache_key, f.name, actual_ver) catch {};
 
     // 5. Link binaries
     phase.store(@intFromEnum(Phase.linking), .release);
@@ -1092,7 +1092,7 @@ fn fullInstallOne(
     };
 
     // 6. Post-install (non-fatal)
-    nb.postinstall.runPostInstall(alloc, f) catch |err| {
+    nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
         stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
     };
 
@@ -2970,7 +2970,7 @@ fn runRollback(alloc: std.mem.Allocator, args: []const []const u8) void {
         nb.cellar.remove(name, keg.version) catch {};
 
         if (prev.sha256.len > 0) {
-            nb.cellar.materialize(prev.sha256, name, prev.version) catch |err| {
+            nb.cellar.materialize(g_io, prev.sha256, name, prev.version) catch |err| {
                 stderr.print("nb: {s}: materialize failed: {}\n", .{ name, err }) catch {};
                 continue;
             };
@@ -3365,7 +3365,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
     const subcmd = if (args.len > 0) args[0] else "list";
     const svc_name = if (args.len > 1) args[1] else null;
 
-    const services_list = nb.services.discoverServices(alloc) catch {
+    const services_list = nb.services.discoverServices(alloc, g_io) catch {
         stderr.print("nb: failed to discover services\n", .{}) catch {};
         return;
     };
@@ -3378,7 +3378,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
         stdout.print("==> Services:\n", .{}) catch {};
         for (services_list) |svc| {
-            const status = if (nb.services.isRunning(alloc, svc.label)) "running" else "stopped";
+            const status = if (nb.services.isRunning(alloc, g_io, svc.label)) "running" else "stopped";
             stdout.print("  {s} ({s}) [{s}]\n", .{ svc.name, svc.keg_name, status }) catch {};
         }
     } else if (std.mem.eql(u8, subcmd, "start") or std.mem.eql(u8, subcmd, "stop") or std.mem.eql(u8, subcmd, "restart")) {
@@ -3401,7 +3401,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         };
 
         if (std.mem.eql(u8, subcmd, "stop") or std.mem.eql(u8, subcmd, "restart")) {
-            nb.services.stop(alloc, svc.plist_path) catch |err| {
+            nb.services.stop(alloc, g_io, svc.plist_path) catch |err| {
                 stderr.print("nb: failed to stop {s}: {}\n", .{ svc.name, err }) catch {};
                 if (std.mem.eql(u8, subcmd, "stop")) return;
             };
@@ -3412,7 +3412,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
 
         if (std.mem.eql(u8, subcmd, "start") or std.mem.eql(u8, subcmd, "restart")) {
-            nb.services.start(alloc, svc.plist_path) catch |err| {
+            nb.services.start(alloc, g_io, svc.plist_path) catch |err| {
                 stderr.print("nb: failed to start {s}: {}\n", .{ svc.name, err }) catch {};
                 return;
             };

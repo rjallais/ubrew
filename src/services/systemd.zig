@@ -14,8 +14,8 @@ pub const Service = struct {
     keg_version: []const u8,
 };
 
-pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn discoverServices(alloc: std.mem.Allocator, io: std.Io) ![]Service {
+    const lib_io = io;
     var services: std.ArrayList(Service) = .empty;
     defer services.deinit(alloc);
 
@@ -78,8 +78,8 @@ pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
     return try services.toOwnedSlice(alloc);
 }
 
-pub fn isRunning(alloc: std.mem.Allocator, label: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn isRunning(alloc: std.mem.Allocator, io: std.Io, label: []const u8) bool {
+    const lib_io = io;
     var unit_buf: [256]u8 = undefined;
     const unit = if (std.mem.endsWith(u8, label, ".service")) label else std.fmt.bufPrint(&unit_buf, "{s}.service", .{label}) catch return false;
     const result = std.process.run(alloc, lib_io, .{
@@ -115,8 +115,8 @@ pub fn isServiceFileSafe(content: []const u8, keg_prefix: []const u8) bool {
     return true;
 }
 
-pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn start(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const lib_io = io;
 
     // Read and validate the service file before installing
     const svc_file = std.Io.Dir.openFileAbsolute(lib_io, plist_path, .{}) catch return error.SystemdFailed;
@@ -168,8 +168,8 @@ pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
     if (switch (result.term) { .exited => |c| c != 0, else => true }) return error.SystemdFailed;
 }
 
-pub fn stop(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn stop(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const lib_io = io;
     const basename = std.fs.path.basename(plist_path);
     const result = std.process.run(alloc, lib_io, .{
         .argv = &.{ "systemctl", "stop", basename },
