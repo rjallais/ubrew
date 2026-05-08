@@ -218,6 +218,12 @@ fn readArMember(alloc: std.mem.Allocator, ar_path: []const u8, prefix: []const u
         const size_str = std.mem.trim(u8, header[48..58], " ");
         const member_size = std.fmt.parseInt(u64, size_str, 10) catch break;
 
+        // Reject hostile member sizes. The ar size field is decimal text up
+        // to 10 chars wide, so a malicious .deb could claim ~1e10 bytes; the
+        // skip computation below adds 1 for odd sizes which would wrap a u64
+        // at maxInt back to 0 and trap the loop. Cap well below that.
+        if (member_size > max_member_size) break;
+
         if (std.mem.startsWith(u8, member_name, prefix)) {
             const compression: Compression = if (std.mem.endsWith(u8, member_name, ".zst"))
                 .zstd
@@ -247,13 +253,18 @@ fn readArMember(alloc: std.mem.Allocator, ar_path: []const u8, prefix: []const u
             return .{ .data = data, .compression = compression };
         }
 
-        // Skip to next member (padded to even byte boundary)
+        // Skip to next member (padded to even byte boundary). Capped above
+        // so `member_size + 1` cannot wrap.
         const skip = member_size + (member_size % 2);
         offset += skip;
     }
 
     return error.MemberNotFound;
 }
+
+/// Hard ceiling on a single ar member's claimed size. Anything larger is
+/// treated as a malformed/hostile .deb to keep the parser bounded.
+const max_member_size: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Decompress zstd data in memory using Zig's native zstd decompressor.
 const max_decompressed_size: usize = 1 << 30;
@@ -264,23 +275,33 @@ fn decompressZstd(alloc: std.mem.Allocator, compressed: []const u8) ![]u8 {
     defer alloc.free(window_buf);
 
     var zstd_stream: std.compress.zstd.Decompress = .init(&in, window_buf, .{});
-    var out: std.Io.Writer.Allocating = .init(alloc);
-
-    _ = zstd_stream.reader.streamRemaining(&out.writer) catch return error.DecompressFailed;
-
-    if (out.written().len > max_decompressed_size) return error.DecompressionBombDetected;
-    return out.toOwnedSlice() catch return error.OutOfMemory;
+    return streamBounded(alloc, &zstd_stream.reader, max_decompressed_size);
 }
 
 /// Decompress gzip data in memory using Zig's native deflate decompressor.
 pub fn decompressGzip(alloc: std.mem.Allocator, compressed: []const u8) ![]u8 {
     var in: std.Io.Reader = .fixed(compressed);
-    var decomp: std.compress.flate.Decompress = .init(&in, .gzip, &.{});
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    _ = decomp.reader.streamRemaining(&out.writer) catch return error.DecompressFailed;
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decomp: std.compress.flate.Decompress = .init(&in, .gzip, &window);
+    return streamBounded(alloc, &decomp.reader, max_decompressed_size);
+}
 
-    if (out.written().len > max_decompressed_size) return error.DecompressionBombDetected;
-    return out.toOwnedSlice() catch return error.OutOfMemory;
+/// Drain `reader` into a freshly allocated slice, capping at `max` bytes.
+/// Returns `error.DecompressionBombDetected` *during* the stream so an
+/// attacker cannot force us to materialize a multi-gigabyte buffer before
+/// we notice. Caller owns the returned slice.
+fn streamBounded(alloc: std.mem.Allocator, reader: *std.Io.Reader, max: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = reader.readSliceShort(&chunk) catch return error.DecompressFailed;
+        if (n == 0) break;
+        if (out.items.len + n > max) return error.DecompressionBombDetected;
+        try out.appendSlice(alloc, chunk[0..n]);
+    }
+    return out.toOwnedSlice(alloc) catch error.OutOfMemory;
 }
 
 /// For xz, fall back to the system xz command since Zig's xz may need LZMA2.
