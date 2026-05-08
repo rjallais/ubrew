@@ -124,7 +124,7 @@ pub fn hasRelocatedEntry(sha256: []const u8) bool {
 /// Called once after a successful relocate+placeholder pass.
 /// Uses APFS clonefile so this is near-instantaneous and zero marginal disk cost.
 /// Layout: store-relocated/<sha256>/ contains the full keg tree directly.
-pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const u8) !void {
+pub fn saveRelocatedEntry(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     // src = Cellar/<name>/<version>/  (already fully relocated)
@@ -138,14 +138,14 @@ pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const
     dest_buf[dest_dir.len] = 0;
 
     // Already saved (concurrent installs, or we're upgrading)
-    if (std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), dest_dir, .{})) {
+    if (std.Io.Dir.accessAbsolute(io, dest_dir, .{})) {
         return; // already exists, nothing to do
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     }
 
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), STORE_RELOCATED_DIR, .default_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, STORE_RELOCATED_DIR, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -153,14 +153,15 @@ pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const
     // cloneTree from Cellar → store-relocated (APFS copy-on-write, ~0ms on APFS)
     const copy = @import("../platform/copy.zig");
     if (!copy.cloneTree(&src_buf, &dest_buf)) {
-        // Fallback: regular recursive copy (Linux or APFS failure)
-        try copy.cpFallback(std.Io.Threaded.global_single_threaded.io(), src_dir, dest_dir);
+        // Fallback path uses std.process.run; passing the caller's io is
+        // required under Zig 0.16 (see issue #276).
+        try copy.cpFallback(io, src_dir, dest_dir);
     }
 }
 
 /// Materialize a package from store-relocated/<sha256>/ into Cellar/<name>/<version>/.
 /// This is the fast reinstall path: no relocation needed.
-pub fn materializeFromRelocated(sha256: []const u8, name: []const u8, version: []const u8) !void {
+pub fn materializeFromRelocated(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     // src = store-relocated/<sha256>/
@@ -176,17 +177,17 @@ pub fn materializeFromRelocated(sha256: []const u8, name: []const u8, version: [
     // Ensure parent dir exists
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ CELLAR_DIR, name }) catch return error.PathTooLong;
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), parent, .default_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     // Remove existing keg if present (fresh reinstall)
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), dest_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
 
     const copy = @import("../platform/copy.zig");
     if (!copy.cloneTree(&src_buf, &dest_buf)) {
-        try copy.cpFallback(std.Io.Threaded.global_single_threaded.io(), src_dir, dest_dir);
+        try copy.cpFallback(io, src_dir, dest_dir);
     }
 }
 
