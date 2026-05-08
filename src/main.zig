@@ -2033,9 +2033,10 @@ fn runUpdate(alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    // Check if already up to date (strip leading 'v' if present)
-    const latest_ver = if (tag_name.len > 0 and tag_name[0] == 'v') tag_name[1..] else tag_name;
-    if (std.mem.eql(u8, latest_ver, VERSION)) {
+    // Check if the remote release is strictly newer. This also prevents
+    // prerelease/stale release feeds from downgrading a newer local binary.
+    const latest_ver = nb.version.normalizeVersion(tag_name);
+    if (!nb.version.isUpdateAvailable(VERSION, latest_ver)) {
         stdout.print("==> Already up to date (v{s})\n", .{VERSION}) catch {};
         return;
     }
@@ -4401,9 +4402,7 @@ fn checkForUpdate(alloc: std.mem.Allocator) void {
     // Fetch latest version from Cloudflare worker (native HTTP, no curl)
     const body = nb.fetch.get(alloc, "https://nanobrew.trilok.ai/version") catch return;
     defer alloc.free(body);
-
-
-    const latest_ver = std.mem.trimEnd(u8, body, "\n \t");
+    const latest_ver = nb.version.normalizeVersion(body);
     if (latest_ver.len == 0 or std.mem.eql(u8, latest_ver, "error")) return;
 
     // Cache latest remote version (for future use / diagnostics; banner uses VERSION vs this)
@@ -4412,8 +4411,8 @@ fn checkForUpdate(alloc: std.mem.Allocator) void {
         vf.writeStreamingAll(g_io, latest_ver) catch {};
     } else |_| {}
 
-    // Compare with current version
-    if (std.mem.eql(u8, latest_ver, VERSION)) return;
+    // Show the banner only for strict upgrades, never for stale feeds/downgrades.
+    if (!nb.version.isUpdateAvailable(VERSION, latest_ver)) return;
 
     // New version available — print colored banner to stderr (not stdout,
     // so shell completion scripts that parse `nb list` output aren't polluted)

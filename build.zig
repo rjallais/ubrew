@@ -67,11 +67,16 @@ pub fn build(b: *std.Build) void {
         .{ "test-upstream-github", "src/upstream_github_test.zig", "Run GitHub upstream resolver tests" },
     };
     inline for (test_modules) |entry| {
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "step_name", entry[0]);
+
         const mod = b.createModule(.{
-            .root_source_file = b.path(entry[1]),
+            .root_source_file = b.path("src/test_module.zig"),
             .target = target,
             .optimize = optimize,
         });
+        mod.addOptions("module_test_options", opts);
+
         const t = b.addTest(.{ .root_module = mod });
         const run_t = b.addRunArtifact(t);
         const s = b.step(entry[0], entry[2]);
