@@ -94,18 +94,21 @@ pub fn runPostinst(alloc: std.mem.Allocator, deb_path: []const u8, pkg_name: []c
 
         printErr(lib_io, "    running: postinst for {s}\n", .{pkg_name});
 
-        _ = std.process.run(alloc, lib_io, .{
+        if (std.process.run(alloc, lib_io, .{
             .argv = &.{ "chmod", "+x", postinst_path },
             .stdout_limit = .limited(256),
             .stderr_limit = .limited(256),
-        }) catch {};
+        })) |chmod_result| {
+            alloc.free(chmod_result.stdout);
+            alloc.free(chmod_result.stderr);
+        } else |_| {}
 
         const run_result = std.process.run(alloc, lib_io, .{
             .argv = &.{ postinst_path, "configure" },
             .stdout_limit = .limited(1024 * 1024),
             .stderr_limit = .limited(1024 * 1024),
-        }) catch {
-            printErr(lib_io, "    warning: postinst failed for {s}\n", .{pkg_name});
+        }) catch |err| {
+            printErr(lib_io, "    warning: postinst failed for {s}: {s}\n", .{ pkg_name, @errorName(err) });
             return;
         };
         alloc.free(run_result.stdout);

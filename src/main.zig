@@ -369,6 +369,10 @@ fn runLocalRbInstall(alloc: std.mem.Allocator, path: []const u8) void {
 
     // Derive the formula's short name from the basename (strip trailing ".rb").
     const basename = std.fs.path.basename(path);
+    if (basename.len <= 3 or !std.mem.endsWith(u8, basename, ".rb")) {
+        stderr.print("nb: '{s}' is not a .rb formula file\n", .{path}) catch {};
+        std.process.exit(1);
+    }
     const short_name = basename[0 .. basename.len - 3];
 
     var f = nb.tap.parseRubyFormula(alloc, short_name, src) catch |err| {

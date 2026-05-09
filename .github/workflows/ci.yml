@@ -35,6 +35,9 @@ jobs:
       - name: Unit tests
         run: zig build test
 
+      - name: Repository checks
+        run: zig build repo-checks
+
       - name: Smoke integration tests
         run: bash tests/smoke-test.sh ./zig-out/bin/nb
 
