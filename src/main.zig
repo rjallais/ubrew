@@ -1437,11 +1437,12 @@ fn runLeaves(alloc: std.mem.Allocator, args: []const []const u8) void {
     for (threads[0..spawned]) |t| t.join();
 
     // Collect results serially, preserving `kegs` order.
-    var fetch_failures: usize = 0;
+    var failed_names: std.ArrayList([]const u8) = .empty;
+    defer failed_names.deinit(alloc);
     fetched_formulae.ensureTotalCapacity(alloc, kegs.len) catch {};
     for (kegs, 0..) |keg, i| {
         if (slots[i].state != .filled) {
-            fetch_failures += 1;
+            failed_names.append(alloc, keg.name) catch {};
             continue;
         }
         fetched_formulae.append(alloc, slots[i].formula) catch {
@@ -1461,8 +1462,16 @@ fn runLeaves(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
     }
 
-    if (fetch_failures > 0) {
-        stderr.print("nb: warning: could not fetch metadata for {d} package(s); results may be incomplete\n", .{fetch_failures}) catch {};
+    if (failed_names.items.len > 0) {
+        stderr.print("nb: warning: could not fetch metadata for {d} package(s); results may be incomplete:\n", .{failed_names.items.len}) catch {};
+        const max_show = @min(failed_names.items.len, 5);
+        for (failed_names.items[0..max_show]) |n| {
+            stderr.print("    {s}\n", .{n}) catch {};
+        }
+        if (failed_names.items.len > max_show) {
+            stderr.print("    ... and {d} more\n", .{failed_names.items.len - max_show}) catch {};
+        }
+        stderr.print("    (run `nb cleanup --prune-kegs` to remove phantom DB entries — see #279)\n", .{}) catch {};
     }
 
     // Print leaves (packages not depended on by any other installed package)
@@ -4615,4 +4624,14 @@ fn runMigrate(alloc: std.mem.Allocator) void {
     }
 
     stdout.print("\nMigrated {d} formulae and {d} casks from Homebrew\n", .{ formula_count, cask_count }) catch {};
+    if (formula_count > 0 or cask_count > 0) {
+        stdout.print(
+            "\nNote: migrate only records package names in nanobrew's database so commands\n" ++
+            "      like `nb list`, `nb outdated`, and `nb bundle dump` know about them.\n" ++
+            "      The actual binaries still live in Homebrew's prefix — `nb where <pkg>`\n" ++
+            "      will show the package as installed but with no entry in /opt/nanobrew/prefix/bin/.\n" ++
+            "      To install a migrated package fully under nanobrew, run `nb install <pkg>`.\n",
+            .{},
+        ) catch {};
+    }
 }
