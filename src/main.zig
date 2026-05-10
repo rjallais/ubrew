@@ -1892,6 +1892,12 @@ fn runUpgrade(alloc: std.mem.Allocator, args: []const []const u8) void {
             is_cask = true;
         } else if (std.mem.eql(u8, arg, "--deb")) {
             is_deb = true;
+        } else if (std.mem.startsWith(u8, arg, "--") or std.mem.startsWith(u8, arg, "-") and arg.len > 1 and !std.ascii.isDigit(arg[1])) {
+            // Reject unknown flags so they don't silently become package
+            // names (e.g. `nb upgrade --dry-run` previously upgraded a
+            // ghost package called "--dry-run" → "all up to date").
+            stderr.print("nb: upgrade: unknown flag '{s}' (supported: --cask, --deb)\n", .{arg}) catch {};
+            std.process.exit(1);
         } else {
             names.append(alloc, arg) catch {};
         }
@@ -1907,6 +1913,26 @@ fn runUpgrade(alloc: std.mem.Allocator, args: []const []const u8) void {
         std.process.exit(1);
     };
     defer db.close();
+
+    // If the user supplied package names, every one of them must be
+    // installed (as a keg or, when --cask, as a cask). Without this
+    // guard, `nb upgrade nonexistent-pkg` silently returned "all up
+    // to date" because nothing matched the outdated set.
+    if (names.items.len > 0) {
+        for (names.items) |n| {
+            const found = if (is_cask) blk: {
+                const casks_result = db.listInstalledCasks(alloc) catch break :blk false;
+                defer if (casks_result.len > 0) alloc.free(casks_result);
+                for (casks_result) |c| if (std.mem.eql(u8, c.token, n)) break :blk true;
+                break :blk false;
+            } else (db.findKeg(n) != null);
+            if (!found) {
+                const kind = if (is_cask) "cask" else "package";
+                stderr.print("nb: upgrade: {s} '{s}' is not installed\n", .{ kind, n }) catch {};
+                std.process.exit(1);
+            }
+        }
+    }
 
     const check_casks = is_cask or names.items.len == 0;
     const check_kegs = !is_cask or names.items.len == 0;
