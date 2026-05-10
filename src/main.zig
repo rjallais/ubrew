@@ -2792,15 +2792,22 @@ fn cleanupPhantomKegs(alloc: std.mem.Allocator, dry_run: bool, stdout: anytype) 
     var phantom_names: [256][]const u8 = undefined;
     var phantom_versions: [256][]const u8 = undefined;
     var n: usize = 0;
+    var truncated = false;
     for (kegs) |keg| {
-        if (n >= phantom_names.len) break;
         if (kegHasBackingCellar(keg.name, keg.version)) continue;
+        if (n >= phantom_names.len) {
+            truncated = true;
+            break;
+        }
         phantom_names[n] = alloc.dupe(u8, keg.name) catch continue;
         phantom_versions[n] = alloc.dupe(u8, keg.version) catch {
             alloc.free(phantom_names[n]);
             continue;
         };
         n += 1;
+    }
+    if (truncated) {
+        stdout.print("    (capped at {d} entries this pass; re-run `nb cleanup --prune-kegs` to continue)\n", .{phantom_names.len}) catch {};
     }
     defer for (phantom_names[0..n], phantom_versions[0..n]) |pn, pv| {
         alloc.free(pn);
