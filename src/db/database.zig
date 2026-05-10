@@ -342,9 +342,16 @@ pub const Database = struct {
             gop.key_ptr.* = try self.alloc.dupe(u8, name);
             gop.value_ptr.* = .empty;
         }
+        // All-or-nothing: if append fails we must free both dupes, and
+        // if the second dupe fails we must free the first. `catch ""`
+        // on a leaked dupe would silently leak on OOM.
+        const ver_owned = try self.alloc.dupe(u8, old.version);
+        errdefer self.alloc.free(ver_owned);
+        const sha_owned = try self.alloc.dupe(u8, old.sha256);
+        errdefer self.alloc.free(sha_owned);
         try gop.value_ptr.append(self.alloc, .{
-            .version = self.alloc.dupe(u8, old.version) catch "",
-            .sha256 = self.alloc.dupe(u8, old.sha256) catch "",
+            .version = ver_owned,
+            .sha256 = sha_owned,
             .installed_at = old.installed_at,
         });
     }
