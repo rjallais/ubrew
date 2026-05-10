@@ -2628,28 +2628,8 @@ fn runDoctor(alloc: std.mem.Allocator) void {
         const kegs = db.listInstalled(alloc) catch &.{};
         defer if (kegs.len > 0) alloc.free(kegs);
         for (kegs) |keg| {
-            var buf: [512]u8 = undefined;
-            const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ PREFIX, keg.name, keg.version }) catch continue;
-            const found = blk: {
-                std.Io.Dir.accessAbsolute(g_io, cellar_path, .{}) catch {
-                    // Also check Homebrew cellar paths for migrated packages (#172)
-                    const homebrew_cellar_paths = [_][]const u8{
-                        "/opt/homebrew/Cellar",
-                        "/usr/local/Cellar",
-                        "/home/linuxbrew/.linuxbrew/Cellar",
-                    };
-                    for (homebrew_cellar_paths) |hb_cellar| {
-                        var hb_buf: [512]u8 = undefined;
-                        const hb_path = std.fmt.bufPrint(&hb_buf, "{s}/{s}/{s}", .{ hb_cellar, keg.name, keg.version }) catch continue;
-                        std.Io.Dir.accessAbsolute(g_io, hb_path, .{}) catch continue;
-                        break :blk true;
-                    }
-                    break :blk false;
-                };
-                break :blk true;
-            };
-            if (!found) {
-                stdout.print("  ✗ DB entry '{s}' has no Cellar dir\n", .{keg.name}) catch {};
+            if (!kegHasBackingCellar(keg.name, keg.version)) {
+                stdout.print("  ✗ DB entry '{s}' has no Cellar dir (run `nb cleanup --prune-kegs` to remove)\n", .{keg.name}) catch {};
                 issues += 1;
             }
         }
@@ -2726,8 +2706,10 @@ fn printDoctorSummary(stdout: anytype, issues: usize) void {
 fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     const stdout = StdoutWriter{};
     var dry_run = false;
+    var prune_kegs = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run") or std.mem.eql(u8, arg, "-n")) dry_run = true;
+        if (std.mem.eql(u8, arg, "--prune-kegs")) prune_kegs = true;
     }
     var reclaimed: u64 = 0;
 
@@ -2747,6 +2729,14 @@ fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     stdout.print("  Checking orphaned entries...\n", .{}) catch {};
     cleanupOrphans(alloc, dry_run, &reclaimed, stdout);
 
+    // 3. Phantom kegs (state.json entries with no Cellar dir anywhere) — opt-in
+    //    because it mutates the DB. See #279.
+    if (prune_kegs) {
+        stdout.print("  Checking phantom kegs (state.json entries with no Cellar dir)...\n", .{}) catch {};
+        const pruned = cleanupPhantomKegs(alloc, dry_run, stdout);
+        if (pruned == 0) stdout.print("    (no phantom kegs found)\n", .{}) catch {};
+    }
+
     if (reclaimed > 0) {
         const mb = @as(f64, @floatFromInt(reclaimed)) / (1024.0 * 1024.0);
         if (dry_run) {
@@ -2757,6 +2747,78 @@ fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     } else {
         stdout.print("\n==> Nothing to clean up\n", .{}) catch {};
     }
+    if (!prune_kegs) {
+        stdout.print("    (run with --prune-kegs to also remove phantom DB entries flagged by `nb doctor`)\n", .{}) catch {};
+    }
+}
+
+/// True if the keg has a backing Cellar directory at any known location:
+/// either nb's own prefix or one of the Homebrew cellars (#172 migrated kegs).
+/// Shared by `nb doctor` and `nb cleanup --prune-kegs` so they always agree.
+fn kegHasBackingCellar(name: []const u8, version: []const u8) bool {
+    var nb_buf: [512]u8 = undefined;
+    const nb_path = std.fmt.bufPrint(&nb_buf, "{s}/Cellar/{s}/{s}", .{ PREFIX, name, version }) catch return false;
+    if (std.Io.Dir.accessAbsolute(g_io, nb_path, .{})) {
+        return true;
+    } else |_| {}
+
+    const homebrew_cellars = [_][]const u8{
+        "/opt/homebrew/Cellar",
+        "/usr/local/Cellar",
+        "/home/linuxbrew/.linuxbrew/Cellar",
+    };
+    for (homebrew_cellars) |hb| {
+        var hb_buf: [512]u8 = undefined;
+        const hb_path = std.fmt.bufPrint(&hb_buf, "{s}/{s}/{s}", .{ hb, name, version }) catch continue;
+        if (std.Io.Dir.accessAbsolute(g_io, hb_path, .{})) {
+            return true;
+        } else |_| {}
+    }
+    return false;
+}
+
+/// Walk state.json kegs and remove any whose Cellar dir is missing in every
+/// known location. Returns the count of pruned (or proposed-for-pruning) entries.
+/// In dry-run mode, just lists them. See #279.
+fn cleanupPhantomKegs(alloc: std.mem.Allocator, dry_run: bool, stdout: anytype) usize {
+    var db = nb.database.Database.open(alloc) catch return 0;
+    defer db.close();
+
+    const kegs = db.listInstalled(alloc) catch return 0;
+    defer if (kegs.len > 0) alloc.free(kegs);
+
+    // Two-pass: collect names first (recordRemoval invalidates the slice),
+    // then remove. Bound the buffer so we never blow the stack.
+    var phantom_names: [256][]const u8 = undefined;
+    var phantom_versions: [256][]const u8 = undefined;
+    var n: usize = 0;
+    for (kegs) |keg| {
+        if (n >= phantom_names.len) break;
+        if (kegHasBackingCellar(keg.name, keg.version)) continue;
+        phantom_names[n] = alloc.dupe(u8, keg.name) catch continue;
+        phantom_versions[n] = alloc.dupe(u8, keg.version) catch {
+            alloc.free(phantom_names[n]);
+            continue;
+        };
+        n += 1;
+    }
+    defer for (phantom_names[0..n], phantom_versions[0..n]) |pn, pv| {
+        alloc.free(pn);
+        alloc.free(pv);
+    };
+
+    for (phantom_names[0..n], phantom_versions[0..n]) |pn, pv| {
+        if (dry_run) {
+            stdout.print("    Would prune phantom keg: {s} {s}\n", .{ pn, pv }) catch {};
+        } else {
+            db.recordRemoval(pn, alloc) catch |err| {
+                stdout.print("    warning: could not prune {s}: {s}\n", .{ pn, @errorName(err) }) catch {};
+                continue;
+            };
+            stdout.print("    Pruned phantom keg: {s} {s}\n", .{ pn, pv }) catch {};
+        }
+    }
+    return n;
 }
 
 fn runNuke(args: []const []const u8) void {
