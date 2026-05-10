@@ -63,13 +63,44 @@ pub fn discoverServices(alloc: std.mem.Allocator, io: std.Io) ![]Service {
                     var svc_path_buf: [1024]u8 = undefined;
                     const svc_path = std.fmt.bufPrint(&svc_path_buf, "{s}/{s}", .{ search_path, file_entry.name }) catch continue;
 
+                    // All-or-nothing: free any prior dupes if a later
+                    // alloc or append fails so we never leak a partial.
+                    const name_owned = alloc.dupe(u8, svc_name) catch continue;
+                    const label_owned = alloc.dupe(u8, label) catch {
+                        alloc.free(name_owned);
+                        continue;
+                    };
+                    const svc_path_owned = alloc.dupe(u8, svc_path) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        continue;
+                    };
+                    const keg_name_owned = alloc.dupe(u8, keg_name) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        continue;
+                    };
+                    const keg_version_owned = alloc.dupe(u8, ver_name) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        alloc.free(keg_name_owned);
+                        continue;
+                    };
                     services.append(alloc, .{
-                        .name = alloc.dupe(u8, svc_name) catch continue,
-                        .label = alloc.dupe(u8, label) catch continue,
-                        .plist_path = alloc.dupe(u8, svc_path) catch continue,
-                        .keg_name = alloc.dupe(u8, keg_name) catch continue,
-                        .keg_version = alloc.dupe(u8, ver_name) catch continue,
-                    }) catch {};
+                        .name = name_owned,
+                        .label = label_owned,
+                        .plist_path = svc_path_owned,
+                        .keg_name = keg_name_owned,
+                        .keg_version = keg_version_owned,
+                    }) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        alloc.free(keg_name_owned);
+                        alloc.free(keg_version_owned);
+                    };
                 }
             }
         }

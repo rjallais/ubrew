@@ -3443,7 +3443,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         stderr.print("nb: failed to discover services\n", .{}) catch {};
         return;
     };
-    defer alloc.free(services_list);
+    defer nb.services.freeServiceList(alloc, services_list);
 
     if (std.mem.eql(u8, subcmd, "list")) {
         if (services_list.len == 0) {
