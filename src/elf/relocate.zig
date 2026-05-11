@@ -24,50 +24,94 @@ const ELF_MAGIC = [4]u8{ 0x7f, 'E', 'L', 'F' };
 // Text config file extensions that may contain placeholders
 const TEXT_EXTS = [_][]const u8{ ".pc", ".cmake", ".la", ".sh", ".cfg" };
 
+// Process-wide coordination for the auto-install path. When `nb install`
+// fans out parallel workers and patchelf is missing, every worker would
+// otherwise race to run `apt-get install` simultaneously — but apt holds
+// /var/lib/dpkg/lock-frontend exclusively, so all but one worker would
+// fail and skip relocation. We serialize the bootstrap with a mutex and
+// memoize the result so subsequent workers find patchelf already present
+// (or fail fast without re-running the package manager).
+const PatchelfState = enum(u8) { unknown, present, install_failed };
+var patchelf_mutex: std.Io.Mutex = .init;
+var patchelf_state: PatchelfState = .unknown;
+
+/// Ensure patchelf is available, attempting a one-shot auto-install on
+/// first call. Safe to call concurrently — only one caller drives the
+/// install; the rest observe the cached outcome. Idempotent on success.
+pub fn ensurePatchelf(alloc: std.mem.Allocator, io: std.Io) error{PatchelfNotFound}!void {
+    patchelf_mutex.lockUncancelable(io);
+    defer patchelf_mutex.unlock(io);
+
+    switch (patchelf_state) {
+        .present => return,
+        .install_failed => return error.PatchelfNotFound,
+        .unknown => {},
+    }
+
+    if (hasPatchelf(alloc, io)) |_| {
+        patchelf_state = .present;
+        return;
+    } else |_| {}
+
+    ({
+        const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf not found — attempting auto-install...\n", .{}) catch "";
+        defer std.heap.smp_allocator.free(_tmp);
+        std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {};
+    });
+
+    // Try without sudo first (works in containers/root), then with sudo.
+    // Each entry is an optional refresh command (best-effort, e.g.
+    // `apt-get update`) followed by the install command. apt in particular
+    // requires a refresh on freshly-pulled container images where
+    // /var/lib/apt/lists is empty.
+    const Step = struct { refresh: ?[]const []const u8, install: []const []const u8 };
+    const install_cmds = [_]Step{
+        .{ .refresh = &.{ "apt-get", "update" }, .install = &.{ "apt-get", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "dnf", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "yum", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "apk", "add", "--no-cache", "patchelf" } },
+        .{ .refresh = &.{ "pacman", "-Sy", "--noconfirm" }, .install = &.{ "pacman", "-S", "--noconfirm", "patchelf" } },
+        .{ .refresh = &.{ "sudo", "apt-get", "update" }, .install = &.{ "sudo", "apt-get", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "sudo", "dnf", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "sudo", "yum", "install", "-y", "patchelf" } },
+        .{ .refresh = null, .install = &.{ "sudo", "apk", "add", "--no-cache", "patchelf" } },
+        .{ .refresh = &.{ "sudo", "pacman", "-Sy", "--noconfirm" }, .install = &.{ "sudo", "pacman", "-S", "--noconfirm", "patchelf" } },
+    };
+    for (install_cmds) |step| {
+        if (step.refresh) |refresh| {
+            if (std.process.run(alloc, io, .{ .argv = refresh })) |r| {
+                alloc.free(r.stdout);
+                alloc.free(r.stderr);
+            } else |_| {}
+        }
+        const result = std.process.run(alloc, io, .{
+            .argv = step.install,
+        }) catch continue;
+        alloc.free(result.stdout);
+        alloc.free(result.stderr);
+        if (result.term == .exited and result.term.exited == 0) break;
+    }
+
+    if (hasPatchelf(alloc, io)) |_| {
+        ({
+            const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf installed successfully\n", .{}) catch "";
+            defer std.heap.smp_allocator.free(_tmp);
+            std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {};
+        });
+        patchelf_state = .present;
+        return;
+    } else |_| {
+        patchelf_state = .install_failed;
+        return error.PatchelfNotFound;
+    }
+}
+
 /// Relocate all ELF files and text configs in a keg.
 pub fn relocateKeg(alloc: std.mem.Allocator, io: std.Io, name: []const u8, version: []const u8) !void {
-    hasPatchelf(alloc, io) catch {
-        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf not found — attempting auto-install...\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
-
-        // Try without sudo first (works in containers/root), then with sudo.
-        // Each entry is an optional refresh command (best-effort, e.g. `apt-get update`)
-        // followed by the install command. apt in particular requires a refresh on
-        // freshly-pulled container images where /var/lib/apt/lists is empty.
-        const Step = struct { refresh: ?[]const []const u8, install: []const []const u8 };
-        const install_cmds = [_]Step{
-            .{ .refresh = &.{ "apt-get", "update" }, .install = &.{ "apt-get", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "dnf", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "yum", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "apk", "add", "--no-cache", "patchelf" } },
-            .{ .refresh = &.{ "pacman", "-Sy", "--noconfirm" }, .install = &.{ "pacman", "-S", "--noconfirm", "patchelf" } },
-            .{ .refresh = &.{ "sudo", "apt-get", "update" }, .install = &.{ "sudo", "apt-get", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "sudo", "dnf", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "sudo", "yum", "install", "-y", "patchelf" } },
-            .{ .refresh = null, .install = &.{ "sudo", "apk", "add", "--no-cache", "patchelf" } },
-            .{ .refresh = &.{ "sudo", "pacman", "-Sy", "--noconfirm" }, .install = &.{ "sudo", "pacman", "-S", "--noconfirm", "patchelf" } },
-        };
-        for (install_cmds) |step| {
-            if (step.refresh) |refresh| {
-                if (std.process.run(alloc, io, .{ .argv = refresh })) |r| {
-                    alloc.free(r.stdout);
-                    alloc.free(r.stderr);
-                } else |_| {}
-            }
-            const result = std.process.run(alloc, io, .{
-                .argv = step.install,
-            }) catch continue;
-            alloc.free(result.stdout);
-            alloc.free(result.stderr);
-            if (result.term == .exited and result.term.exited == 0) break;
-        }
-
-        // Always recheck — handles race condition in parallel installs
-        hasPatchelf(alloc, io) catch {
-            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: {s}: could not install patchelf — ELF binary relocation skipped\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
-            ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: install patchelf manually (e.g. apt install patchelf) and re-run: nb reinstall {s}\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
-            return error.PatchelfNotFound;
-        };
-        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: patchelf installed successfully\n", .{}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
+    ensurePatchelf(alloc, io) catch {
+        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: {s}: could not install patchelf — ELF binary relocation skipped\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
+        ({ const _tmp = std.fmt.allocPrint(std.heap.smp_allocator, "nb: install patchelf manually (e.g. apt install patchelf) and re-run: nb reinstall {s}\n", .{name}) catch ""; defer std.heap.smp_allocator.free(_tmp); std.Io.File.stderr().writeStreamingAll(io, _tmp) catch {}; });
+        return error.PatchelfNotFound;
     };
 
     var keg_buf: [512]u8 = undefined;
