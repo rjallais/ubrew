@@ -49,14 +49,19 @@ pub fn extractDebToPrefixWithFiles(alloc: std.mem.Allocator, deb_path: []const u
 /// Extract the control.tar from a .deb to a temp directory and run postinst if present.
 /// Non-fatal — returns void and prints warnings on failure.
 /// If skip_postinst is true, logs a message and skips execution.
-pub fn runPostinst(alloc: std.mem.Allocator, deb_path: []const u8, pkg_name: []const u8, skip_postinst: bool) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn runPostinst(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, pkg_name: []const u8, skip_postinst: bool) void {
+    // Thread the caller's io rather than std.Io.Threaded.global_single_threaded.io().
+    // Zig 0.16's std.process.run rejects the unsynchronized singleton — under load
+    // it surfaces as error.OutOfMemory (and sometimes error.CopyFailed, see #276) when
+    // pipe-read aggregation tries to wait on the singleton's executor that has no
+    // worker threads available. Using the main thread's io fixes both classes.
+    const lib_io = io;
 
     const printErr = struct {
-        fn f(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+        fn f(p_io: std.Io, comptime fmt: []const u8, args: anytype) void {
             const msg = std.fmt.allocPrint(std.heap.smp_allocator, fmt, args) catch return;
             defer std.heap.smp_allocator.free(msg);
-            std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            std.Io.File.stderr().writeStreamingAll(p_io, msg) catch {};
         }
     }.f;
 
@@ -170,7 +175,7 @@ fn decompressDataTar(alloc: std.mem.Allocator, deb_path: []const u8) ![]u8 {
         },
         .zstd => try decompressZstd(alloc, member.data),
         .gzip => try decompressGzip(alloc, member.data),
-        .xz => try decompressXzFallback(alloc, deb_path, "data.tar"),
+        .xz => try decompressXz(alloc, member.data),
     };
 }
 
@@ -187,7 +192,7 @@ fn decompressControlTar(alloc: std.mem.Allocator, deb_path: []const u8) ![]u8 {
         },
         .zstd => try decompressZstd(alloc, member.data),
         .gzip => try decompressGzip(alloc, member.data),
-        .xz => try decompressXzFallback(alloc, deb_path, "control.tar"),
+        .xz => try decompressXz(alloc, member.data),
     };
 }
 
@@ -307,52 +312,16 @@ fn streamBounded(alloc: std.mem.Allocator, reader: *std.Io.Reader, max: usize) !
     return out.toOwnedSlice(alloc) catch error.OutOfMemory;
 }
 
-/// For xz, fall back to the system xz command since Zig's xz may need LZMA2.
-fn decompressXzFallback(alloc: std.mem.Allocator, deb_path: []const u8, member_prefix: []const u8) ![]u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
-    var member_buf: [128]u8 = undefined;
-    const member_name = std.fmt.bufPrint(&member_buf, "{s}.xz", .{member_prefix}) catch
-        return error.PathTooLong;
-
-    const ar_result = std.process.run(alloc, lib_io, .{
-        .argv = &.{ "ar", "p", deb_path, member_name },
-        .stdout_limit = .limited(512 * 1024 * 1024),
-        .stderr_limit = .limited(4096),
-    }) catch return error.DecompressFailed;
-    alloc.free(ar_result.stderr);
-
-    if (switch (ar_result.term) { .exited => |c| c != 0, else => true }) {
-        alloc.free(ar_result.stdout);
-        return error.DecompressFailed;
-    }
-
-    var xz_buf: [512]u8 = undefined;
-    const xz_tmp = std.fmt.bufPrint(&xz_buf, "{s}/xz_input.tmp", .{paths.TMP_DIR}) catch
-        return error.PathTooLong;
-
-    {
-        const tmp_file = std.Io.Dir.createFileAbsolute(lib_io, xz_tmp, .{}) catch return error.DecompressFailed;
-        tmp_file.writeStreamingAll(lib_io, ar_result.stdout) catch {
-            tmp_file.close(lib_io);
-            return error.DecompressFailed;
-        };
-        tmp_file.close(lib_io);
-    }
-    alloc.free(ar_result.stdout);
-    defer std.Io.Dir.deleteFileAbsolute(lib_io, xz_tmp) catch {};
-
-    const xz_result = std.process.run(alloc, lib_io, .{
-        .argv = &.{ "xz", "-d", "--stdout", xz_tmp },
-        .stdout_limit = .limited(512 * 1024 * 1024),
-        .stderr_limit = .limited(4096),
-    }) catch return error.DecompressFailed;
-    alloc.free(xz_result.stderr);
-
-    if (switch (xz_result.term) { .exited => |c| c != 0, else => true }) {
-        alloc.free(xz_result.stdout);
-        return error.DecompressFailed;
-    }
-    return xz_result.stdout;
+/// Decompress xz data in memory using Zig's native xz/LZMA2 decompressor.
+/// This used to shell out to the system `ar` and `xz` binaries, but `ar` is
+/// not pre-installed on minimal images (e.g. ubuntu:24.04) and the singleton
+/// io path was hitting the same OOM/CopyFailed issues as the postinst path.
+fn decompressXz(alloc: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    var in: std.Io.Reader = .fixed(compressed);
+    const buffer = try alloc.alloc(u8, 64 * 1024);
+    defer alloc.free(buffer);
+    var decomp = std.compress.xz.Decompress.init(&in, alloc, buffer) catch return error.DecompressFailed;
+    return streamBounded(alloc, &decomp.reader, max_decompressed_size);
 }
 
 const testing = std.testing;
@@ -432,7 +401,7 @@ test "isPathSafe allows normal deb paths" {
     try testing.expect(isPathSafe("usr/bin/program"));
 }
 
-test "xz fallback does not use shell interpolation" {
-    const T = @TypeOf(decompressXzFallback);
+test "xz decompress is a pure-Zig in-memory routine" {
+    const T = @TypeOf(decompressXz);
     _ = T;
 }

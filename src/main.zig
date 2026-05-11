@@ -4130,7 +4130,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
         for (extract_items.items) |item| {
             const pkg = resolved[item.pkg_idx];
             const cache_path = item.cache_path_storage[0..item.cache_path_len];
-            nb.deb_extract.runPostinst(alloc, cache_path, pkg.name, false);
+            nb.deb_extract.runPostinst(alloc, g_io, cache_path, pkg.name, false);
         }
     }
 
