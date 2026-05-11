@@ -18,6 +18,7 @@ const OPT_DIR = paths.OPT_DIR;
 const LIB_DIR = paths.LIB_DIR;
 const INCLUDE_DIR = paths.INCLUDE_DIR;
 const SHARE_DIR = paths.SHARE_DIR;
+const ETC_DIR = paths.ETC_DIR;
 const FORTUNE_NAME = "fortune";
 const FORTUNE_DEFAULT_DIR = SHARE_DIR ++ "/games/fortunes";
 const WRAPPER_DIR = "libexec/.nanobrew-wrappers";
@@ -25,6 +26,13 @@ const WRAPPER_DIR = "libexec/.nanobrew-wrappers";
 const SubdirMapping = struct {
     src: []const u8,
     dest: []const u8,
+    /// Don't overwrite a regular file that already exists at the destination.
+    /// Used for `etc/` so that first install symlinks the keg's defaults into
+    /// `<prefix>/etc/` (so packages like imagemagick can find delegates.xml,
+    /// pkg-config can find its system pc/, etc.) but a subsequent reinstall or
+    /// upgrade leaves a user-edited config file alone, matching Homebrew's
+    /// `etc/` semantics.
+    preserve_user_edits: bool = false,
 };
 
 pub const LinkMode = enum {
@@ -44,6 +52,7 @@ const subdir_mappings = [_]SubdirMapping{
     .{ .src = "lib", .dest = LIB_DIR },
     .{ .src = "include", .dest = INCLUDE_DIR },
     .{ .src = "share", .dest = SHARE_DIR },
+    .{ .src = "etc", .dest = ETC_DIR, .preserve_user_edits = true },
 };
 
 /// Extract the package name from a Cellar path.
@@ -100,7 +109,12 @@ fn symlinkTargetStartsWith(path: []const u8, prefix: []const u8) bool {
 }
 
 /// Recursively link files from keg_subdir into prefix_dest, with conflict detection.
-fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8) void {
+/// When `preserve_user_edits` is true, an existing regular file (i.e. not a
+/// symlink we control) at the destination is left untouched. This matches
+/// Homebrew's `etc/` semantics: first install drops the keg's default config
+/// in via a symlink, but anything the user has actually edited (or another
+/// package has placed) is preserved.
+fn linkSubdirOpts(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8, preserve_user_edits: bool) void {
     const lib_io = std.Io.Threaded.global_single_threaded.io();
 
     // Ensure destination directory exists
@@ -126,7 +140,7 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
 
         if (entry.kind == .directory) {
             // Recurse into subdirectory
-            linkSubdir(src, dest, keg_dir);
+            linkSubdirOpts(src, dest, keg_dir, preserve_user_edits);
             continue;
         }
 
@@ -149,8 +163,18 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
             // Same package — overwrite
             std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
         } else |_| {
-            // Not a symlink or doesn't exist — try to remove in case it's a regular file
-            std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
+            // Not a symlink — could be a regular file (user-edited config)
+            // or it doesn't exist. For etc/ we preserve user edits; for
+            // everything else we clobber the regular file (e.g. a stray
+            // bin/<binary> from a manual install) so the keg's symlink wins.
+            if (preserve_user_edits) {
+                if (std.Io.Dir.accessAbsolute(lib_io, dest, .{})) |_| {
+                    // Regular file already exists at dest — leave it alone.
+                    continue;
+                } else |_| {}
+            } else {
+                std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
+            }
         }
 
         std.Io.Dir.symLinkAbsolute(lib_io, src, dest, .{}) catch |err| {
@@ -159,6 +183,11 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
             std.Io.File.stderr().writeStreamingAll(lib_io, msg) catch {};
         };
     }
+}
+
+/// Backwards-compatible wrapper: link with no user-edit preservation.
+fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8) void {
+    linkSubdirOpts(keg_subdir, prefix_dest, keg_dir, false);
 }
 
 fn renderShimWrapper(
@@ -474,7 +503,7 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
                 .private_dependency => unlinkSubdir(keg_subdir, mapping.dest),
             }
         } else {
-            linkSubdir(keg_subdir, mapping.dest, keg_dir);
+            linkSubdirOpts(keg_subdir, mapping.dest, keg_dir, mapping.preserve_user_edits);
         }
     }
 

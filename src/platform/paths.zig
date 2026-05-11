@@ -11,6 +11,7 @@ pub const OPT_DIR = PREFIX ++ "/opt";
 pub const LIB_DIR = PREFIX ++ "/lib";
 pub const INCLUDE_DIR = PREFIX ++ "/include";
 pub const SHARE_DIR = PREFIX ++ "/share";
+pub const ETC_DIR = PREFIX ++ "/etc";
 pub const STORE_DIR = ROOT ++ "/store";
 /// Post-relocation store
 pub const STORE_RELOCATED_DIR = ROOT ++ "/store-relocated";

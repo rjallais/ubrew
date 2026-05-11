@@ -220,10 +220,84 @@ fn relocateFile(alloc: std.mem.Allocator, io: std.Io, path: []const u8) void {
     // /home/linuxbrew/.linuxbrew/ paths without @@HOMEBREW markers
     patchInterpreter(alloc, io, path);
 
+    // Linuxbrew bottles routinely bake the literal Linuxbrew prefix into
+    // .rodata for compile-time MAGICKCORE_CONFIGURE_PATH-style strings
+    // (imagemagick), pkg-config metadata embedded in tools, perl @INC,
+    // python sys.path defaults, etc. patchelf only rewrites RPATH /
+    // DT_NEEDED / interpreter; it can't touch arbitrary string data, so
+    // we do a NUL-padded in-place rewrite of `/home/linuxbrew/.linuxbrew/`
+    // → `<PREFIX>/`. The replacement is strictly shorter (27→21 bytes
+    // for /opt/nanobrew/prefix/), so we keep the trailing portion of
+    // the original string and pad the gap with NULs. Every consumer is
+    // a NUL-terminated C string, so the effective strlen shrinks while
+    // every other byte offset in the binary stays put — load commands
+    // and addend tables are untouched. See issue #269.
+    rewriteLiteralLinuxbrewPaths(io, path) catch {};
+
     // Only do rpath/needed if placeholders are present (saves subprocess cost)
     if (!elfContainsPlaceholder(io, file)) return;
 
     patchelfRelocateRpathAndNeeded(alloc, io, path);
+}
+
+const LINUXBREW_LITERAL = "/home/linuxbrew/.linuxbrew/";
+const PREFIX_SLASH = paths.PREFIX ++ "/";
+
+/// Find every occurrence of the literal Linuxbrew prefix in an ELF file
+/// and overwrite it in place with `<PREFIX>/`, NUL-padding the trailing
+/// bytes so the surrounding offsets are preserved. Skips files that have
+/// no occurrences (single read, no write).
+fn rewriteLiteralLinuxbrewPaths(io: std.Io, path: []const u8) !void {
+    comptime {
+        if (PREFIX_SLASH.len > LINUXBREW_LITERAL.len) {
+            @compileError("rewriteLiteralLinuxbrewPaths: replacement must not be longer than source");
+        }
+    }
+    const pad = LINUXBREW_LITERAL.len - PREFIX_SLASH.len;
+
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write }) catch return;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return;
+    const size: usize = @intCast(stat.size);
+    if (size == 0 or size > 256 * 1024 * 1024) return;
+
+    const alloc = std.heap.smp_allocator;
+    const buf = alloc.alloc(u8, size) catch return;
+    defer alloc.free(buf);
+
+    const read_n = file.readPositionalAll(io, buf, 0) catch return;
+    if (read_n == 0) return;
+    const data = buf[0..read_n];
+
+    // First pass: detect any hit so we skip the write on the common case.
+    if (std.mem.indexOf(u8, data, LINUXBREW_LITERAL) == null) return;
+
+    // Second pass: rewrite every occurrence in place. We don't try to
+    // identify "section starts" — strings can sit in .rodata, .data,
+    // .dynstr, .comment, etc. The C string that contains the prefix
+    // looks like  PREFIX/Cellar/imagemagick/.../etc/ImageMagick-7\0; we
+    // need to keep that whole string functional after replacement, not
+    // just the prefix. Strategy: locate the trailing NUL that ends the
+    // string, shift the tail (everything between the prefix's end and
+    // the NUL) leftward by `pad` bytes, write the new prefix at `hit`,
+    // and NUL-pad the freed-up tail bytes. This preserves every byte
+    // offset in the file (so other sections / addends are unaffected)
+    // and yields a correct C string of length `original_len - pad`.
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, data, i, LINUXBREW_LITERAL)) |hit| {
+        const tail_start = hit + LINUXBREW_LITERAL.len;
+        const null_pos_rel = std.mem.indexOfScalarPos(u8, data, tail_start, 0) orelse data.len;
+        const tail_len = null_pos_rel - tail_start;
+        // Shift the path tail left by `pad` to close the size gap, then
+        // overwrite the prefix and NUL-pad the freed bytes at the end.
+        std.mem.copyForwards(u8, data[hit + PREFIX_SLASH.len ..][0..tail_len], data[tail_start..null_pos_rel]);
+        @memcpy(data[hit..][0..PREFIX_SLASH.len], PREFIX_SLASH);
+        @memset(data[hit + PREFIX_SLASH.len + tail_len ..][0..pad], 0);
+        i = hit + PREFIX_SLASH.len + tail_len;
+    }
+
+    file.writePositionalAll(io, data, 0) catch return;
 }
 
 fn elfContainsPlaceholder(io: std.Io, file: std.Io.File) bool {
