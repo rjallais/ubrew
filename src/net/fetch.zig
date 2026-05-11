@@ -4,6 +4,7 @@
 // Follows redirects. Auto-decompresses gzip responses.
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 const flate = std.compress.flate;
 
 const DOWNLOAD_STREAM_BUFFER_SIZE = 256 * 1024;
@@ -64,7 +65,7 @@ fn requestOptions(
 /// Caller must free the returned slice with `alloc.free()`.
 /// Follows up to 5 redirects. Auto-decompresses gzip. Returns error on non-200 status.
 pub fn get(alloc: std.mem.Allocator, url: []const u8) ![]u8 {
-    var client: std.http.Client = .{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() };
+    var client: std.http.Client = .{ .allocator = alloc, .io = paths.safe_io };
     defer client.deinit();
     return getWithClient(alloc, &client, url);
 }
@@ -76,7 +77,7 @@ pub fn getWithClient(alloc: std.mem.Allocator, client: *std.http.Client, url: []
 
 /// Fetch a URL with additional headers and return the response body as an owned slice.
 pub fn getWithHeaders(alloc: std.mem.Allocator, url: []const u8, extra_headers: []const std.http.Header) ![]u8 {
-    var client: std.http.Client = .{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() };
+    var client: std.http.Client = .{ .allocator = alloc, .io = paths.safe_io };
     defer client.deinit();
     return getWithClientHeaders(alloc, &client, url, extra_headers);
 }
@@ -140,7 +141,7 @@ fn decompressGzip(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
 
 /// Fetch a URL and write the response body directly to a file.
 pub fn download(alloc: std.mem.Allocator, url: []const u8, dest_path: []const u8) !void {
-    var client: std.http.Client = .{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() };
+    var client: std.http.Client = .{ .allocator = alloc, .io = paths.safe_io };
     defer client.deinit();
     return downloadWithClient(&client, url, dest_path);
 }
@@ -172,7 +173,7 @@ pub fn downloadWithClientHeaders(client: *std.http.Client, url: []const u8, dest
         return error.FetchFailed;
     }
 
-    const _dl_io = std.Io.Threaded.global_single_threaded.io();
+    const _dl_io = paths.safe_io;
     var file = std.Io.Dir.createFileAbsolute(_dl_io, dest_path, .{}) catch {
         req.deinit();
         return error.FetchFailed;
@@ -237,7 +238,7 @@ pub fn downloadWithClientSha256Headers(
         return error.FetchFailed;
     }
 
-    const _dl_io = std.Io.Threaded.global_single_threaded.io();
+    const _dl_io = paths.safe_io;
     var file = std.Io.Dir.createFileAbsolute(_dl_io, dest_path, .{}) catch {
         req.deinit();
         return error.FetchFailed;

@@ -8,7 +8,7 @@
 // 5. No codesign step (Linux doesn't need it)
 //
 // Note: every std.process.run call below threads the caller's `io` rather
-// than std.Io.Threaded.global_single_threaded.io(). Zig 0.16's process
+// than paths.safe_io. Zig 0.16's process
 // subsystem rejects the unsynchronized singleton with a vtable mismatch
 // that surfaces as error.CopyFailed (see issue #276).
 

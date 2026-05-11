@@ -4,6 +4,7 @@
 // Used to select the correct APT mirror and release codename.
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 const builtin = @import("builtin");
 
 pub const DistroInfo = struct {
@@ -97,7 +98,7 @@ pub fn getComponents(id: []const u8) []const []const u8 {
 }
 
 fn readOsRelease(alloc: std.mem.Allocator) ?[]u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(lib_io, "/etc/os-release", .{}) catch return null;
     defer file.close(lib_io);
     var buf: [4096]u8 = undefined;

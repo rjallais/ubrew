@@ -16,7 +16,7 @@ const paths = @import("../platform/paths.zig");
 const telemetry = @import("../telemetry/client.zig");
 
 fn milliTimestamp() i64 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     const ts = std.Io.Timestamp.now(lib_io, .real);
     return @as(i64, @truncate(@divTrunc(ts.nanoseconds, std.time.ns_per_ms)));
 }
@@ -77,7 +77,7 @@ pub const ParallelDownloader = struct {
         // One TLS client per worker — reused across all items this worker handles.
         // std.http.Client pools connections; successive requests to the same host
         // reuse the existing TLS session instead of a full handshake each time.
-        var client: std.http.Client = .{ .allocator = ctx.gpa, .io = std.Io.Threaded.global_single_threaded.io() };
+        var client: std.http.Client = .{ .allocator = ctx.gpa, .io = paths.safe_io };
         defer client.deinit();
 
         // Per-download arena: zero GPA mutex calls per allocation; single deinit at exit.
@@ -308,7 +308,7 @@ fn fetchGhcrToken(alloc: std.mem.Allocator, client: *std.http.Client, url: []con
 
     const token = try fetchGhcrTokenUncached(alloc, client, repo);
     if (token) |t| {
-        const _lio = std.Io.Threaded.global_single_threaded.io();
+        const _lio = paths.safe_io;
         std.Io.Dir.createDirAbsolute(_lio, TOKEN_CACHE_DIR, .default_dir) catch {};
         if (std.Io.Dir.createFileAbsolute(_lio, cache_path, .{})) |file| {
             file.writeStreamingAll(_lio, t) catch {};
@@ -346,7 +346,7 @@ fn fetchGhcrTokenUncached(alloc: std.mem.Allocator, client: *std.http.Client, re
 }
 
 fn readCachedToken(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const _lio = std.Io.Threaded.global_single_threaded.io();
+    const _lio = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(_lio, path, .{}) catch return null;
     const stat = file.stat(_lio) catch { file.close(_lio); return null; };
     const now_ns = std.Io.Timestamp.now(_lio, .real).nanoseconds;
@@ -446,7 +446,7 @@ fn downloadOneWithClient(
     const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "{s}/{s}.dl", .{ TMP_DIR, req.expected_sha256 }) catch return error.PathTooLong;
 
     {
-        const _lio_dl = std.Io.Threaded.global_single_threaded.io();
+        const _lio_dl = paths.safe_io;
         var file = std.Io.Dir.createFileAbsolute(_lio_dl, tmp_path, .{}) catch return error.DownloadFailed;
         var file_writer_buf: [65536]u8 = undefined;
         var file_writer = file.writer(_lio_dl, &file_writer_buf);
@@ -483,7 +483,7 @@ fn downloadOneWithClient(
     }
 
     // Atomic rename to final path
-    std.Io.Dir.renameAbsolute(tmp_path, dest_path, std.Io.Threaded.global_single_threaded.io()) catch |err| {
+    std.Io.Dir.renameAbsolute(tmp_path, dest_path, paths.safe_io) catch |err| {
         if (err == error.PathAlreadyExists) {
             if (bench) {
                 const sha = req.expected_sha256;
@@ -504,13 +504,13 @@ fn downloadOneWithClient(
 /// Public single-download entry point for callers without a persistent client.
 /// Workers should call downloadOneWithClient directly for connection reuse.
 pub fn downloadOne(alloc: std.mem.Allocator, req: DownloadRequest) !void {
-    var client: std.http.Client = .{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() };
+    var client: std.http.Client = .{ .allocator = alloc, .io = paths.safe_io };
     defer client.deinit();
     return downloadOneWithClient(alloc, &client, req, null);
 }
 
 fn fileExists(path: []const u8) bool {
-    const _lio_fe = std.Io.Threaded.global_single_threaded.io();
+    const _lio_fe = paths.safe_io;
     const f = std.Io.Dir.openFileAbsolute(_lio_fe, path, .{}) catch return false;
     f.close(_lio_fe);
     return true;

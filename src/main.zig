@@ -111,6 +111,12 @@ const VERSION = "0.1.193";
 
 pub fn main(init: std.process.Init) !void {
     g_io = init.io;
+    // Publish a process-wide threadsafe Io for code paths called from
+    // worker threads (downloader workers, api/client cache writers,
+    // leaves/outdated checkers, etc.) that previously hit
+    // `paths.safe_io` and crashed under
+    // concurrent use. See paths.zig for the full rationale.
+    paths.safe_io = init.io;
     const alloc = init.gpa;
 
     const args_raw = try init.minimal.args.toSlice(init.arena.allocator());
@@ -3966,7 +3972,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
             const debWorkerFn = struct {
                 fn run(ctx: DebWorkerCtx) void {
                     // One HTTP client per thread — reuses TCP+TLS connections
-                    var dl_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = std.Io.Threaded.global_single_threaded.io() };
+                    var dl_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = paths.safe_io };
                     defer dl_client.deinit();
 
                     while (true) {
@@ -3980,7 +3986,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                         var telemetry_event = nb.telemetry.DownloadEvent.start(.artifact, name);
                         downloadDebWithSha256(&dl_client, url, item.sha256, dest, ctx.verify) catch {
                             // Retry once with fresh client (connection may have been reset)
-                            var retry_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = std.Io.Threaded.global_single_threaded.io() };
+                            var retry_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = paths.safe_io };
                             defer retry_client.deinit();
                             downloadDebWithSha256(&retry_client, url, item.sha256, dest, ctx.verify) catch {
                                 telemetry_event.fail();
@@ -4099,7 +4105,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     // The `io` field is the main thread's `g_io` (a real threadsafe
     // Threaded executor); workers share it for createFile/writeStreaming/
     // deleteFile inside `native_tar.extractToDir`. Previously every
-    // worker called `std.Io.Threaded.global_single_threaded.io()` directly
+    // worker called `paths.safe_io` directly
     // from inside extractToDir/writeFile/makeDirRecursive — the singleton
     // is "init_single_threaded" by design and its vtable + internal pipe
     // state corrupted under concurrent use, surfacing as the `nb install

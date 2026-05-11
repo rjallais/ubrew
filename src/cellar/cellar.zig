@@ -59,7 +59,7 @@ pub fn detectKegVersion(name: []const u8, version: []const u8, result_buf: *[256
 
 /// Remove a keg from the Cellar.
 pub fn remove(name: []const u8, version: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var buf: [512]u8 = undefined;
     const keg_dir = std.fmt.bufPrint(&buf, "{s}/{s}/{s}", .{ paths.CELLAR_DIR, name, version }) catch return error.PathTooLong;
     std.Io.Dir.cwd().deleteTree(lib_io, keg_dir) catch {};
@@ -78,7 +78,7 @@ pub fn remove(name: []const u8, version: []const u8) !void {
 }
 
 fn detectStoreVersion(name_dir: []const u8, version: []const u8, result_buf: *[256]u8) ?[]const u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var exact_buf: [512]u8 = undefined;
     const exact = std.fmt.bufPrint(&exact_buf, "{s}/{s}", .{ name_dir, version }) catch return null;
     if (std.Io.Dir.openDirAbsolute(lib_io, exact, .{})) |d| {

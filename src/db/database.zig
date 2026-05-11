@@ -57,7 +57,7 @@ pub const Database = struct {
             .history = std.StringHashMap(std.ArrayList(HistoryEntry)).init(alloc),
         };
 
-        const lib_io = std.Io.Threaded.global_single_threaded.io();
+        const lib_io = paths.safe_io;
         const file = std.Io.Dir.openFileAbsolute(lib_io, DB_PATH, .{}) catch return db;
         defer file.close(lib_io);
 
@@ -67,7 +67,7 @@ pub const Database = struct {
         const contents = alloc.alloc(u8, sz) catch return db;
         const n_read = file.readPositionalAll(lib_io, contents, 0) catch {
             alloc.free(contents);
-            std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), "warning: nanobrew database read failed: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database read failed: " ++ DB_PATH ++ "\n") catch {};
             return db;
         };
         defer alloc.free(contents);
@@ -75,7 +75,7 @@ pub const Database = struct {
         if (data.len == 0) return db;
 
         const parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch {
-            std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), "warning: nanobrew database parse failed; returning empty database. File may be corrupted: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database parse failed; returning empty database. File may be corrupted: " ++ DB_PATH ++ "\n") catch {};
             return db;
         };
         defer parsed.deinit();
@@ -270,7 +270,7 @@ pub const Database = struct {
 
     pub fn close(self: *Database) void {
         self.save() catch |err| {
-            var _warn_buf: [256]u8 = undefined; const _warn_msg = std.fmt.bufPrint(&_warn_buf, "nb: WARNING: failed to save package database: {}\n", .{err}) catch "nb: WARNING: failed to save package database\n"; std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _warn_msg) catch {};
+            var _warn_buf: [256]u8 = undefined; const _warn_msg = std.fmt.bufPrint(&_warn_buf, "nb: WARNING: failed to save package database: {}\n", .{err}) catch "nb: WARNING: failed to save package database\n"; std.Io.File.stderr().writeStreamingAll(paths.safe_io, _warn_msg) catch {};
         };
         for (self.kegs.items) |keg| {
             self.alloc.free(keg.name);
@@ -308,7 +308,7 @@ pub const Database = struct {
     }
 
     pub fn recordInstall(self: *Database, name: []const u8, version: []const u8, sha256: []const u8) !void {
-        const _lib_io_ri = std.Io.Threaded.global_single_threaded.io();
+        const _lib_io_ri = paths.safe_io;
         const _now_ts = std.Io.Timestamp.now(_lib_io_ri, .real);
         const now: i64 = @as(i64, @truncate(@divTrunc(_now_ts.nanoseconds, std.time.ns_per_s)));
 
@@ -562,7 +562,7 @@ pub const Database = struct {
     fn save(self: *Database) !void {
         if (!self.dirty) return;
         const tmp_path = DB_PATH ++ ".tmp";
-        const lib_io = std.Io.Threaded.global_single_threaded.io();
+        const lib_io = paths.safe_io;
         const file = try std.Io.Dir.createFileAbsolute(lib_io, tmp_path, .{});
         errdefer std.Io.Dir.deleteFileAbsolute(lib_io, tmp_path) catch {};
 

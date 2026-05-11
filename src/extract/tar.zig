@@ -95,6 +95,6 @@ fn extractTarGzOwnParser(alloc: std.mem.Allocator, io: std.Io, blob_path: []cons
 const testing = std.testing;
 
 test "extractToStore rejects invalid sha256" {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     try testing.expectError(error.InvalidSha256, extractToStore(testing.allocator, lib_io, "/tmp/blob", "invalid"));
 }

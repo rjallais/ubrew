@@ -8,3 +8,4 @@ tweet*.md
 .DS_Store
 registry/upstream-release-db.json
 .wrangler/
+nb-linux-fresh

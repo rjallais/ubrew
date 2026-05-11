@@ -3,6 +3,7 @@
 // Parses the curated registry used by the future direct-upstream resolver.
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 const flate = std.compress.flate;
 
 pub const DEFAULT_REGISTRY_PATH = "registry/upstream.json";
@@ -444,7 +445,7 @@ fn envSlice(name: [*:0]const u8) ?[]const u8 {
 }
 
 fn fetchRemoteRegistryJson(alloc: std.mem.Allocator, url: []const u8) ![]u8 {
-    var client: std.http.Client = .{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() };
+    var client: std.http.Client = .{ .allocator = alloc, .io = paths.safe_io };
     defer client.deinit();
 
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
@@ -506,7 +507,7 @@ fn decompressGzip(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
 
 fn readRegistryCache(alloc: std.mem.Allocator, path: []const u8, ttl_ns: i96) ?CachedRegistryJson {
     if (path.len == 0) return null;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     const file = openReadableFile(io, path) catch return null;
     defer file.close(io);
 
@@ -534,7 +535,7 @@ fn readRegistryCache(alloc: std.mem.Allocator, path: []const u8, ttl_ns: i96) ?C
 
 fn writeRegistryCache(path: []const u8, data: []const u8) void {
     if (path.len == 0) return;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     if (std.fs.path.dirname(path)) |dir_path| {
         if (std.fs.path.isAbsolute(dir_path)) {
             std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch {};

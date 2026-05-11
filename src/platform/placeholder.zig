@@ -49,7 +49,7 @@ pub fn replacePlaceholders(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 
 /// Scan a file for @@HOMEBREW placeholder bytes.
 pub fn fileContainsPlaceholder(path: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var file = std.Io.Dir.openFileAbsolute(lib_io, path, .{}) catch return false;
     var buf: [65536]u8 = undefined;
     var overlap: usize = 0;

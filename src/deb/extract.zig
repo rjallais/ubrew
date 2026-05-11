@@ -52,7 +52,7 @@ pub fn extractDebToPrefixWithFiles(alloc: std.mem.Allocator, io: std.Io, deb_pat
 /// Non-fatal — returns void and prints warnings on failure.
 /// If skip_postinst is true, logs a message and skips execution.
 pub fn runPostinst(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, pkg_name: []const u8, skip_postinst: bool) void {
-    // Thread the caller's io rather than std.Io.Threaded.global_single_threaded.io().
+    // Thread the caller's io rather than paths.safe_io.
     // Zig 0.16's std.process.run rejects the unsynchronized singleton — under load
     // it surfaces as error.OutOfMemory (and sometimes error.CopyFailed, see #276) when
     // pipe-read aggregation tries to wait on the singleton's executor that has no

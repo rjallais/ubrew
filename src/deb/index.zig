@@ -191,7 +191,7 @@ fn binaryCachePath(buf: []u8, distro_id: []const u8, codename: []const u8, compo
 }
 
 fn ensureCacheDir() void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     std.Io.Dir.createDirAbsolute(lib_io, paths.APT_CACHE_DIR, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => {
@@ -298,7 +298,7 @@ pub fn deserializeIndex(alloc: std.mem.Allocator, data: []const u8) !ParsedIndex
 
 /// Try to read a cached binary index. Returns ParsedIndex on hit, null on miss/stale.
 pub fn readCachedBinaryIndex(alloc: std.mem.Allocator, distro_id: []const u8, codename: []const u8, component: []const u8, arch: []const u8) ?ParsedIndex {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var path_buf: [512]u8 = undefined;
     const cache_file = binaryCachePath(&path_buf, distro_id, codename, component, arch) orelse return null;
 
@@ -337,7 +337,7 @@ pub fn readCachedBinaryIndex(alloc: std.mem.Allocator, distro_id: []const u8, co
 
 /// Write a binary index cache for a given component.
 pub fn writeCachedBinaryIndex(distro_id: []const u8, codename: []const u8, component: []const u8, arch: []const u8, alloc: std.mem.Allocator, packages: []const DebPackage) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     ensureCacheDir();
 
     var path_buf: [512]u8 = undefined;
@@ -353,7 +353,7 @@ pub fn writeCachedBinaryIndex(distro_id: []const u8, codename: []const u8, compo
 
 /// Invalidate (delete) all cached APT index files.
 pub fn invalidateCache() void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var dir = std.Io.Dir.openDirAbsolute(lib_io, paths.APT_CACHE_DIR, .{ .iterate = true }) catch return;
     defer dir.close(lib_io);
 

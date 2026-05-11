@@ -12,6 +12,7 @@
 //   - Path traversal protection (rejects ".." components and absolute paths)
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 
 const BLOCK_SIZE = 512;
 
@@ -246,7 +247,7 @@ pub fn listFiles(alloc: std.mem.Allocator, tar_data: []const u8) !TarListResult 
 /// `io` must be threadsafe — when this is called from a parallel extract
 /// worker pool (e.g. `nb install --deb` fanning out 8 workers), every
 /// thread shares this `io` to do its createFile/writeStreaming/delete
-/// calls. Earlier versions used `std.Io.Threaded.global_single_threaded.io()`
+/// calls. Earlier versions used `paths.safe_io`
 /// here and the singleton's vtable + pipe-aggregation state would corrupt
 /// under concurrent use, surfacing as `nb install --deb cowsay` SIGSEGV.
 /// Always thread the caller's `g_io` through.
@@ -610,11 +611,13 @@ test "extractToDir - hardlink entry creates a link to an earlier regular file (i
     // Extract into a unique temp dir
     var tmp_buf: [128]u8 = undefined;
     const tmp_dir = std.fmt.bufPrint(&tmp_buf, "/tmp/nb-test-hardlink-{d}", .{std.c.getpid()}) catch unreachable;
+    // Test path: single-threaded use, the singleton is fine. The hot
+    // path uses `paths.safe_io` (initialized in main) instead.
     const lib_io = std.Io.Threaded.global_single_threaded.io();
     std.Io.Dir.createDirAbsolute(lib_io, tmp_dir, .default_dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(lib_io, tmp_dir) catch {};
 
-    const files = try extractToDir(alloc, &tar_data, tmp_dir);
+    const files = try extractToDir(alloc, lib_io, &tar_data, tmp_dir);
     defer {
         for (files) |f| alloc.free(f);
         alloc.free(files);
