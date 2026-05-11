@@ -318,9 +318,20 @@ fn streamBounded(alloc: std.mem.Allocator, reader: *std.Io.Reader, max: usize) !
 /// io path was hitting the same OOM/CopyFailed issues as the postinst path.
 fn decompressXz(alloc: std.mem.Allocator, compressed: []const u8) ![]u8 {
     var in: std.Io.Reader = .fixed(compressed);
+    // std.compress.xz.Decompress takes ownership of this buffer and may
+    // realloc it via `alloc` once the decompressed payload exceeds the
+    // initial size. We must release it through `decomp.deinit()` — calling
+    // `alloc.free(buffer)` on the original slice would free a pointer that
+    // Decompress has already realloc'd away, corrupting the gpa free-list
+    // and causing a SIGSEGV on the next allocation in the same process
+    // (only reproducible on multi-package reinstalls where the .deb cache
+    // is warm and parallel extract workers fire allocations back-to-back).
     const buffer = try alloc.alloc(u8, 64 * 1024);
-    defer alloc.free(buffer);
-    var decomp = std.compress.xz.Decompress.init(&in, alloc, buffer) catch return error.DecompressFailed;
+    var decomp = std.compress.xz.Decompress.init(&in, alloc, buffer) catch {
+        alloc.free(buffer);
+        return error.DecompressFailed;
+    };
+    defer decomp.deinit();
     return streamBounded(alloc, &decomp.reader, max_decompressed_size);
 }
 
