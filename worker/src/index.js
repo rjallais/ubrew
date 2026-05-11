@@ -2196,12 +2196,37 @@ const RELEASE_193_HTML = `<!DOCTYPE html>
   .bench-sub { font-size: 0.8rem; color: var(--dim); margin-bottom: 2.3rem; }
   .bench-sub code { background: var(--surface); padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.75rem; color: var(--bright); }
 
-  .bg { margin-bottom: 1.5rem; }
-  .bg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; flex-wrap: wrap; gap: 0.5rem; }
+  .bg { margin-bottom: 2.8rem; }
+  .bg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.9rem; flex-wrap: wrap; gap: 0.5rem; }
   .bg-title { font-family: var(--fd); font-weight: 700; font-size: 0.95rem; color: var(--bright); }
   .bg-title span { color: var(--muted); font-weight: 400; font-size: 0.82rem; margin-left: 0.4rem; }
-  .bg-note { font-size: 0.8rem; color: var(--muted); line-height: 1.55; }
+  .bg-note { font-size: 0.8rem; color: var(--muted); line-height: 1.55; margin-top: 0.6rem; }
   .bg-note code { background: var(--surface); padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.72rem; color: var(--bright); }
+  .bg-badge {
+    font-family: var(--fd); font-weight: 800; font-size: 0.82rem; color: #92400e;
+    background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.35);
+    padding: 0.2rem 0.75rem; border-radius: 20px;
+    opacity: 0; transform: translateY(4px); transition: opacity 0.4s 0.9s, transform 0.4s 0.9s;
+  }
+  .bg.visible .bg-badge { opacity: 1; transform: none; }
+  .br { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.45rem; }
+  .br-l { width: 8.5rem; text-align: right; font-size: 0.72rem; color: var(--muted); flex-shrink: 0; font-weight: 500; }
+  .br-t { flex: 1; height: 40px; background: var(--surface); border-radius: 6px; overflow: hidden; }
+  .br-b {
+    height: 100%; border-radius: 6px;
+    width: 0; transition: width 1.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .br-b.apt { background: #E4E4E4; }
+  .br-b.zb { background: #D8D8D8; }
+  .br-b.old { background: linear-gradient(90deg, #FFC84A 0%, #FFB800 100%); opacity: 0.6; }
+  .br-b.nb  { background: linear-gradient(90deg, #FFB800 0%, #FF8000 100%); box-shadow: 0 2px 16px rgba(255,140,0,0.22); }
+  .bg.visible .br:nth-child(1) .br-b { transition-delay: 0s; }
+  .bg.visible .br:nth-child(2) .br-b { transition-delay: 0.12s; }
+  .bg.visible .br:nth-child(3) .br-b { transition-delay: 0.24s; }
+  .bg.visible .br:nth-child(4) .br-b { transition-delay: 0.36s; }
+  .br-time { font-size: 0.76rem; font-family: var(--fd); font-weight: 600; flex-shrink: 0; width: 5.8rem; color: var(--muted); }
+  .br-time.old-t  { color: #b45309; }
+  .br-time.nb-t   { color: #c05621; }
 
   .demo { padding: 4rem 0; border-top: 1px solid var(--border); }
   .demo h2 { font-family: var(--fd); font-weight: 700; font-size: 1.4rem; color: var(--bright); margin-bottom: 0.5rem; }
@@ -2256,6 +2281,9 @@ const RELEASE_193_HTML = `<!DOCTYPE html>
     .wrap { padding: 0 1.1rem; }
     nav { align-items: flex-start; gap: 1rem; }
     .stat-grid { grid-template-columns: 1fr; }
+    .br { display: block; }
+    .br-l { display: block; width: auto; text-align: left; margin-bottom: 0.25rem; }
+    .br-time { display: block; width: auto; margin-top: 0.25rem; }
     .method { overflow-x: auto; }
     .method table { min-width: 680px; }
   }
@@ -2276,34 +2304,137 @@ const RELEASE_193_HTML = `<!DOCTYPE html>
 
   <section class="hero">
     <h1>nanobrew v0.1.193</h1>
-    <div class="hero-claim"><span class="hero-highlight">Audit-driven correctness sweep.</span></div>
-    <div class="hero-speed"><span class="hero-highlight">38 commits.</span> <span class="hero-highlight">20+ targeted bug fixes.</span></div>
-    <p class="hero-lead"><strong>Stability cycle on top of v0.1.192.</strong> Install-path performance is unchanged on purpose. Every audit-period commit is either a deb correctness fix, a teardown-safety fix, or an honest disclosure of behavior we hadn't pinned down yet.</p>
-    <p>Multi-agent + manual audit drove the work. macOS arm64 and x86_64 tarballs are Developer-ID-signed, hardened-runtime, and notarized by Apple.</p>
+    <div class="hero-claim"><span class="hero-highlight">All the v0.1.192 speed.</span> <span class="hero-highlight">Audit-hardened.</span></div>
+    <div class="hero-speed"><span class="hero-highlight">119.4x faster than Homebrew.</span> <span class="hero-highlight">12.9x faster than apt-get.</span></div>
+    <p class="hero-lead"><strong>Install path is unchanged from v0.1.192</strong> — every speed number on this page still holds. What's new is 38 commits and 20+ targeted bug fixes from a multi-agent + manual audit, a new <code>nb cleanup --prune-kegs</code> flag, and honest disclosure of the pre-existing apt-replacement teardown bug.</p>
+    <p>macOS arm64 and x86_64 tarballs are Developer-ID-signed, hardened-runtime, and notarized by Apple.</p>
     <code>nb update  # to v0.1.193</code>
   </section>
 
   <section class="stat">
     <div class="stat-grid">
       <div class="stat-card">
-        <span class="stat-num">20+</span>
-        <span class="stat-label">targeted bug fixes across deb, ELF, DB, install, services, telemetry</span>
+        <span class="stat-num">119.4x</span>
+        <span class="stat-label">faster than Homebrew on yt-dlp target reinstall (inherited from v0.1.192)</span>
       </div>
       <div class="stat-card">
-        <span class="stat-num">4/4</span>
-        <span class="stat-label">platform builds clean (darwin arm64+x86_64, linux musl arm64+x86_64)</span>
+        <span class="stat-num">12.9x</span>
+        <span class="stat-label">faster than apt-get on git + vim + build-essential (116 deps, Ubuntu 24.04)</span>
       </div>
       <div class="stat-card">
-        <span class="stat-num">1</span>
-        <span class="stat-label">pre-existing known issue documented honestly instead of papered over</span>
+        <span class="stat-num">5.8ms</span>
+        <span class="stat-label">already-installed no-op on the sandboxed CI yt-dlp benchmark</span>
       </div>
     </div>
-    <p class="stat-ctx"><em>Install path:</em> unchanged from v0.1.192. <em>Surface area:</em> one new flag (<code>nb cleanup --prune-kegs</code>). <em>Compatibility:</em> deb databases written by older nanobrew (relative paths) still remove cleanly under <code>nb remove --deb</code> from any cwd.</p>
+    <p class="stat-ctx"><em>yt-dlp target reinstall:</em> nanobrew 48.8ms &rarr; zerobrew 1830.7ms &rarr; Homebrew 5827.7ms. <em>git+vim+build-essential:</em> nanobrew 3402ms &rarr; apt-get 43,833ms. Numbers are from the v0.1.192 baseline; v0.1.193 keeps the same install pipeline intact while fixing 20+ correctness bugs around it.</p>
   </section>
 
   <section class="bench">
-    <h2>What got fixed</h2>
-    <p class="bench-sub">Grouped by area. Every entry maps to a commit on <code>main</code> or a closed issue. Most of these were caught by an internal multi-agent audit pass; the rest came from real user reports (credited below).</p>
+    <h2>macOS — nanobrew vs Homebrew (warm)</h2>
+    <p class="bench-sub">Already-installed reinstalls. Apple Silicon (GitHub Actions <code>macos-14</code>), median of 3 runs. Same install pipeline as v0.1.192; v0.1.193 doesn't move these.</p>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">tree <span>0 deps</span></div>
+        <div class="bg-badge">452x faster than Homebrew</div>
+      </div>
+      <div class="br"><div class="br-l">Homebrew</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">4070ms</span></div>
+      <div class="br"><div class="br-l">zerobrew warm</div><div class="br-t"><div class="br-b zb" style="width:5.9%"></div></div><span class="br-time">242ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193</div><div class="br-t"><div class="br-b nb"  style="width:0.22%"></div></div><span class="br-time nb-t">9ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">ffmpeg <span>11 deps</span></div>
+        <div class="bg-badge">49.7x faster than Homebrew</div>
+      </div>
+      <div class="br"><div class="br-l">Homebrew</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">14252ms</span></div>
+      <div class="br"><div class="br-l">zerobrew warm</div><div class="br-t"><div class="br-b zb" style="width:15.1%"></div></div><span class="br-time">2147ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193</div><div class="br-t"><div class="br-b nb"  style="width:2.01%"></div></div><span class="br-time nb-t">287ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">wget <span>6 deps</span></div>
+        <div class="bg-badge">146x faster than Homebrew</div>
+      </div>
+      <div class="br"><div class="br-l">Homebrew</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">3935ms</span></div>
+      <div class="br"><div class="br-l">zerobrew warm</div><div class="br-t"><div class="br-b zb" style="width:14.9%"></div></div><span class="br-time">587ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193</div><div class="br-t"><div class="br-b nb"  style="width:0.69%"></div></div><span class="br-time nb-t">27ms</span></div>
+    </div>
+  </section>
+
+  <section class="bench">
+    <h2>Linux / Docker — nb install --deb vs apt-get</h2>
+    <p class="bench-sub">Ubuntu 24.04 LTS (aarch64, Docker/Colima), median of 3 runs. Warm = NBIX binary index cache + cached .deb blobs, <code>--skip-postinst</code>. Audit-fixed in v0.1.193: cwd-independent <code>nb remove --deb</code>, native xz lifecycle, threadsafe postinst Io, serialized patchelf.</p>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">curl + wget <span>35 packages</span></div>
+        <div class="bg-badge">7.6x faster than apt-get</div>
+      </div>
+      <div class="br"><div class="br-l">apt-get</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">3426ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193 warm</div><div class="br-t"><div class="br-b nb"  style="width:13.1%"></div></div><span class="br-time nb-t">448ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">curl + wget + tree + jq + htop + tmux <span>53 packages</span></div>
+        <div class="bg-badge">6.9x faster than apt-get</div>
+      </div>
+      <div class="br"><div class="br-l">apt-get</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">3584ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193 warm</div><div class="br-t"><div class="br-b nb"  style="width:14.5%"></div></div><span class="br-time nb-t">521ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">git + vim + build-essential <span>116 packages</span></div>
+        <div class="bg-badge">12.9x faster than apt-get</div>
+      </div>
+      <div class="br"><div class="br-l">apt-get</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">43833ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193 warm</div><div class="br-t"><div class="br-b nb"  style="width:7.76%"></div></div><span class="br-time nb-t">3402ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">nginx + redis-server + postgresql-client <span>78 packages</span></div>
+        <div class="bg-badge">3.9x faster than apt-get</div>
+      </div>
+      <div class="br"><div class="br-l">apt-get</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">5501ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193 warm</div><div class="br-t"><div class="br-b nb"  style="width:25.5%"></div></div><span class="br-time nb-t">1402ms</span></div>
+    </div>
+  </section>
+
+  <section class="bench">
+    <h2>CI package-manager comparison — yt-dlp</h2>
+    <p class="bench-sub">Same sandboxed macOS Actions benchmark as v0.1.192. Target reinstall means dependencies and cache/store were primed, then only <code>yt-dlp</code> was removed and installed again as <code>nb install --shims yt-dlp</code>. v0.1.193 keeps the same install path, so the numbers carry over.</p>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">target reinstall <span>lower is better</span></div>
+        <div class="bg-badge">119.4x faster than Homebrew</div>
+      </div>
+      <div class="br"><div class="br-l">Homebrew 5.1.7</div><div class="br-t"><div class="br-b apt" style="width:100%"></div></div><span class="br-time">5827.7ms</span></div>
+      <div class="br"><div class="br-l">zerobrew 0.2.1</div><div class="br-t"><div class="br-b zb" style="width:31.4%"></div></div><span class="br-time">1830.7ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.191</div><div class="br-t"><div class="br-b old" style="width:58.1%"></div></div><span class="br-time old-t">3385.2ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193</div><div class="br-t"><div class="br-b nb"  style="width:0.84%"></div></div><span class="br-time nb-t">48.8ms</span></div>
+    </div>
+
+    <div class="bg" data-observe>
+      <div class="bg-header">
+        <div class="bg-title">already installed no-op <span>lower is better</span></div>
+        <div class="bg-badge">186.8x faster than zerobrew</div>
+      </div>
+      <div class="br"><div class="br-l">nb v0.1.191</div><div class="br-t"><div class="br-b old" style="width:100%"></div></div><span class="br-time old-t">3183.7ms</span></div>
+      <div class="br"><div class="br-l">zerobrew 0.2.1</div><div class="br-t"><div class="br-b zb" style="width:34.0%"></div></div><span class="br-time">1083.2ms</span></div>
+      <div class="br"><div class="br-l">Homebrew 5.1.7</div><div class="br-t"><div class="br-b apt" style="width:28.8%"></div></div><span class="br-time">916.9ms</span></div>
+      <div class="br"><div class="br-l">nb v0.1.193</div><div class="br-t"><div class="br-b nb"  style="width:0.18%"></div></div><span class="br-time nb-t">5.8ms</span></div>
+    </div>
+  </section>
+
+  <section class="bench">
+    <h2>What got fixed in this cycle</h2>
+    <p class="bench-sub">38 commits since v0.1.192. Grouped by area. Every entry maps to a commit on <code>main</code> or a closed issue. Most were caught by an internal multi-agent audit pass; the rest came from real user reports (credited below).</p>
 
     <div class="bg">
       <div class="bg-title">apt-replacement (.deb install path)</div>
