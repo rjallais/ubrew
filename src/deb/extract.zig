@@ -108,8 +108,24 @@ pub fn runPostinst(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, p
             alloc.free(chmod_result.stderr);
         } else |_| {}
 
+        // Postinst scripts in real Debian packages routinely shell out to
+        // `update-alternatives`, `ldconfig`, `systemctl`, etc. — without an
+        // explicit PATH the spawned shell sees whatever `nb` was launched
+        // with, which on container shells like Ubuntu's slim init is just
+        // /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        // anyway, but on minimal Alpine/musl init or a sudo-stripped
+        // environment it can be empty and the script silently fails to
+        // find its tools. Force a sane sysadmin PATH plus DEBIAN_FRONTEND
+        // so the scripts don't try to launch interactive prompts.
+        var env_map = std.process.Environ.Map.init(alloc);
+        defer env_map.deinit();
+        env_map.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") catch {};
+        env_map.put("DEBIAN_FRONTEND", "noninteractive") catch {};
+        env_map.put("HOME", "/root") catch {};
+
         const run_result = std.process.run(alloc, lib_io, .{
             .argv = &.{ postinst_path, "configure" },
+            .environ_map = &env_map,
             .stdout_limit = .limited(1024 * 1024),
             .stderr_limit = .limited(1024 * 1024),
         }) catch |err| {

@@ -309,6 +309,18 @@ pub fn readCachedBinaryIndex(alloc: std.mem.Allocator, distro_id: []const u8, co
     const size = stat.size;
     if (size < 12 or size > 100 * 1024 * 1024) return null;
 
+    // Honor cache_max_age_ns. Without this check the cached index lives
+    // forever, so a freshly published package never becomes visible to
+    // `nb install --deb` until the user nukes the cache by hand. Treat
+    // any cache file older than the TTL as a miss; the caller will then
+    // re-fetch and call `writeCachedBinaryIndex` to refresh it. We use
+    // mtime (vs ctime) so a touch-based forced refresh is supported.
+    const mtime: i128 = stat.mtime.nanoseconds;
+    var ts_now: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts_now);
+    const now_ns: i128 = @as(i128, ts_now.sec) * std.time.ns_per_s + @as(i128, ts_now.nsec);
+    if (now_ns - mtime > cache_max_age_ns) return null;
+
     const data = alloc.alloc(u8, @intCast(size)) catch return null;
     defer alloc.free(data);
 

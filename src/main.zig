@@ -3960,6 +3960,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                 next_idx: *std.atomic.Value(usize),
                 had_error: *std.atomic.Value(bool),
                 alloc_: std.mem.Allocator,
+                verify: bool,
             };
 
             const debWorkerFn = struct {
@@ -3977,11 +3978,11 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                         const name = item.name_storage[0..item.name_len];
 
                         var telemetry_event = nb.telemetry.DownloadEvent.start(.artifact, name);
-                        downloadDebWithSha256(&dl_client, url, item.sha256, dest) catch {
+                        downloadDebWithSha256(&dl_client, url, item.sha256, dest, ctx.verify) catch {
                             // Retry once with fresh client (connection may have been reset)
                             var retry_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = std.Io.Threaded.global_single_threaded.io() };
                             defer retry_client.deinit();
-                            downloadDebWithSha256(&retry_client, url, item.sha256, dest) catch {
+                            downloadDebWithSha256(&retry_client, url, item.sha256, dest, ctx.verify) catch {
                                 telemetry_event.fail();
                                 ctx.had_error.store(true, .release);
                                 continue;
@@ -4001,6 +4002,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                 .next_idx = &next_dl_idx,
                 .had_error = &had_dl_error,
                 .alloc_ = alloc,
+                .verify = !opts.no_verify,
             };
 
             var dl_threads: [8]std.Thread = undefined;
@@ -4034,15 +4036,33 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     // --- Parallel extraction phase ---
     // Extract all cached .debs concurrently using a thread pool.
     // Packages that need downloading were already fetched in the parallel download phase above.
+    // `installed_files` is `null` while the extract worker is in flight,
+    // a non-null owned slice (each entry alloc'd via `alloc`) on success,
+    // and stays `null` on extraction failure. Only items with non-null
+    // `installed_files` are recorded in the DB. The slice is freed below
+    // after `recordDebInstall` has dup'd the strings into the DB.
     const ExtractItem = struct {
         pkg_idx: usize,
         cache_path_storage: [512]u8,
         cache_path_len: usize,
         needs_download: bool,
+        installed_files: ?[][]const u8 = null,
     };
 
     var extract_items: std.ArrayList(ExtractItem) = .empty;
-    defer extract_items.deinit(alloc);
+    defer {
+        // Belt-and-braces: anything still owned by an item at function
+        // exit (e.g. an early return after extract but before record)
+        // gets cleaned up here so we don't leak per-file strings on
+        // every --deb install.
+        for (extract_items.items) |item| {
+            if (item.installed_files) |files| {
+                for (files) |f| alloc.free(f);
+                alloc.free(files);
+            }
+        }
+        extract_items.deinit(alloc);
+    }
 
     // Build extraction work list
     for (resolved, 0..) |pkg, idx| {
@@ -4071,10 +4091,12 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
         if (!item.needs_download) cached += 1;
     }
 
-    // Thread pool for extraction
-    // Thread pool for extraction
+    // Thread pool for extraction. `items` is `[]ExtractItem` (mutable)
+    // because each worker owns its own slot via the next_idx counter and
+    // writes the resulting file list back into `installed_files`. No two
+    // workers ever touch the same item, so no locking is needed.
     const ExtractCtx = struct {
-        items: []const ExtractItem,
+        items: []ExtractItem,
         resolved: []const nb.deb_index.DebPackage,
         next_idx: *std.atomic.Value(usize),
         installed_count: *std.atomic.Value(usize),
@@ -4086,11 +4108,17 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
             while (true) {
                 const idx = ctx.next_idx.fetchAdd(1, .monotonic);
                 if (idx >= ctx.items.len) break;
-                const item = ctx.items[idx];
-                const cache_path = item.cache_path_storage[0..item.cache_path_len];
+                const item_ptr = &ctx.items[idx];
+                const cache_path = item_ptr.cache_path_storage[0..item_ptr.cache_path_len];
 
-                // Extract .deb to prefix
-                _ = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, cache_path) catch continue;
+                // Extract .deb to prefix and persist the file list so the
+                // main thread can hand it to recordDebInstall (which lets
+                // `nb remove --deb` actually find these files later) and
+                // so `nb list` only shows packages whose tarball really
+                // landed on disk. Errors leave `installed_files = null`
+                // and skip the installed-count bump.
+                const files = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, cache_path) catch continue;
+                item_ptr.installed_files = files;
                 _ = ctx.installed_count.fetchAdd(1, .monotonic);
             }
         }
@@ -4125,9 +4153,15 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     const t_extracted = milliTimestamp();
     stdout.print("    extract phase: {d}ms ({d} packages)\n", .{ t_extracted - t_downloaded, installed }) catch {};
 
-    // Run postinst scripts sequentially (must be sequential — they modify global state)
+    // Run postinst scripts sequentially for the packages whose data.tar
+    // actually landed (must be sequential — postinst scripts mutate global
+    // state like /etc/alternatives and /etc/ld.so.cache that races would
+    // corrupt). Skip items whose extraction failed, otherwise we'd run
+    // postinst on a half-extracted package and either get a hard error
+    // or leave the system in a worse state than no install at all.
     if (!opts.skip_postinst) {
         for (extract_items.items) |item| {
+            if (item.installed_files == null) continue;
             const pkg = resolved[item.pkg_idx];
             const cache_path = item.cache_path_storage[0..item.cache_path_len];
             nb.deb_extract.runPostinst(alloc, g_io, cache_path, pkg.name, false);
@@ -4135,9 +4169,10 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     }
 
     for (extract_items.items) |item| {
+        const files = item.installed_files orelse continue;
         if (db) |*d| {
             const pkg = resolved[item.pkg_idx];
-            d.recordDebInstall(pkg.name, pkg.version, pkg.sha256, &.{}) catch {};
+            d.recordDebInstall(pkg.name, pkg.version, pkg.sha256, files) catch {};
         }
     }
 
@@ -4339,11 +4374,19 @@ fn httpGetToMemory(alloc: std.mem.Allocator, client: *std.http.Client, url: []co
 }
 
 /// Download a .deb with streaming SHA256 verification to content-addressable cache.
+/// Pass `verify = false` (from --no-verify) to skip the SHA256 check while
+/// still computing it, so the blob still lands in the content-addressable
+/// cache under its real digest. The check itself becomes advisory: a hash
+/// mismatch is reported but doesn't fail the install. We never skip the
+/// "the upstream said this should have a sha256 at all" check — a missing
+/// declared sha is always a hard error to keep `--no-verify` distinct from
+/// "trust the upstream blindly".
 fn downloadDebWithSha256(
     client: *std.http.Client,
     url: []const u8,
     expected_sha256: []const u8,
     dest_path: []const u8,
+    verify: bool,
 ) !void {
     const uri = std.Uri.parse(url) catch return error.DownloadFailed;
     var req = client.request(.GET, uri, .{
@@ -4400,8 +4443,19 @@ fn downloadDebWithSha256(
             return error.ChecksumMissing;
         }
         if (!std.mem.eql(u8, &hex, expected_sha256[0..64])) {
-            std.Io.Dir.deleteFileAbsolute(g_io, tmp_path) catch {};
-            return error.ChecksumMismatch;
+            if (verify) {
+                std.Io.Dir.deleteFileAbsolute(g_io, tmp_path) catch {};
+                return error.ChecksumMismatch;
+            }
+            // --no-verify: warn but accept the blob. The blob still gets
+            // renamed to dest_path (the expected-digest cache path) so a
+            // subsequent run without --no-verify will re-detect the
+            // mismatch on cache lookup; we accept the small risk of a
+            // tampered .deb sitting in the cache because the user opted
+            // into --no-verify explicitly.
+            const _msg = std.fmt.allocPrint(std.heap.smp_allocator, "nb: --no-verify: sha256 mismatch for {s} (got {s}, expected {s}); continuing\n", .{ dest_path, hex, expected_sha256[0..64] }) catch "";
+            defer std.heap.smp_allocator.free(_msg);
+            std.Io.File.stderr().writeStreamingAll(g_io, _msg) catch {};
         }
     }
 
