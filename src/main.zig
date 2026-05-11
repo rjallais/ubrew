@@ -4238,10 +4238,23 @@ fn runDebRemove(alloc: std.mem.Allocator, packages: []const []const u8) void {
             continue;
         };
 
-        // Delete each installed file
+        // Delete each installed file. New installs (post-1d5265d) store
+        // absolute paths in the DB, but state.json files written by older
+        // nb versions hold relative paths. Tolerate both so a user
+        // upgrading nb without reinstalling can still cleanly remove
+        // their existing debs. `deleteFileAbsolute` on a relative path
+        // resolves against cwd, which is whatever the user's shell
+        // happens to be in — so we always prepend `/` when absent.
         var removed_files: usize = 0;
         for (record.files) |file_path| {
-            std.Io.Dir.deleteFileAbsolute(g_io, file_path) catch continue;
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const abs_path = if (file_path.len > 0 and file_path[0] == '/')
+                file_path
+            else blk: {
+                const slice = std.fmt.bufPrint(&abs_buf, "/{s}", .{file_path}) catch continue;
+                break :blk slice;
+            };
+            std.Io.Dir.deleteFileAbsolute(g_io, abs_path) catch continue;
             removed_files += 1;
         }
 
