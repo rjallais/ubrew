@@ -295,11 +295,15 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
     var build_deps: std.ArrayList([]const u8) = .empty;
     defer build_deps.deinit(alloc);
 
-    // Track block nesting for on_macos/on_linux/bottle
+    // Track block nesting for on_macos/on_linux/bottle/test
     var in_bottle: bool = false;
     var platform_skip: bool = false;
     var block_depth: u32 = 0;
     var platform_depth: u32 = 0;
+    // `test do ... end` blocks contain arbitrary Ruby (assert_match,
+    // shell_output, etc.) and must not be parsed as formula metadata.
+    // See the extractQuotedAfter docs for the concrete failure mode.
+    var test_depth: u32 = 0;
 
     var line_iter = std.mem.splitScalar(u8, src, '\n');
     while (line_iter.next()) |raw_line| {
@@ -358,6 +362,12 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
                 in_bottle = true;
                 continue;
             }
+
+            // Detect test block — skip its contents wholesale.
+            if (startsWith(line, "test")) {
+                test_depth = block_depth;
+                continue;
+            }
         }
 
         if (std.mem.eql(u8, line, "end")) {
@@ -368,9 +378,17 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
             if (in_bottle and block_depth > 0) {
                 in_bottle = false;
             }
+            if (test_depth > 0 and block_depth == test_depth) {
+                test_depth = 0;
+            }
             if (block_depth > 0) block_depth -= 1;
             continue;
         }
+
+        // Skip lines inside test blocks — they contain arbitrary Ruby
+        // (shell_output, assert_match, etc.) that must not be scanned
+        // for `version`/`url`/`sha256`/`depends_on`.
+        if (test_depth > 0) continue;
 
         // Skip lines inside wrong-platform blocks
         if (platform_skip) continue;
@@ -503,7 +521,13 @@ fn interpolateVersion(alloc: std.mem.Allocator, s: []const u8, version: []const 
     return result.toOwnedSlice(alloc);
 }
 
-/// Extract quoted string after a keyword, e.g. `version "1.0"` -> "1.0"
+/// Extract quoted string after a keyword, e.g. `version "1.0"` -> "1.0".
+/// NOTE: This intentionally matches the keyword anywhere in the line —
+/// callers like `parseRubyCask` rely on it to read mid-line `target:` /
+/// `as: "..."` etc. parameters. The cost is that it would also match
+/// the substring `version` inside `--version` flags within Ruby `test do`
+/// blocks; those are handled at the caller level by skipping
+/// `test do … end` block contents (see #279 / formula version bug).
 fn extractQuotedAfter(line: []const u8, keyword: []const u8) ?[]const u8 {
     const idx = std.mem.indexOf(u8, line, keyword) orelse return null;
     const after = line[idx + keyword.len ..];
@@ -848,6 +872,56 @@ test "parseRubyFormula - no version returns error" {
         \\end
     ;
     try testing.expectError(error.FormulaNotFound, parseRubyFormula(testing.allocator, "bad", src));
+}
+
+test "parseRubyFormula - test do block does not pollute version (#279)" {
+    // Regression: a `test do` block whose `shell_output(...)` argument
+    // contains the substring "version" (e.g. `--version`) used to leak
+    // into the formula's version field. The corrupted state seen in
+    // #279 had version = `#{bin}/sag --version` because the parser
+    // matched the substring `version` inside `--version` and grabbed
+    // the next quoted span.
+    const src =
+        \\class Sag < Formula
+        \\  desc "sag"
+        \\  url "https://example.com/sag-1.0.tar.gz"
+        \\  version "1.0"
+        \\  sha256 "deadbeef"
+        \\
+        \\  def install
+        \\    bin.install "sag"
+        \\  end
+        \\
+        \\  test do
+        \\    assert_match "1.0", shell_output("#{bin}/sag --version")
+        \\  end
+        \\end
+    ;
+    const f = try parseRubyFormula(testing.allocator, "sag", src);
+    defer f.deinit(testing.allocator);
+    try testing.expectEqualStrings("1.0", f.version);
+    try testing.expectEqualStrings("sag", f.name);
+}
+
+test "parseRubyFormula - test do block before version line still finds version" {
+    // If the `test do` block were not properly closed, subsequent
+    // top-level lines (including a real `version "..."`) would be
+    // skipped. Confirm `end` correctly exits the test scope.
+    const src =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo.tar.gz"
+        \\  sha256 "aa"
+        \\
+        \\  test do
+        \\    assert_match "v0.0.1", shell_output("#{bin}/foo --version")
+        \\  end
+        \\
+        \\  version "9.9.9"
+        \\end
+    ;
+    const f = try parseRubyFormula(testing.allocator, "foo", src);
+    defer f.deinit(testing.allocator);
+    try testing.expectEqualStrings("9.9.9", f.version);
 }
 
 test "extractQuotedAfter - basic" {

@@ -7,7 +7,8 @@ const std = @import("std");
 const fetch = @import("../net/fetch.zig");
 const FORMULA_LIST_URL = "https://formulae.brew.sh/api/formula.json";
 const CASK_LIST_URL = "https://formulae.brew.sh/api/cask.json";
-const CACHE_DIR = @import("../platform/paths.zig").API_CACHE_DIR;
+const paths = @import("../platform/paths.zig");
+const CACHE_DIR = paths.API_CACHE_DIR;
 const FORMULA_CACHE = CACHE_DIR ++ "/_formula_list.json";
 const CASK_CACHE = CACHE_DIR ++ "/_cask_list.json";
 const CACHE_TTL_NS = 3600 * std.time.ns_per_s; // 1 hour
@@ -54,17 +55,17 @@ fn fetchCachedList(alloc: std.mem.Allocator, url: []const u8, cache_path: []cons
     const body = fetch.get(alloc, url) catch return error.FetchFailed;
 
     // Write to cache
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), CACHE_DIR, .default_dir) catch {};
-    if (std.Io.Dir.createFileAbsolute(std.Io.Threaded.global_single_threaded.io(), cache_path, .{})) |file| {
-        defer file.close(std.Io.Threaded.global_single_threaded.io());
-        file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), body) catch {};
+    std.Io.Dir.createDirAbsolute(paths.safe_io, CACHE_DIR, .default_dir) catch {};
+    if (std.Io.Dir.createFileAbsolute(paths.safe_io, cache_path, .{})) |file| {
+        defer file.close(paths.safe_io);
+        file.writeStreamingAll(paths.safe_io, body) catch {};
     } else |_| {}
 
     return body;
 }
 
 fn readCachedFile(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(lib_io, path, .{}) catch return null;
     defer file.close(lib_io);
     const st = file.stat(lib_io) catch return null;

@@ -70,7 +70,8 @@ fn normalizedCaskApiBase(scratch: *[512]u8) []const u8 {
     }
     return CASK_API_BASE;
 }
-const API_CACHE_DIR = @import("../platform/paths.zig").API_CACHE_DIR;
+const paths = @import("../platform/paths.zig");
+const API_CACHE_DIR = paths.API_CACHE_DIR;
 
 pub fn fetchFormula(alloc: std.mem.Allocator, name: []const u8) !Formula {
     return fetchFormulaWithClient(alloc, null, name);
@@ -171,7 +172,7 @@ fn fetchFormulaList(alloc: std.mem.Allocator) ![]u8 {
     const body = fetch.get(alloc, "https://formulae.brew.sh/api/formula.json") catch return error.FetchFailed;
 
     // Write to cache
-    const _lio_fl = std.Io.Threaded.global_single_threaded.io();
+    const _lio_fl = paths.safe_io;
     std.Io.Dir.createDirAbsolute(_lio_fl, API_CACHE_DIR, .default_dir) catch {};
     if (std.Io.Dir.createFileAbsolute(_lio_fl, list_cache_path, .{})) |file| {
         defer file.close(_lio_fl);
@@ -183,7 +184,7 @@ fn fetchFormulaList(alloc: std.mem.Allocator) ![]u8 {
 
 /// Read cached file with custom TTL.
 fn readCachedList(alloc: std.mem.Allocator, path: []const u8, ttl_ns: u64) ?[]u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(lib_io, path, .{}) catch return null;
     defer file.close(lib_io);
     const st = file.stat(lib_io) catch return null;
@@ -327,10 +328,10 @@ fn fetchAndCacheCask(alloc: std.mem.Allocator, token: []const u8, cache_path: []
 
     const body = fetch.get(alloc, url) catch return error.CaskNotFound;
 
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), API_CACHE_DIR, .default_dir) catch {};
-    if (std.Io.Dir.createFileAbsolute(std.Io.Threaded.global_single_threaded.io(), cache_path, .{})) |file| {
-        defer file.close(std.Io.Threaded.global_single_threaded.io());
-        file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), body) catch {};
+    std.Io.Dir.createDirAbsolute(paths.safe_io, API_CACHE_DIR, .default_dir) catch {};
+    if (std.Io.Dir.createFileAbsolute(paths.safe_io, cache_path, .{})) |file| {
+        defer file.close(paths.safe_io);
+        file.writeStreamingAll(paths.safe_io, body) catch {};
     } else |_| {}
 
     defer alloc.free(body);
@@ -573,10 +574,10 @@ fn fetchAndCache(alloc: std.mem.Allocator, shared_client: ?*std.http.Client, nam
         fetch.get(alloc, url) catch return error.FormulaNotFound;
 
     // Write to cache
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), API_CACHE_DIR, .default_dir) catch {};
-    if (std.Io.Dir.createFileAbsolute(std.Io.Threaded.global_single_threaded.io(), cache_path, .{})) |file| {
-        defer file.close(std.Io.Threaded.global_single_threaded.io());
-        file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), body) catch {};
+    std.Io.Dir.createDirAbsolute(paths.safe_io, API_CACHE_DIR, .default_dir) catch {};
+    if (std.Io.Dir.createFileAbsolute(paths.safe_io, cache_path, .{})) |file| {
+        defer file.close(paths.safe_io);
+        file.writeStreamingAll(paths.safe_io, body) catch {};
     } else |_| {}
 
     defer alloc.free(body);
@@ -584,7 +585,7 @@ fn fetchAndCache(alloc: std.mem.Allocator, shared_client: ?*std.http.Client, nam
 }
 
 fn readCached(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(lib_io, path, .{}) catch return null;
     defer file.close(lib_io);
     // TTL: 1 hour (bottles don't change frequently)

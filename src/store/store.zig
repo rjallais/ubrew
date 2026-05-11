@@ -26,27 +26,29 @@ pub fn isValidSha256(sha256: []const u8) bool {
 
 /// Ensure a store entry exists for the given SHA256.
 /// If not, extract the blob tarball into the store.
-pub fn ensureEntry(alloc: std.mem.Allocator, blob_path: []const u8, sha256: []const u8) !void {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn ensureEntry(alloc: std.mem.Allocator, io: std.Io, blob_path: []const u8, sha256: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     var dir_buf: [512]u8 = undefined;
     const store_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return error.PathTooLong;
 
     // Already extracted?
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), store_path, .{}) catch {
+    std.Io.Dir.accessAbsolute(io, store_path, .{}) catch {
         // Need to extract
-        try tar.extractToStore(alloc, blob_path, sha256);
+        try tar.extractToStore(alloc, io, blob_path, sha256);
         return;
     };
 }
 
 /// Check if a store entry exists.
-pub fn hasEntry(sha256: []const u8) bool {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn hasEntry(io: std.Io, sha256: []const u8) bool {
     if (!isValidSha256(sha256)) return false;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return false;
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), p, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, p, .{}) catch return false;
     return true;
 }
 
@@ -57,13 +59,14 @@ pub fn entryPath(sha256: []const u8, buf: []u8) []const u8 {
 }
 
 /// Find the version directory contained in a raw store entry.
-pub fn detectEntryVersion(sha256: []const u8, name: []const u8, version: []const u8, result_buf: *[256]u8) ?[]const u8 {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn detectEntryVersion(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8, result_buf: *[256]u8) ?[]const u8 {
     if (!isValidSha256(sha256)) return null;
 
     var name_dir_buf: [512]u8 = undefined;
     const name_dir = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}/{s}", .{ STORE_DIR, sha256, name }) catch return null;
 
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = io;
     var exact_buf: [512]u8 = undefined;
     const exact = std.fmt.bufPrint(&exact_buf, "{s}/{s}", .{ name_dir, version }) catch return null;
     if (std.Io.Dir.openDirAbsolute(lib_io, exact, .{})) |d| {
@@ -96,12 +99,12 @@ pub fn detectEntryVersion(sha256: []const u8, name: []const u8, version: []const
 }
 
 /// Remove a store entry (when refcount drops to 0).
-pub fn removeEntry(sha256: []const u8) void {
+pub fn removeEntry(io: std.Io, sha256: []const u8) void {
     if (!isValidSha256(sha256)) return;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return;
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), p) catch {};
+    std.Io.Dir.cwd().deleteTree(io, p) catch {};
 }
 
 // ── Relocated store ───────────────────────────────────────────────────────────
@@ -111,12 +114,12 @@ pub fn removeEntry(sha256: []const u8) void {
 // can skip both text-scan and install_name_tool entirely.
 
 /// Check if a post-relocation snapshot exists for this blob.
-pub fn hasRelocatedEntry(sha256: []const u8) bool {
+pub fn hasRelocatedEntry(io: std.Io, sha256: []const u8) bool {
     if (!isValidSha256(sha256)) return false;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_RELOCATED_DIR, sha256 }) catch return false;
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), p, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, p, .{}) catch return false;
     return true;
 }
 
@@ -124,7 +127,7 @@ pub fn hasRelocatedEntry(sha256: []const u8) bool {
 /// Called once after a successful relocate+placeholder pass.
 /// Uses APFS clonefile so this is near-instantaneous and zero marginal disk cost.
 /// Layout: store-relocated/<sha256>/ contains the full keg tree directly.
-pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const u8) !void {
+pub fn saveRelocatedEntry(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     // src = Cellar/<name>/<version>/  (already fully relocated)
@@ -138,14 +141,14 @@ pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const
     dest_buf[dest_dir.len] = 0;
 
     // Already saved (concurrent installs, or we're upgrading)
-    if (std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), dest_dir, .{})) {
+    if (std.Io.Dir.accessAbsolute(io, dest_dir, .{})) {
         return; // already exists, nothing to do
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     }
 
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), STORE_RELOCATED_DIR, .default_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, STORE_RELOCATED_DIR, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -153,14 +156,15 @@ pub fn saveRelocatedEntry(sha256: []const u8, name: []const u8, version: []const
     // cloneTree from Cellar → store-relocated (APFS copy-on-write, ~0ms on APFS)
     const copy = @import("../platform/copy.zig");
     if (!copy.cloneTree(&src_buf, &dest_buf)) {
-        // Fallback: regular recursive copy (Linux or APFS failure)
-        try copy.cpFallback(std.Io.Threaded.global_single_threaded.io(), src_dir, dest_dir);
+        // Fallback path uses std.process.run; passing the caller's io is
+        // required under Zig 0.16 (see issue #276).
+        try copy.cpFallback(io, src_dir, dest_dir);
     }
 }
 
 /// Materialize a package from store-relocated/<sha256>/ into Cellar/<name>/<version>/.
 /// This is the fast reinstall path: no relocation needed.
-pub fn materializeFromRelocated(sha256: []const u8, name: []const u8, version: []const u8) !void {
+pub fn materializeFromRelocated(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     // src = store-relocated/<sha256>/
@@ -176,17 +180,17 @@ pub fn materializeFromRelocated(sha256: []const u8, name: []const u8, version: [
     // Ensure parent dir exists
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ CELLAR_DIR, name }) catch return error.PathTooLong;
-    std.Io.Dir.createDirAbsolute(std.Io.Threaded.global_single_threaded.io(), parent, .default_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     // Remove existing keg if present (fresh reinstall)
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), dest_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
 
     const copy = @import("../platform/copy.zig");
     if (!copy.cloneTree(&src_buf, &dest_buf)) {
-        try copy.cpFallback(std.Io.Threaded.global_single_threaded.io(), src_dir, dest_dir);
+        try copy.cpFallback(io, src_dir, dest_dir);
     }
 }
 
@@ -197,12 +201,12 @@ pub fn relocatedEntryPath(sha256: []const u8, buf: []u8) []const u8 {
 }
 
 /// Remove the post-relocation snapshot for a sha256.
-pub fn removeRelocatedEntry(sha256: []const u8) void {
+pub fn removeRelocatedEntry(io: std.Io, sha256: []const u8) void {
     if (!isValidSha256(sha256)) return;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_RELOCATED_DIR, sha256 }) catch return;
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), p) catch {};
+    std.Io.Dir.cwd().deleteTree(io, p) catch {};
 }
 
 const testing = std.testing;

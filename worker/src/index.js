@@ -7,7 +7,9 @@ REPO="${REPO}"
 INSTALL_DIR="\${NANOBREW_INSTALL_DIR:-/opt/nanobrew}"
 BIN_DIR="$INSTALL_DIR/prefix/bin"
 SITE_URL="https://nanobrew.trilok.ai"
-FALLBACK_RELEASE="v0.1.191"
+# Last-resort release tag if the worker's /version endpoint AND GitHub's
+# API are both unreachable. Bump on every release cut.
+FALLBACK_RELEASE="v0.1.192"
 
 echo ""
 echo "  nanobrew — the fastest package manager"
@@ -48,13 +50,22 @@ if [ -n "\${NANOBREW_INSTALL_VERSION:-}" ]; then
     echo "  Using $LATEST"
 else
     echo "  Fetching latest release..."
-    LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-    if [ -z "$LATEST" ]; then
-        echo "error: could not find latest release"
-        echo "hint: make sure https://github.com/$REPO has a release"
-        exit 1
+    # Resolve the latest version via the worker (which caches GH for 5 min
+    # and has its own fallback) BEFORE hitting GH directly. Avoids the
+    # 60/hr unauthenticated rate limit on api.github.com that used to
+    # break installs during traffic spikes.
+    LATEST_VER=$(curl -fsSL "$SITE_URL/version" 2>/dev/null || true)
+    if [ -n "$LATEST_VER" ]; then
+        LATEST="v$LATEST_VER"
+    else
+        LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
     fi
-    echo "  Found $LATEST"
+    if [ -z "$LATEST" ]; then
+        echo "  Could not resolve latest release; using $FALLBACK_RELEASE"
+        LATEST="$FALLBACK_RELEASE"
+    else
+        echo "  Found $LATEST"
+    fi
 fi
 
 # Download binary + SHA256 checksum
@@ -2090,7 +2101,7 @@ export default {
         });
         if (!gh.ok) {
           // Rate limited — return last known version
-          return new Response("0.1.191", {
+          return new Response("0.1.192", {
             headers: {
               "content-type": "text/plain; charset=utf-8",
               "cache-control": "public, max-age=60",
@@ -2112,7 +2123,7 @@ export default {
         await cache.put(cacheKey, resp.clone());
         return resp;
       } catch {
-        return new Response("0.1.191", {
+        return new Response("0.1.192", {
           headers: {
             "content-type": "text/plain; charset=utf-8",
             "cache-control": "public, max-age=60",

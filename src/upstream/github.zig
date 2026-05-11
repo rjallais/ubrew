@@ -256,7 +256,7 @@ fn fetchLatestReleaseJson(alloc: std.mem.Allocator, repo: []const u8) ![]u8 {
     }) catch return error.FetchFailed;
     errdefer alloc.free(body);
 
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     std.Io.Dir.createDirAbsolute(io, API_CACHE_DIR, .default_dir) catch {};
     if (std.Io.Dir.createFileAbsolute(io, cache_path, .{})) |file| {
         defer file.close(io);
@@ -673,7 +673,7 @@ fn githubReleaseCachePath(repo: []const u8, buf: []u8) ![]const u8 {
 }
 
 fn readCachedFile(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
     const st = file.stat(io) catch return null;
@@ -704,7 +704,7 @@ pub fn hasCachedFormula(token: []const u8) bool {
 }
 
 fn cachedFileIsFresh(path: []const u8) bool {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
     defer file.close(io);
     const st = file.stat(io) catch return false;
@@ -804,7 +804,7 @@ fn writeCachedFormula(token: []const u8, formula: *const Formula) void {
     if (formula.source_url.len == 0 and formula.bottle_url.len == 0) return;
     var path_buf: [512]u8 = undefined;
     const cache_path = upstreamFormulaCachePath(token, &path_buf) catch return;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = paths.safe_io;
     std.Io.Dir.createDirAbsolute(io, API_CACHE_DIR, .default_dir) catch {};
 
     var out: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);

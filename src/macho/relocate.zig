@@ -34,7 +34,18 @@ const LC_LOAD_WEAK_DYLIB: u32 = 0x80000018;
 const LC_REEXPORT_DYLIB: u32 = 0x8000001F;
 const LC_RPATH: u32 = 0x8000001C;
 
-const MACHO_DIRS = [_][]const u8{ "bin", "sbin", "lib", "libexec", "Frameworks" };
+/// Top-level keg subdirectories explicitly known to never contain Mach-O
+/// binaries. We skip these to avoid wasting syscalls on header / docs /
+/// locale trees. Anything else gets walked — handles non-standard
+/// layouts like vulkan-loader's `loader/vulkan.framework/`.
+const NON_MACHO_TOP_DIRS = [_][]const u8{ "include", "share", "etc", "var", "doc" };
+
+fn isNonMachoTopDir(name: []const u8) bool {
+    for (NON_MACHO_TOP_DIRS) |skip| {
+        if (std.mem.eql(u8, name, skip)) return true;
+    }
+    return false;
+}
 
 /// Relocate all Mach-O files in a keg. Rewrites @@HOMEBREW_*@@ placeholders
 /// in load commands via install_name_tool, then ad-hoc re-signs every Mach-O
@@ -68,10 +79,17 @@ pub fn relocateKeg(alloc: std.mem.Allocator, io: std.Io, name: []const u8, versi
         frameworks_unused.deinit(alloc);
     }
 
-    for (MACHO_DIRS) |subdir| {
-        var sub_buf: [512]u8 = undefined;
-        const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, subdir }) catch continue;
-        walkAndRelocate(alloc, io, sub_path, &macho_files, &frameworks_unused) catch {};
+    {
+        var keg = std.Io.Dir.openDirAbsolute(io, keg_dir, .{ .iterate = true }) catch return;
+        defer keg.close(io);
+        var iter = keg.iterate();
+        while (iter.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            if (isNonMachoTopDir(entry.name)) continue;
+            var sub_buf: [512]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, entry.name }) catch continue;
+            walkAndRelocate(alloc, io, sub_path, &macho_files, &frameworks_unused) catch {};
+        }
     }
 
     // Batch ad-hoc re-sign every Mach-O file in one codesign call. Capture
@@ -108,10 +126,17 @@ pub fn sealKegBundles(alloc: std.mem.Allocator, io: std.Io, name: []const u8, ve
     }
 
     // Discover frameworks under each Mach-O-bearing subdir.
-    for (MACHO_DIRS) |subdir| {
-        var sub_buf: [512]u8 = undefined;
-        const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, subdir }) catch continue;
-        collectFrameworks(alloc, io, sub_path, &frameworks);
+    {
+        var keg = std.Io.Dir.openDirAbsolute(io, keg_dir, .{ .iterate = true }) catch return;
+        defer keg.close(io);
+        var iter = keg.iterate();
+        while (iter.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            if (isNonMachoTopDir(entry.name)) continue;
+            var sub_buf: [512]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, entry.name }) catch continue;
+            collectFrameworks(alloc, io, sub_path, &frameworks);
+        }
     }
 
     // `--deep` walks every nested Mach-O and prints one line per file;
@@ -151,6 +176,7 @@ fn walkAndRelocate(
     frameworks: *std.ArrayList([]const u8),
 ) !void {
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
@@ -203,7 +229,6 @@ fn walkAndRelocate(
             else => {},
         }
     }
-    dir.close(io);
 }
 
 /// Inspect `path`; if it is a Mach-O binary, run install_name_tool for any

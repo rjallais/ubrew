@@ -8,6 +8,7 @@
 // cycle detection.
 
 const std = @import("std");
+const paths = @import("../platform/paths.zig");
 const api = @import("../api/client.zig");
 const Formula = @import("../api/formula.zig").Formula;
 
@@ -22,7 +23,7 @@ pub const DepResolver = struct {
             .alloc = alloc,
             .formulae = std.StringHashMap(Formula).init(alloc),
             .edges = std.StringHashMap([]const []const u8).init(alloc),
-            .client = std.http.Client{ .allocator = alloc, .io = std.Io.Threaded.global_single_threaded.io() },
+            .client = std.http.Client{ .allocator = alloc, .io = paths.safe_io },
         };
     }
 
@@ -74,7 +75,7 @@ pub const DepResolver = struct {
                     fn run(ctx: WorkerCtx) void {
                         var client: std.http.Client = .{
                             .allocator = ctx.alloc_,
-                            .io = std.Io.Threaded.global_single_threaded.io(),
+                            .io = paths.safe_io,
                         };
                         defer client.deinit();
                         while (true) {

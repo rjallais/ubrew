@@ -18,6 +18,7 @@ const OPT_DIR = paths.OPT_DIR;
 const LIB_DIR = paths.LIB_DIR;
 const INCLUDE_DIR = paths.INCLUDE_DIR;
 const SHARE_DIR = paths.SHARE_DIR;
+const ETC_DIR = paths.ETC_DIR;
 const FORTUNE_NAME = "fortune";
 const FORTUNE_DEFAULT_DIR = SHARE_DIR ++ "/games/fortunes";
 const WRAPPER_DIR = "libexec/.nanobrew-wrappers";
@@ -25,6 +26,13 @@ const WRAPPER_DIR = "libexec/.nanobrew-wrappers";
 const SubdirMapping = struct {
     src: []const u8,
     dest: []const u8,
+    /// Don't overwrite a regular file that already exists at the destination.
+    /// Used for `etc/` so that first install symlinks the keg's defaults into
+    /// `<prefix>/etc/` (so packages like imagemagick can find delegates.xml,
+    /// pkg-config can find its system pc/, etc.) but a subsequent reinstall or
+    /// upgrade leaves a user-edited config file alone, matching Homebrew's
+    /// `etc/` semantics.
+    preserve_user_edits: bool = false,
 };
 
 pub const LinkMode = enum {
@@ -44,6 +52,7 @@ const subdir_mappings = [_]SubdirMapping{
     .{ .src = "lib", .dest = LIB_DIR },
     .{ .src = "include", .dest = INCLUDE_DIR },
     .{ .src = "share", .dest = SHARE_DIR },
+    .{ .src = "etc", .dest = ETC_DIR, .preserve_user_edits = true },
 };
 
 /// Extract the package name from a Cellar path.
@@ -86,22 +95,27 @@ fn isExecutableSubdir(subdir: []const u8) bool {
 }
 
 fn symlinkTargetEquals(path: []const u8, expected: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target_n = std.Io.Dir.readLinkAbsolute(lib_io, path, &target_buf) catch return false;
     return std.mem.eql(u8, target_buf[0..target_n], expected);
 }
 
 fn symlinkTargetStartsWith(path: []const u8, prefix: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target_n = std.Io.Dir.readLinkAbsolute(lib_io, path, &target_buf) catch return false;
     return std.mem.startsWith(u8, target_buf[0..target_n], prefix);
 }
 
 /// Recursively link files from keg_subdir into prefix_dest, with conflict detection.
-fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+/// When `preserve_user_edits` is true, an existing regular file (i.e. not a
+/// symlink we control) at the destination is left untouched. This matches
+/// Homebrew's `etc/` semantics: first install drops the keg's default config
+/// in via a symlink, but anything the user has actually edited (or another
+/// package has placed) is preserved.
+fn linkSubdirOpts(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8, preserve_user_edits: bool) void {
+    const lib_io = paths.safe_io;
 
     // Ensure destination directory exists
     std.Io.Dir.createDirAbsolute(lib_io, prefix_dest, .default_dir) catch |err| {
@@ -126,7 +140,7 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
 
         if (entry.kind == .directory) {
             // Recurse into subdirectory
-            linkSubdir(src, dest, keg_dir);
+            linkSubdirOpts(src, dest, keg_dir, preserve_user_edits);
             continue;
         }
 
@@ -149,8 +163,18 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
             // Same package — overwrite
             std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
         } else |_| {
-            // Not a symlink or doesn't exist — try to remove in case it's a regular file
-            std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
+            // Not a symlink — could be a regular file (user-edited config)
+            // or it doesn't exist. For etc/ we preserve user edits; for
+            // everything else we clobber the regular file (e.g. a stray
+            // bin/<binary> from a manual install) so the keg's symlink wins.
+            if (preserve_user_edits) {
+                if (std.Io.Dir.accessAbsolute(lib_io, dest, .{})) |_| {
+                    // Regular file already exists at dest — leave it alone.
+                    continue;
+                } else |_| {}
+            } else {
+                std.Io.Dir.deleteFileAbsolute(lib_io, dest) catch {};
+            }
         }
 
         std.Io.Dir.symLinkAbsolute(lib_io, src, dest, .{}) catch |err| {
@@ -159,6 +183,11 @@ fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const 
             std.Io.File.stderr().writeStreamingAll(lib_io, msg) catch {};
         };
     }
+}
+
+/// Backwards-compatible wrapper: link with no user-edit preservation.
+fn linkSubdir(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8) void {
+    linkSubdirOpts(keg_subdir, prefix_dest, keg_dir, false);
 }
 
 fn renderShimWrapper(
@@ -201,7 +230,7 @@ fn installShimLink(
     entry_name: []const u8,
     path_entries: []const []const u8,
 ) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var libexec_dir_buf: [512]u8 = undefined;
     const libexec_dir = std.fmt.bufPrint(&libexec_dir_buf, "{s}/libexec", .{keg_dir}) catch return;
     std.Io.Dir.createDirAbsolute(lib_io, libexec_dir, .default_dir) catch |err| {
@@ -251,7 +280,7 @@ fn installShimLink(
 }
 
 fn linkSubdirAsShims(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8, path_entries: []const []const u8) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
 
     std.Io.Dir.createDirAbsolute(lib_io, prefix_dest, .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) return;
@@ -281,7 +310,7 @@ fn linkSubdirAsShims(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: [
 /// Recursively unlink symlinks in prefix_dest that point into keg_subdir,
 /// then remove empty parent directories.
 fn unlinkSubdir(keg_subdir: []const u8, prefix_dest: []const u8) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
 
     var dir = std.Io.Dir.openDirAbsolute(lib_io, prefix_dest, .{ .iterate = true }) catch return;
     defer dir.close(lib_io);
@@ -314,7 +343,7 @@ fn unlinkSubdir(keg_subdir: []const u8, prefix_dest: []const u8) void {
 }
 
 fn unlinkShimLinks(keg_dir: []const u8) void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var wrapper_prefix_buf: [512]u8 = undefined;
     const wrapper_prefix = std.fmt.bufPrint(&wrapper_prefix_buf, "{s}/{s}", .{ keg_dir, WRAPPER_DIR }) catch return;
 
@@ -385,7 +414,7 @@ fn renderFortuneWrapper(buf: []u8, actual_bin: []const u8) ![]const u8 {
 fn installManagedWrapper(pkg_name: []const u8, keg_dir: []const u8) void {
     if (!needsManagedWrapper(pkg_name, "bin", FORTUNE_NAME)) return;
 
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
 
     var libexec_dir_buf: [512]u8 = undefined;
     const libexec_dir = std.fmt.bufPrint(&libexec_dir_buf, "{s}/libexec", .{keg_dir}) catch return;
@@ -440,7 +469,7 @@ fn installManagedWrapper(pkg_name: []const u8, keg_dir: []const u8) void {
 fn removeManagedWrapper(pkg_name: []const u8, keg_dir: []const u8) void {
     if (!needsManagedWrapper(pkg_name, "bin", FORTUNE_NAME)) return;
 
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var dest_buf: [512]u8 = undefined;
     const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ BIN_DIR, FORTUNE_NAME }) catch return;
 
@@ -458,7 +487,7 @@ pub fn linkKeg(name: []const u8, version: []const u8) !void {
 }
 
 pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOptions) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var keg_buf: [512]u8 = undefined;
     const keg_dir = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ CELLAR_DIR, name, version }) catch return error.PathTooLong;
 
@@ -474,7 +503,7 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
                 .private_dependency => unlinkSubdir(keg_subdir, mapping.dest),
             }
         } else {
-            linkSubdir(keg_subdir, mapping.dest, keg_dir);
+            linkSubdirOpts(keg_subdir, mapping.dest, keg_dir, mapping.preserve_user_edits);
         }
     }
 
@@ -493,7 +522,7 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
 }
 
 fn executableLinksNeedRepair(keg_subdir: []const u8, prefix_dest: []const u8, keg_dir: []const u8, mode: LinkMode) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var dir = std.Io.Dir.openDirAbsolute(lib_io, keg_subdir, .{ .iterate = true }) catch return false;
     defer dir.close(lib_io);
     var iter = dir.iterate();
@@ -566,7 +595,7 @@ pub fn unlinkKeg(name: []const u8, version: []const u8) !void {
     removeManagedWrapper(name, keg_dir);
 
     // Remove opt/ symlink
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var opt_buf: [512]u8 = undefined;
     const opt_link = std.fmt.bufPrint(&opt_buf, "{s}/{s}", .{ OPT_DIR, name }) catch return;
     std.Io.Dir.deleteFileAbsolute(lib_io, opt_link) catch {};

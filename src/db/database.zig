@@ -57,7 +57,7 @@ pub const Database = struct {
             .history = std.StringHashMap(std.ArrayList(HistoryEntry)).init(alloc),
         };
 
-        const lib_io = std.Io.Threaded.global_single_threaded.io();
+        const lib_io = paths.safe_io;
         const file = std.Io.Dir.openFileAbsolute(lib_io, DB_PATH, .{}) catch return db;
         defer file.close(lib_io);
 
@@ -67,7 +67,7 @@ pub const Database = struct {
         const contents = alloc.alloc(u8, sz) catch return db;
         const n_read = file.readPositionalAll(lib_io, contents, 0) catch {
             alloc.free(contents);
-            std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), "warning: nanobrew database read failed: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database read failed: " ++ DB_PATH ++ "\n") catch {};
             return db;
         };
         defer alloc.free(contents);
@@ -75,7 +75,7 @@ pub const Database = struct {
         if (data.len == 0) return db;
 
         const parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch {
-            std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), "warning: nanobrew database parse failed; returning empty database. File may be corrupted: " ++ DB_PATH ++ "\n") catch {};
+            std.Io.File.stderr().writeStreamingAll(paths.safe_io, "warning: nanobrew database parse failed; returning empty database. File may be corrupted: " ++ DB_PATH ++ "\n") catch {};
             return db;
         };
         defer parsed.deinit();
@@ -89,13 +89,30 @@ pub const Database = struct {
                             const ksha = getStr(item.object, "sha256") orelse "";
                             const kpinned = getBool(item.object, "pinned");
                             const kinst = getInt(item.object, "installed_at");
+                            // All-or-nothing: free any prior dupes if a
+                            // later alloc or append fails so we never
+                            // leak a partial Keg on OOM.
+                            const k_name = alloc.dupe(u8, kname) catch continue;
+                            const k_ver = alloc.dupe(u8, kver) catch {
+                                alloc.free(k_name);
+                                continue;
+                            };
+                            const k_sha = alloc.dupe(u8, ksha) catch {
+                                alloc.free(k_name);
+                                alloc.free(k_ver);
+                                continue;
+                            };
                             db.kegs.append(alloc, .{
-                                .name = alloc.dupe(u8, kname) catch continue,
-                                .version = alloc.dupe(u8, kver) catch continue,
-                                .sha256 = alloc.dupe(u8, ksha) catch continue,
+                                .name = k_name,
+                                .version = k_ver,
+                                .sha256 = k_sha,
                                 .pinned = kpinned,
                                 .installed_at = kinst,
-                            }) catch {};
+                            }) catch {
+                                alloc.free(k_name);
+                                alloc.free(k_ver);
+                                alloc.free(k_sha);
+                            };
                         }
                     }
                 }
@@ -129,12 +146,36 @@ pub const Database = struct {
                             }
                         }
 
+                        const c_token = alloc.dupe(u8, ctoken) catch continue;
+                        const c_ver = alloc.dupe(u8, cver) catch {
+                            alloc.free(c_token);
+                            continue;
+                        };
+                        const c_apps = capps.toOwnedSlice(alloc) catch {
+                            alloc.free(c_token);
+                            alloc.free(c_ver);
+                            continue;
+                        };
+                        const c_bins = cbins.toOwnedSlice(alloc) catch {
+                            alloc.free(c_token);
+                            alloc.free(c_ver);
+                            for (c_apps) |s| alloc.free(s);
+                            alloc.free(c_apps);
+                            continue;
+                        };
                         db.casks.append(alloc, .{
-                            .token = alloc.dupe(u8, ctoken) catch continue,
-                            .version = alloc.dupe(u8, cver) catch continue,
-                            .apps = capps.toOwnedSlice(alloc) catch continue,
-                            .binaries = cbins.toOwnedSlice(alloc) catch continue,
-                        }) catch {};
+                            .token = c_token,
+                            .version = c_ver,
+                            .apps = c_apps,
+                            .binaries = c_bins,
+                        }) catch {
+                            alloc.free(c_token);
+                            alloc.free(c_ver);
+                            for (c_apps) |s| alloc.free(s);
+                            alloc.free(c_apps);
+                            for (c_bins) |s| alloc.free(s);
+                            alloc.free(c_bins);
+                        };
                     }
                 }
             }
@@ -150,11 +191,19 @@ pub const Database = struct {
                                 const hver = getStr(h_item.object, "version") orelse continue;
                                 const hsha = getStr(h_item.object, "sha256") orelse "";
                                 const hinst = getInt(h_item.object, "installed_at");
+                                const h_ver_s = alloc.dupe(u8, hver) catch continue;
+                                const h_sha_s = alloc.dupe(u8, hsha) catch {
+                                    alloc.free(h_ver_s);
+                                    continue;
+                                };
                                 entries.append(alloc, .{
-                                    .version = alloc.dupe(u8, hver) catch continue,
-                                    .sha256 = alloc.dupe(u8, hsha) catch continue,
+                                    .version = h_ver_s,
+                                    .sha256 = h_sha_s,
                                     .installed_at = hinst,
-                                }) catch {};
+                                }) catch {
+                                    alloc.free(h_ver_s);
+                                    alloc.free(h_sha_s);
+                                };
                             }
                         }
                         db.history.put(pkg_name, entries) catch {};
@@ -181,13 +230,36 @@ pub const Database = struct {
                             }
                         }
 
+                        const d_name = alloc.dupe(u8, dname) catch continue;
+                        const d_ver = alloc.dupe(u8, dver) catch {
+                            alloc.free(d_name);
+                            continue;
+                        };
+                        const d_files = dfiles.toOwnedSlice(alloc) catch {
+                            alloc.free(d_name);
+                            alloc.free(d_ver);
+                            continue;
+                        };
+                        const d_sha = alloc.dupe(u8, dsha) catch {
+                            alloc.free(d_name);
+                            alloc.free(d_ver);
+                            for (d_files) |s| alloc.free(s);
+                            alloc.free(d_files);
+                            continue;
+                        };
                         db.debs.append(alloc, .{
-                            .name = alloc.dupe(u8, dname) catch continue,
-                            .version = alloc.dupe(u8, dver) catch continue,
-                            .files = dfiles.toOwnedSlice(alloc) catch continue,
-                            .sha256 = alloc.dupe(u8, dsha) catch continue,
+                            .name = d_name,
+                            .version = d_ver,
+                            .files = d_files,
+                            .sha256 = d_sha,
                             .installed_at = dinst,
-                        }) catch {};
+                        }) catch {
+                            alloc.free(d_name);
+                            alloc.free(d_ver);
+                            for (d_files) |s| alloc.free(s);
+                            alloc.free(d_files);
+                            alloc.free(d_sha);
+                        };
                     }
                 }
             }
@@ -198,7 +270,7 @@ pub const Database = struct {
 
     pub fn close(self: *Database) void {
         self.save() catch |err| {
-            var _warn_buf: [256]u8 = undefined; const _warn_msg = std.fmt.bufPrint(&_warn_buf, "nb: WARNING: failed to save package database: {}\n", .{err}) catch "nb: WARNING: failed to save package database\n"; std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), _warn_msg) catch {};
+            var _warn_buf: [256]u8 = undefined; const _warn_msg = std.fmt.bufPrint(&_warn_buf, "nb: WARNING: failed to save package database: {}\n", .{err}) catch "nb: WARNING: failed to save package database\n"; std.Io.File.stderr().writeStreamingAll(paths.safe_io, _warn_msg) catch {};
         };
         for (self.kegs.items) |keg| {
             self.alloc.free(keg.name);
@@ -236,7 +308,7 @@ pub const Database = struct {
     }
 
     pub fn recordInstall(self: *Database, name: []const u8, version: []const u8, sha256: []const u8) !void {
-        const _lib_io_ri = std.Io.Threaded.global_single_threaded.io();
+        const _lib_io_ri = paths.safe_io;
         const _now_ts = std.Io.Timestamp.now(_lib_io_ri, .real);
         const now: i64 = @as(i64, @truncate(@divTrunc(_now_ts.nanoseconds, std.time.ns_per_s)));
 
@@ -270,9 +342,16 @@ pub const Database = struct {
             gop.key_ptr.* = try self.alloc.dupe(u8, name);
             gop.value_ptr.* = .empty;
         }
+        // All-or-nothing: if append fails we must free both dupes, and
+        // if the second dupe fails we must free the first. `catch ""`
+        // on a leaked dupe would silently leak on OOM.
+        const ver_owned = try self.alloc.dupe(u8, old.version);
+        errdefer self.alloc.free(ver_owned);
+        const sha_owned = try self.alloc.dupe(u8, old.sha256);
+        errdefer self.alloc.free(sha_owned);
         try gop.value_ptr.append(self.alloc, .{
-            .version = self.alloc.dupe(u8, old.version) catch "",
-            .sha256 = self.alloc.dupe(u8, old.sha256) catch "",
+            .version = ver_owned,
+            .sha256 = sha_owned,
             .installed_at = old.installed_at,
         });
     }
@@ -483,7 +562,7 @@ pub const Database = struct {
     fn save(self: *Database) !void {
         if (!self.dirty) return;
         const tmp_path = DB_PATH ++ ".tmp";
-        const lib_io = std.Io.Threaded.global_single_threaded.io();
+        const lib_io = paths.safe_io;
         const file = try std.Io.Dir.createFileAbsolute(lib_io, tmp_path, .{});
         errdefer std.Io.Dir.deleteFileAbsolute(lib_io, tmp_path) catch {};
 

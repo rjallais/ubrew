@@ -107,10 +107,16 @@ fn milliTimestamp() i64 {
 
 const ROOT = paths.ROOT;
 const PREFIX = paths.PREFIX;
-const VERSION = "0.1.192";
+const VERSION = "0.1.193";
 
 pub fn main(init: std.process.Init) !void {
     g_io = init.io;
+    // Publish a process-wide threadsafe Io for code paths called from
+    // worker threads (downloader workers, api/client cache writers,
+    // leaves/outdated checkers, etc.) that previously hit
+    // `paths.safe_io` and crashed under
+    // concurrent use. See paths.zig for the full rationale.
+    paths.safe_io = init.io;
     const alloc = init.gpa;
 
     const args_raw = try init.minimal.args.toSlice(init.arena.allocator());
@@ -369,6 +375,10 @@ fn runLocalRbInstall(alloc: std.mem.Allocator, path: []const u8) void {
 
     // Derive the formula's short name from the basename (strip trailing ".rb").
     const basename = std.fs.path.basename(path);
+    if (basename.len <= 3 or !std.mem.endsWith(u8, basename, ".rb")) {
+        stderr.print("nb: '{s}' is not a .rb formula file\n", .{path}) catch {};
+        std.process.exit(1);
+    }
     const short_name = basename[0 .. basename.len - 3];
 
     var f = nb.tap.parseRubyFormula(alloc, short_name, src) catch |err| {
@@ -668,7 +678,15 @@ fn runInstall(alloc: std.mem.Allocator, args: []const []const u8) void {
                 phases[pi].store(@intFromEnum(Phase.failed), .release);
                 continue;
             };
-            threads.append(alloc, t) catch continue;
+            threads.append(alloc, t) catch {
+                // Couldn't track this handle. The worker is already running and
+                // borrows `phases` / `formulae.items` / `names`; if we let it
+                // outlive runInstall we get a use-after-free. Joining inline
+                // serializes one slot but keeps lifetimes sound.
+                t.join();
+                had_error.store(true, .release);
+                continue;
+            };
         }
 
         // Live progress on TTY, plain wait otherwise
@@ -956,11 +974,11 @@ fn fullInstallOne(
         const source_cache_key = if (f.install_binaries.len > 0 and nb.store.isValidSha256(f.source_sha256)) f.source_sha256 else "";
         fast: {
             if (source_cache_key.len == 0) break :fast;
-            if (!nb.store.hasRelocatedEntry(source_cache_key)) break :fast;
+            if (!nb.store.hasRelocatedEntry(g_io, source_cache_key)) break :fast;
             var fv_buf: [256]u8 = undefined;
             const fv = f.effectiveVersion(&fv_buf);
             phase.store(@intFromEnum(Phase.installing), .release);
-            nb.store.materializeFromRelocated(source_cache_key, f.name, fv) catch break :fast;
+            nb.store.materializeFromRelocated(g_io, source_cache_key, f.name, fv) catch break :fast;
             phase.store(@intFromEnum(Phase.linking), .release);
             linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
@@ -968,7 +986,7 @@ fn fullInstallOne(
                 phase.store(@intFromEnum(Phase.failed), .release);
                 return;
             };
-            nb.postinstall.runPostInstall(alloc, f) catch |err| {
+            nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
                 stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
             };
             phase.store(@intFromEnum(Phase.done), .release);
@@ -1012,8 +1030,8 @@ fn fullInstallOne(
 
         // 2. Extract into store (skip if already there)
         phase.store(@intFromEnum(Phase.extracting), .release);
-        if (!nb.store.hasEntry(f.bottle_sha256)) {
-            nb.store.ensureEntry(alloc, blob_path, f.bottle_sha256) catch |err| {
+        if (!nb.store.hasEntry(g_io, f.bottle_sha256)) {
+            nb.store.ensureEntry(alloc, g_io, blob_path, f.bottle_sha256) catch |err| {
                 stderr.print("nb: {s}: extract failed: {}\n", .{ f.name, err }) catch {};
                 had_error.store(true, .release);
                 phase.store(@intFromEnum(Phase.failed), .release);
@@ -1024,24 +1042,27 @@ fn fullInstallOne(
         // 3. Materialize (clonefile into Cellar)
         phase.store(@intFromEnum(Phase.installing), .release);
         fast: {
-            if (!nb.store.hasRelocatedEntry(f.bottle_sha256)) break :fast;
+            if (!nb.store.hasRelocatedEntry(g_io, f.bottle_sha256)) break :fast;
             var fv_buf: [256]u8 = undefined;
-            const fv = nb.store.detectEntryVersion(f.bottle_sha256, f.name, f.version, &fv_buf) orelse
+            const fv = nb.store.detectEntryVersion(g_io, f.bottle_sha256, f.name, f.version, &fv_buf) orelse
                 nb.cellar.detectKegVersion(f.name, f.version, &fv_buf) orelse
                 f.version;
-            nb.store.materializeFromRelocated(f.bottle_sha256, f.name, fv) catch break :fast;
+            nb.store.materializeFromRelocated(g_io, f.bottle_sha256, f.name, fv) catch break :fast;
             // Relocated snapshot found — skip steps 4/4b, go straight to link+post-install
             phase.store(@intFromEnum(Phase.linking), .release);
             linkFormulaKeg(alloc, f.name, fv, use_shims, requested, all_formulae) catch |err| {
                 stderr.print("nb: {s}: link failed: {}\n", .{ f.name, err }) catch {};
+                had_error.store(true, .release);
+                phase.store(@intFromEnum(Phase.failed), .release);
+                return;
             };
-            nb.postinstall.runPostInstall(alloc, f) catch |err| {
+            nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
                 stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
             };
             phase.store(@intFromEnum(Phase.done), .release);
             return;
         }
-        nb.cellar.materialize(f.bottle_sha256, f.name, f.version) catch |err| {
+        nb.cellar.materialize(g_io, f.bottle_sha256, f.name, f.version) catch |err| {
             stderr.print("nb: {s}: materialize failed: {}\n", .{ f.name, err }) catch {};
             had_error.store(true, .release);
             phase.store(@intFromEnum(Phase.failed), .release);
@@ -1069,7 +1090,7 @@ fn fullInstallOne(
         f.source_sha256
     else
         f.bottle_sha256;
-    nb.store.saveRelocatedEntry(relocated_cache_key, f.name, actual_ver) catch {};
+    nb.store.saveRelocatedEntry(g_io, relocated_cache_key, f.name, actual_ver) catch {};
 
     // 5. Link binaries
     phase.store(@intFromEnum(Phase.linking), .release);
@@ -1081,7 +1102,7 @@ fn fullInstallOne(
     };
 
     // 6. Post-install (non-fatal)
-    nb.postinstall.runPostInstall(alloc, f) catch |err| {
+    nb.postinstall.runPostInstall(alloc, g_io, f) catch |err| {
         stderr.print("nb: {s}: post-install warning: {}\n", .{ f.name, err }) catch {};
     };
 
@@ -1422,11 +1443,12 @@ fn runLeaves(alloc: std.mem.Allocator, args: []const []const u8) void {
     for (threads[0..spawned]) |t| t.join();
 
     // Collect results serially, preserving `kegs` order.
-    var fetch_failures: usize = 0;
+    var failed_names: std.ArrayList([]const u8) = .empty;
+    defer failed_names.deinit(alloc);
     fetched_formulae.ensureTotalCapacity(alloc, kegs.len) catch {};
     for (kegs, 0..) |keg, i| {
         if (slots[i].state != .filled) {
-            fetch_failures += 1;
+            failed_names.append(alloc, keg.name) catch {};
             continue;
         }
         fetched_formulae.append(alloc, slots[i].formula) catch {
@@ -1446,8 +1468,16 @@ fn runLeaves(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
     }
 
-    if (fetch_failures > 0) {
-        stderr.print("nb: warning: could not fetch metadata for {d} package(s); results may be incomplete\n", .{fetch_failures}) catch {};
+    if (failed_names.items.len > 0) {
+        stderr.print("nb: warning: could not fetch metadata for {d} package(s); results may be incomplete:\n", .{failed_names.items.len}) catch {};
+        const max_show = @min(failed_names.items.len, 5);
+        for (failed_names.items[0..max_show]) |n| {
+            stderr.print("    {s}\n", .{n}) catch {};
+        }
+        if (failed_names.items.len > max_show) {
+            stderr.print("    ... and {d} more\n", .{failed_names.items.len - max_show}) catch {};
+        }
+        stderr.print("    (run `nb cleanup --prune-kegs` to remove phantom DB entries — see #279)\n", .{}) catch {};
     }
 
     // Print leaves (packages not depended on by any other installed package)
@@ -1877,6 +1907,12 @@ fn runUpgrade(alloc: std.mem.Allocator, args: []const []const u8) void {
             is_cask = true;
         } else if (std.mem.eql(u8, arg, "--deb")) {
             is_deb = true;
+        } else if (std.mem.startsWith(u8, arg, "--") or std.mem.startsWith(u8, arg, "-") and arg.len > 1 and !std.ascii.isDigit(arg[1])) {
+            // Reject unknown flags so they don't silently become package
+            // names (e.g. `nb upgrade --dry-run` previously upgraded a
+            // ghost package called "--dry-run" → "all up to date").
+            stderr.print("nb: upgrade: unknown flag '{s}' (supported: --cask, --deb)\n", .{arg}) catch {};
+            std.process.exit(1);
         } else {
             names.append(alloc, arg) catch {};
         }
@@ -1892,6 +1928,26 @@ fn runUpgrade(alloc: std.mem.Allocator, args: []const []const u8) void {
         std.process.exit(1);
     };
     defer db.close();
+
+    // If the user supplied package names, every one of them must be
+    // installed (as a keg or, when --cask, as a cask). Without this
+    // guard, `nb upgrade nonexistent-pkg` silently returned "all up
+    // to date" because nothing matched the outdated set.
+    if (names.items.len > 0) {
+        for (names.items) |n| {
+            const found = if (is_cask) blk: {
+                const casks_result = db.listInstalledCasks(alloc) catch break :blk false;
+                defer if (casks_result.len > 0) alloc.free(casks_result);
+                for (casks_result) |c| if (std.mem.eql(u8, c.token, n)) break :blk true;
+                break :blk false;
+            } else (db.findKeg(n) != null);
+            if (!found) {
+                const kind = if (is_cask) "cask" else "package";
+                stderr.print("nb: upgrade: {s} '{s}' is not installed\n", .{ kind, n }) catch {};
+                std.process.exit(1);
+            }
+        }
+    }
 
     const check_casks = is_cask or names.items.len == 0;
     const check_kegs = !is_cask or names.items.len == 0;
@@ -2022,9 +2078,10 @@ fn runUpdate(alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    // Check if already up to date (strip leading 'v' if present)
-    const latest_ver = if (tag_name.len > 0 and tag_name[0] == 'v') tag_name[1..] else tag_name;
-    if (std.mem.eql(u8, latest_ver, VERSION)) {
+    // Check if the remote release is strictly newer. This also prevents
+    // prerelease/stale release feeds from downgrading a newer local binary.
+    const latest_ver = nb.version.normalizeVersion(tag_name);
+    if (!nb.version.isUpdateAvailable(VERSION, latest_ver)) {
         stdout.print("==> Already up to date (v{s})\n", .{VERSION}) catch {};
         return;
     }
@@ -2612,28 +2669,8 @@ fn runDoctor(alloc: std.mem.Allocator) void {
         const kegs = db.listInstalled(alloc) catch &.{};
         defer if (kegs.len > 0) alloc.free(kegs);
         for (kegs) |keg| {
-            var buf: [512]u8 = undefined;
-            const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ PREFIX, keg.name, keg.version }) catch continue;
-            const found = blk: {
-                std.Io.Dir.accessAbsolute(g_io, cellar_path, .{}) catch {
-                    // Also check Homebrew cellar paths for migrated packages (#172)
-                    const homebrew_cellar_paths = [_][]const u8{
-                        "/opt/homebrew/Cellar",
-                        "/usr/local/Cellar",
-                        "/home/linuxbrew/.linuxbrew/Cellar",
-                    };
-                    for (homebrew_cellar_paths) |hb_cellar| {
-                        var hb_buf: [512]u8 = undefined;
-                        const hb_path = std.fmt.bufPrint(&hb_buf, "{s}/{s}/{s}", .{ hb_cellar, keg.name, keg.version }) catch continue;
-                        std.Io.Dir.accessAbsolute(g_io, hb_path, .{}) catch continue;
-                        break :blk true;
-                    }
-                    break :blk false;
-                };
-                break :blk true;
-            };
-            if (!found) {
-                stdout.print("  ✗ DB entry '{s}' has no Cellar dir\n", .{keg.name}) catch {};
+            if (!kegHasBackingCellar(keg.name, keg.version)) {
+                stdout.print("  ✗ DB entry '{s}' has no Cellar dir (run `nb cleanup --prune-kegs` to remove)\n", .{keg.name}) catch {};
                 issues += 1;
             }
         }
@@ -2710,8 +2747,10 @@ fn printDoctorSummary(stdout: anytype, issues: usize) void {
 fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     const stdout = StdoutWriter{};
     var dry_run = false;
+    var prune_kegs = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run") or std.mem.eql(u8, arg, "-n")) dry_run = true;
+        if (std.mem.eql(u8, arg, "--prune-kegs")) prune_kegs = true;
     }
     var reclaimed: u64 = 0;
 
@@ -2731,6 +2770,14 @@ fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     stdout.print("  Checking orphaned entries...\n", .{}) catch {};
     cleanupOrphans(alloc, dry_run, &reclaimed, stdout);
 
+    // 3. Phantom kegs (state.json entries with no Cellar dir anywhere) — opt-in
+    //    because it mutates the DB. See #279.
+    if (prune_kegs) {
+        stdout.print("  Checking phantom kegs (state.json entries with no Cellar dir)...\n", .{}) catch {};
+        const pruned = cleanupPhantomKegs(alloc, dry_run, stdout);
+        if (pruned == 0) stdout.print("    (no phantom kegs found)\n", .{}) catch {};
+    }
+
     if (reclaimed > 0) {
         const mb = @as(f64, @floatFromInt(reclaimed)) / (1024.0 * 1024.0);
         if (dry_run) {
@@ -2741,6 +2788,85 @@ fn runCleanup(alloc: std.mem.Allocator, args: []const []const u8) void {
     } else {
         stdout.print("\n==> Nothing to clean up\n", .{}) catch {};
     }
+    if (!prune_kegs) {
+        stdout.print("    (run with --prune-kegs to also remove phantom DB entries flagged by `nb doctor`)\n", .{}) catch {};
+    }
+}
+
+/// True if the keg has a backing Cellar directory at any known location:
+/// either nb's own prefix or one of the Homebrew cellars (#172 migrated kegs).
+/// Shared by `nb doctor` and `nb cleanup --prune-kegs` so they always agree.
+fn kegHasBackingCellar(name: []const u8, version: []const u8) bool {
+    var nb_buf: [512]u8 = undefined;
+    const nb_path = std.fmt.bufPrint(&nb_buf, "{s}/Cellar/{s}/{s}", .{ PREFIX, name, version }) catch return false;
+    if (std.Io.Dir.accessAbsolute(g_io, nb_path, .{})) {
+        return true;
+    } else |_| {}
+
+    const homebrew_cellars = [_][]const u8{
+        "/opt/homebrew/Cellar",
+        "/usr/local/Cellar",
+        "/home/linuxbrew/.linuxbrew/Cellar",
+    };
+    for (homebrew_cellars) |hb| {
+        var hb_buf: [512]u8 = undefined;
+        const hb_path = std.fmt.bufPrint(&hb_buf, "{s}/{s}/{s}", .{ hb, name, version }) catch continue;
+        if (std.Io.Dir.accessAbsolute(g_io, hb_path, .{})) {
+            return true;
+        } else |_| {}
+    }
+    return false;
+}
+
+/// Walk state.json kegs and remove any whose Cellar dir is missing in every
+/// known location. Returns the count of pruned (or proposed-for-pruning) entries.
+/// In dry-run mode, just lists them. See #279.
+fn cleanupPhantomKegs(alloc: std.mem.Allocator, dry_run: bool, stdout: anytype) usize {
+    var db = nb.database.Database.open(alloc) catch return 0;
+    defer db.close();
+
+    const kegs = db.listInstalled(alloc) catch return 0;
+    defer if (kegs.len > 0) alloc.free(kegs);
+
+    // Two-pass: collect names first (recordRemoval invalidates the slice),
+    // then remove. Bound the buffer so we never blow the stack.
+    var phantom_names: [256][]const u8 = undefined;
+    var phantom_versions: [256][]const u8 = undefined;
+    var n: usize = 0;
+    var truncated = false;
+    for (kegs) |keg| {
+        if (kegHasBackingCellar(keg.name, keg.version)) continue;
+        if (n >= phantom_names.len) {
+            truncated = true;
+            break;
+        }
+        phantom_names[n] = alloc.dupe(u8, keg.name) catch continue;
+        phantom_versions[n] = alloc.dupe(u8, keg.version) catch {
+            alloc.free(phantom_names[n]);
+            continue;
+        };
+        n += 1;
+    }
+    if (truncated) {
+        stdout.print("    (capped at {d} entries this pass; re-run `nb cleanup --prune-kegs` to continue)\n", .{phantom_names.len}) catch {};
+    }
+    defer for (phantom_names[0..n], phantom_versions[0..n]) |pn, pv| {
+        alloc.free(pn);
+        alloc.free(pv);
+    };
+
+    for (phantom_names[0..n], phantom_versions[0..n]) |pn, pv| {
+        if (dry_run) {
+            stdout.print("    Would prune phantom keg: {s} {s}\n", .{ pn, pv }) catch {};
+        } else {
+            db.recordRemoval(pn, alloc) catch |err| {
+                stdout.print("    warning: could not prune {s}: {s}\n", .{ pn, @errorName(err) }) catch {};
+                continue;
+            };
+            stdout.print("    Pruned phantom keg: {s} {s}\n", .{ pn, pv }) catch {};
+        }
+    }
+    return n;
 }
 
 fn runNuke(args: []const []const u8) void {
@@ -2948,7 +3074,7 @@ fn runRollback(alloc: std.mem.Allocator, args: []const []const u8) void {
 
         const prev = hist[hist.len - 1];
 
-        if (prev.sha256.len > 0 and !nb.store.hasEntry(prev.sha256)) {
+        if (prev.sha256.len > 0 and !nb.store.hasEntry(g_io, prev.sha256)) {
             stderr.print("nb: store entry for previous version of '{s}' is missing\n", .{name}) catch {};
             continue;
         }
@@ -2959,7 +3085,7 @@ fn runRollback(alloc: std.mem.Allocator, args: []const []const u8) void {
         nb.cellar.remove(name, keg.version) catch {};
 
         if (prev.sha256.len > 0) {
-            nb.cellar.materialize(prev.sha256, name, prev.version) catch |err| {
+            nb.cellar.materialize(g_io, prev.sha256, name, prev.version) catch |err| {
                 stderr.print("nb: {s}: materialize failed: {}\n", .{ name, err }) catch {};
                 continue;
             };
@@ -3354,11 +3480,11 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
     const subcmd = if (args.len > 0) args[0] else "list";
     const svc_name = if (args.len > 1) args[1] else null;
 
-    const services_list = nb.services.discoverServices(alloc) catch {
+    const services_list = nb.services.discoverServices(alloc, g_io) catch {
         stderr.print("nb: failed to discover services\n", .{}) catch {};
         return;
     };
-    defer alloc.free(services_list);
+    defer nb.services.freeServiceList(alloc, services_list);
 
     if (std.mem.eql(u8, subcmd, "list")) {
         if (services_list.len == 0) {
@@ -3367,7 +3493,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
         stdout.print("==> Services:\n", .{}) catch {};
         for (services_list) |svc| {
-            const status = if (nb.services.isRunning(alloc, svc.label)) "running" else "stopped";
+            const status = if (nb.services.isRunning(alloc, g_io, svc.label)) "running" else "stopped";
             stdout.print("  {s} ({s}) [{s}]\n", .{ svc.name, svc.keg_name, status }) catch {};
         }
     } else if (std.mem.eql(u8, subcmd, "start") or std.mem.eql(u8, subcmd, "stop") or std.mem.eql(u8, subcmd, "restart")) {
@@ -3390,7 +3516,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         };
 
         if (std.mem.eql(u8, subcmd, "stop") or std.mem.eql(u8, subcmd, "restart")) {
-            nb.services.stop(alloc, svc.plist_path) catch |err| {
+            nb.services.stop(alloc, g_io, svc.plist_path) catch |err| {
                 stderr.print("nb: failed to stop {s}: {}\n", .{ svc.name, err }) catch {};
                 if (std.mem.eql(u8, subcmd, "stop")) return;
             };
@@ -3401,7 +3527,7 @@ fn runServices(alloc: std.mem.Allocator, args: []const []const u8) void {
         }
 
         if (std.mem.eql(u8, subcmd, "start") or std.mem.eql(u8, subcmd, "restart")) {
-            nb.services.start(alloc, svc.plist_path) catch |err| {
+            nb.services.start(alloc, g_io, svc.plist_path) catch |err| {
                 stderr.print("nb: failed to start {s}: {}\n", .{ svc.name, err }) catch {};
                 return;
             };
@@ -3840,12 +3966,13 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                 next_idx: *std.atomic.Value(usize),
                 had_error: *std.atomic.Value(bool),
                 alloc_: std.mem.Allocator,
+                verify: bool,
             };
 
             const debWorkerFn = struct {
                 fn run(ctx: DebWorkerCtx) void {
                     // One HTTP client per thread — reuses TCP+TLS connections
-                    var dl_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = std.Io.Threaded.global_single_threaded.io() };
+                    var dl_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = paths.safe_io };
                     defer dl_client.deinit();
 
                     while (true) {
@@ -3857,11 +3984,11 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                         const name = item.name_storage[0..item.name_len];
 
                         var telemetry_event = nb.telemetry.DownloadEvent.start(.artifact, name);
-                        downloadDebWithSha256(&dl_client, url, item.sha256, dest) catch {
+                        downloadDebWithSha256(&dl_client, url, item.sha256, dest, ctx.verify) catch {
                             // Retry once with fresh client (connection may have been reset)
-                            var retry_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = std.Io.Threaded.global_single_threaded.io() };
+                            var retry_client: std.http.Client = .{ .allocator = ctx.alloc_, .io = paths.safe_io };
                             defer retry_client.deinit();
-                            downloadDebWithSha256(&retry_client, url, item.sha256, dest) catch {
+                            downloadDebWithSha256(&retry_client, url, item.sha256, dest, ctx.verify) catch {
                                 telemetry_event.fail();
                                 ctx.had_error.store(true, .release);
                                 continue;
@@ -3881,6 +4008,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                 .next_idx = &next_dl_idx,
                 .had_error = &had_dl_error,
                 .alloc_ = alloc,
+                .verify = !opts.no_verify,
             };
 
             var dl_threads: [8]std.Thread = undefined;
@@ -3914,15 +4042,33 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     // --- Parallel extraction phase ---
     // Extract all cached .debs concurrently using a thread pool.
     // Packages that need downloading were already fetched in the parallel download phase above.
+    // `installed_files` is `null` while the extract worker is in flight,
+    // a non-null owned slice (each entry alloc'd via `alloc`) on success,
+    // and stays `null` on extraction failure. Only items with non-null
+    // `installed_files` are recorded in the DB. The slice is freed below
+    // after `recordDebInstall` has dup'd the strings into the DB.
     const ExtractItem = struct {
         pkg_idx: usize,
         cache_path_storage: [512]u8,
         cache_path_len: usize,
         needs_download: bool,
+        installed_files: ?[][]const u8 = null,
     };
 
     var extract_items: std.ArrayList(ExtractItem) = .empty;
-    defer extract_items.deinit(alloc);
+    defer {
+        // Belt-and-braces: anything still owned by an item at function
+        // exit (e.g. an early return after extract but before record)
+        // gets cleaned up here so we don't leak per-file strings on
+        // every --deb install.
+        for (extract_items.items) |item| {
+            if (item.installed_files) |files| {
+                for (files) |f| alloc.free(f);
+                alloc.free(files);
+            }
+        }
+        extract_items.deinit(alloc);
+    }
 
     // Build extraction work list
     for (resolved, 0..) |pkg, idx| {
@@ -3951,14 +4097,26 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
         if (!item.needs_download) cached += 1;
     }
 
-    // Thread pool for extraction
-    // Thread pool for extraction
+    // Thread pool for extraction. `items` is `[]ExtractItem` (mutable)
+    // because each worker owns its own slot via the next_idx counter and
+    // writes the resulting file list back into `installed_files`. No two
+    // workers ever touch the same item, so no locking is needed.
+    //
+    // The `io` field is the main thread's `g_io` (a real threadsafe
+    // Threaded executor); workers share it for createFile/writeStreaming/
+    // deleteFile inside `native_tar.extractToDir`. Previously every
+    // worker called `paths.safe_io` directly
+    // from inside extractToDir/writeFile/makeDirRecursive — the singleton
+    // is "init_single_threaded" by design and its vtable + internal pipe
+    // state corrupted under concurrent use, surfacing as the `nb install
+    // --deb cowsay` reinstall SIGSEGV. Threading g_io through is the fix.
     const ExtractCtx = struct {
-        items: []const ExtractItem,
+        items: []ExtractItem,
         resolved: []const nb.deb_index.DebPackage,
         next_idx: *std.atomic.Value(usize),
         installed_count: *std.atomic.Value(usize),
         alloc_: std.mem.Allocator,
+        io: std.Io,
     };
 
     const extractWorkerFn = struct {
@@ -3966,11 +4124,17 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
             while (true) {
                 const idx = ctx.next_idx.fetchAdd(1, .monotonic);
                 if (idx >= ctx.items.len) break;
-                const item = ctx.items[idx];
-                const cache_path = item.cache_path_storage[0..item.cache_path_len];
+                const item_ptr = &ctx.items[idx];
+                const cache_path = item_ptr.cache_path_storage[0..item_ptr.cache_path_len];
 
-                // Extract .deb to prefix
-                _ = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, cache_path) catch continue;
+                // Extract .deb to prefix and persist the file list so the
+                // main thread can hand it to recordDebInstall (which lets
+                // `nb remove --deb` actually find these files later) and
+                // so `nb list` only shows packages whose tarball really
+                // landed on disk. Errors leave `installed_files = null`
+                // and skip the installed-count bump.
+                const files = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, ctx.io, cache_path) catch continue;
+                item_ptr.installed_files = files;
                 _ = ctx.installed_count.fetchAdd(1, .monotonic);
             }
         }
@@ -3985,6 +4149,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
         .next_idx = &next_extract_idx,
         .installed_count = &installed_atomic,
         .alloc_ = alloc,
+        .io = g_io,
     };
 
     // Use up to 8 threads for extraction
@@ -4005,19 +4170,26 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     const t_extracted = milliTimestamp();
     stdout.print("    extract phase: {d}ms ({d} packages)\n", .{ t_extracted - t_downloaded, installed }) catch {};
 
-    // Run postinst scripts sequentially (must be sequential — they modify global state)
+    // Run postinst scripts sequentially for the packages whose data.tar
+    // actually landed (must be sequential — postinst scripts mutate global
+    // state like /etc/alternatives and /etc/ld.so.cache that races would
+    // corrupt). Skip items whose extraction failed, otherwise we'd run
+    // postinst on a half-extracted package and either get a hard error
+    // or leave the system in a worse state than no install at all.
     if (!opts.skip_postinst) {
         for (extract_items.items) |item| {
+            if (item.installed_files == null) continue;
             const pkg = resolved[item.pkg_idx];
             const cache_path = item.cache_path_storage[0..item.cache_path_len];
-            nb.deb_extract.runPostinst(alloc, cache_path, pkg.name, false);
+            nb.deb_extract.runPostinst(alloc, g_io, cache_path, pkg.name, false);
         }
     }
 
     for (extract_items.items) |item| {
+        const files = item.installed_files orelse continue;
         if (db) |*d| {
             const pkg = resolved[item.pkg_idx];
-            d.recordDebInstall(pkg.name, pkg.version, pkg.sha256, &.{}) catch {};
+            d.recordDebInstall(pkg.name, pkg.version, pkg.sha256, files) catch {};
         }
     }
 
@@ -4066,10 +4238,23 @@ fn runDebRemove(alloc: std.mem.Allocator, packages: []const []const u8) void {
             continue;
         };
 
-        // Delete each installed file
+        // Delete each installed file. New installs (post-1d5265d) store
+        // absolute paths in the DB, but state.json files written by older
+        // nb versions hold relative paths. Tolerate both so a user
+        // upgrading nb without reinstalling can still cleanly remove
+        // their existing debs. `deleteFileAbsolute` on a relative path
+        // resolves against cwd, which is whatever the user's shell
+        // happens to be in — so we always prepend `/` when absent.
         var removed_files: usize = 0;
         for (record.files) |file_path| {
-            std.Io.Dir.deleteFileAbsolute(g_io, file_path) catch continue;
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const abs_path = if (file_path.len > 0 and file_path[0] == '/')
+                file_path
+            else blk: {
+                const slice = std.fmt.bufPrint(&abs_buf, "/{s}", .{file_path}) catch continue;
+                break :blk slice;
+            };
+            std.Io.Dir.deleteFileAbsolute(g_io, abs_path) catch continue;
             removed_files += 1;
         }
 
@@ -4219,11 +4404,19 @@ fn httpGetToMemory(alloc: std.mem.Allocator, client: *std.http.Client, url: []co
 }
 
 /// Download a .deb with streaming SHA256 verification to content-addressable cache.
+/// Pass `verify = false` (from --no-verify) to skip the SHA256 check while
+/// still computing it, so the blob still lands in the content-addressable
+/// cache under its real digest. The check itself becomes advisory: a hash
+/// mismatch is reported but doesn't fail the install. We never skip the
+/// "the upstream said this should have a sha256 at all" check — a missing
+/// declared sha is always a hard error to keep `--no-verify` distinct from
+/// "trust the upstream blindly".
 fn downloadDebWithSha256(
     client: *std.http.Client,
     url: []const u8,
     expected_sha256: []const u8,
     dest_path: []const u8,
+    verify: bool,
 ) !void {
     const uri = std.Uri.parse(url) catch return error.DownloadFailed;
     var req = client.request(.GET, uri, .{
@@ -4280,8 +4473,19 @@ fn downloadDebWithSha256(
             return error.ChecksumMissing;
         }
         if (!std.mem.eql(u8, &hex, expected_sha256[0..64])) {
-            std.Io.Dir.deleteFileAbsolute(g_io, tmp_path) catch {};
-            return error.ChecksumMismatch;
+            if (verify) {
+                std.Io.Dir.deleteFileAbsolute(g_io, tmp_path) catch {};
+                return error.ChecksumMismatch;
+            }
+            // --no-verify: warn but accept the blob. The blob still gets
+            // renamed to dest_path (the expected-digest cache path) so a
+            // subsequent run without --no-verify will re-detect the
+            // mismatch on cache lookup; we accept the small risk of a
+            // tampered .deb sitting in the cache because the user opted
+            // into --no-verify explicitly.
+            const _msg = std.fmt.allocPrint(std.heap.smp_allocator, "nb: --no-verify: sha256 mismatch for {s} (got {s}, expected {s}); continuing\n", .{ dest_path, hex, expected_sha256[0..64] }) catch "";
+            defer std.heap.smp_allocator.free(_msg);
+            std.Io.File.stderr().writeStreamingAll(g_io, _msg) catch {};
         }
     }
 
@@ -4390,9 +4594,7 @@ fn checkForUpdate(alloc: std.mem.Allocator) void {
     // Fetch latest version from Cloudflare worker (native HTTP, no curl)
     const body = nb.fetch.get(alloc, "https://nanobrew.trilok.ai/version") catch return;
     defer alloc.free(body);
-
-
-    const latest_ver = std.mem.trimEnd(u8, body, "\n \t");
+    const latest_ver = nb.version.normalizeVersion(body);
     if (latest_ver.len == 0 or std.mem.eql(u8, latest_ver, "error")) return;
 
     // Cache latest remote version (for future use / diagnostics; banner uses VERSION vs this)
@@ -4401,8 +4603,8 @@ fn checkForUpdate(alloc: std.mem.Allocator) void {
         vf.writeStreamingAll(g_io, latest_ver) catch {};
     } else |_| {}
 
-    // Compare with current version
-    if (std.mem.eql(u8, latest_ver, VERSION)) return;
+    // Show the banner only for strict upgrades, never for stale feeds/downgrades.
+    if (!nb.version.isUpdateAvailable(VERSION, latest_ver)) return;
 
     // New version available — print colored banner to stderr (not stdout,
     // so shell completion scripts that parse `nb list` output aren't polluted)
@@ -4506,4 +4708,14 @@ fn runMigrate(alloc: std.mem.Allocator) void {
     }
 
     stdout.print("\nMigrated {d} formulae and {d} casks from Homebrew\n", .{ formula_count, cask_count }) catch {};
+    if (formula_count > 0 or cask_count > 0) {
+        stdout.print(
+            "\nNote: migrate only records package names in nanobrew's database so commands\n" ++
+            "      like `nb list`, `nb outdated`, and `nb bundle dump` know about them.\n" ++
+            "      The actual binaries still live in Homebrew's prefix — `nb where <pkg>`\n" ++
+            "      will show the package as installed but with no entry in /opt/nanobrew/prefix/bin/.\n" ++
+            "      To install a migrated package fully under nanobrew, run `nb install <pkg>`.\n",
+            .{},
+        ) catch {};
+    }
 }

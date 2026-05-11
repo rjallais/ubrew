@@ -14,8 +14,8 @@ pub const Service = struct {
     keg_version: []const u8,
 };
 
-pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn discoverServices(alloc: std.mem.Allocator, io: std.Io) ![]Service {
+    const lib_io = io;
     var services: std.ArrayList(Service) = .empty;
     defer services.deinit(alloc);
 
@@ -63,13 +63,44 @@ pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
                     var svc_path_buf: [1024]u8 = undefined;
                     const svc_path = std.fmt.bufPrint(&svc_path_buf, "{s}/{s}", .{ search_path, file_entry.name }) catch continue;
 
+                    // All-or-nothing: free any prior dupes if a later
+                    // alloc or append fails so we never leak a partial.
+                    const name_owned = alloc.dupe(u8, svc_name) catch continue;
+                    const label_owned = alloc.dupe(u8, label) catch {
+                        alloc.free(name_owned);
+                        continue;
+                    };
+                    const svc_path_owned = alloc.dupe(u8, svc_path) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        continue;
+                    };
+                    const keg_name_owned = alloc.dupe(u8, keg_name) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        continue;
+                    };
+                    const keg_version_owned = alloc.dupe(u8, ver_name) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        alloc.free(keg_name_owned);
+                        continue;
+                    };
                     services.append(alloc, .{
-                        .name = alloc.dupe(u8, svc_name) catch continue,
-                        .label = alloc.dupe(u8, label) catch continue,
-                        .plist_path = alloc.dupe(u8, svc_path) catch continue,
-                        .keg_name = alloc.dupe(u8, keg_name) catch continue,
-                        .keg_version = alloc.dupe(u8, ver_name) catch continue,
-                    }) catch {};
+                        .name = name_owned,
+                        .label = label_owned,
+                        .plist_path = svc_path_owned,
+                        .keg_name = keg_name_owned,
+                        .keg_version = keg_version_owned,
+                    }) catch {
+                        alloc.free(name_owned);
+                        alloc.free(label_owned);
+                        alloc.free(svc_path_owned);
+                        alloc.free(keg_name_owned);
+                        alloc.free(keg_version_owned);
+                    };
                 }
             }
         }
@@ -78,8 +109,8 @@ pub fn discoverServices(alloc: std.mem.Allocator) ![]Service {
     return try services.toOwnedSlice(alloc);
 }
 
-pub fn isRunning(alloc: std.mem.Allocator, label: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn isRunning(alloc: std.mem.Allocator, io: std.Io, label: []const u8) bool {
+    const lib_io = io;
     var unit_buf: [256]u8 = undefined;
     const unit = if (std.mem.endsWith(u8, label, ".service")) label else std.fmt.bufPrint(&unit_buf, "{s}.service", .{label}) catch return false;
     const result = std.process.run(alloc, lib_io, .{
@@ -115,8 +146,8 @@ pub fn isServiceFileSafe(content: []const u8, keg_prefix: []const u8) bool {
     return true;
 }
 
-pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn start(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const lib_io = io;
 
     // Read and validate the service file before installing
     const svc_file = std.Io.Dir.openFileAbsolute(lib_io, plist_path, .{}) catch return error.SystemdFailed;
@@ -168,8 +199,8 @@ pub fn start(alloc: std.mem.Allocator, plist_path: []const u8) !void {
     if (switch (result.term) { .exited => |c| c != 0, else => true }) return error.SystemdFailed;
 }
 
-pub fn stop(alloc: std.mem.Allocator, plist_path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+pub fn stop(alloc: std.mem.Allocator, io: std.Io, plist_path: []const u8) !void {
+    const lib_io = io;
     const basename = std.fs.path.basename(plist_path);
     const result = std.process.run(alloc, lib_io, .{
         .argv = &.{ "systemctl", "stop", basename },

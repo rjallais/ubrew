@@ -49,7 +49,7 @@ pub fn replacePlaceholders(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 
 /// Scan a file for @@HOMEBREW placeholder bytes.
 pub fn fileContainsPlaceholder(path: []const u8) bool {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = paths.safe_io;
     var file = std.Io.Dir.openFileAbsolute(lib_io, path, .{}) catch return false;
     var buf: [65536]u8 = undefined;
     var overlap: usize = 0;
@@ -74,12 +74,15 @@ pub fn fileContainsPlaceholder(path: []const u8) bool {
     return result;
 }
 
-/// Replace placeholders in text config files (.pc, .cmake, .la, etc.)
+/// Replace placeholders in text config files (.pc, .cmake, .la, etc.).
+/// Size cap matches the walker's 4 MiB ceiling so any file the walker
+/// hands us is processed end-to-end. Files past 4 MiB are bounce off
+/// the walker before reaching us, so this branch is just a safety net.
 pub fn relocateTextFile(io: std.Io, path: []const u8) bool {
     // Single open for stat + binary check
     const probe = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
     const stat = probe.stat(io) catch { probe.close(io); return false; };
-    if (stat.size == 0 or stat.size > 1024 * 1024) { probe.close(io); return false; }
+    if (stat.size == 0 or stat.size > 4 * 1024 * 1024) { probe.close(io); return false; }
 
     // Quick binary check on first 4 bytes without reading the whole file
     var magic: [4]u8 = undefined;
@@ -114,8 +117,21 @@ pub fn relocateTextFile(io: std.Io, path: []const u8) bool {
         if (needs_chmod) _ = std.c.fchmod(file.handle, @intCast(orig_mode));
         file.close(io);
     }
-    var buf: [1024 * 1024]u8 = undefined;
-    const n = file.readPositionalAll(io, &buf, 0) catch return false;
+
+    // Heap-allocate read+result buffers. Stack-allocating 4 MiB×2 here
+    // is unsafe: this runs on per-package install worker threads whose
+    // pthread stack is 512 KiB by default on macOS. Earlier this used
+    // a 1 MiB fixed array and silently truncated any file larger than
+    // 1 MiB (vulkan-headers/include/vulkan/vulkan.hpp ≈ 1.1 MiB,
+    // gnutls/ChangeLog ≈ 1.9 MiB) — placeholders past the 1 MiB mark
+    // were unreplaced, AND files 1-X MiB with placeholders before 1
+    // MiB had their post-replace length silently capped at the buffer
+    // size, corrupting the file.
+    const file_size: usize = @intCast(stat.size);
+    const alloc = std.heap.smp_allocator;
+    const buf = alloc.alloc(u8, file_size) catch return false;
+    defer alloc.free(buf);
+    const n = file.readPositionalAll(io, buf, 0) catch return false;
     if (n == 0) return false;
     const content = buf[0..n];
 
@@ -134,9 +150,14 @@ pub fn relocateTextFile(io: std.Io, path: []const u8) bool {
     const has_homebrew_path = std.mem.indexOf(u8, content, "/opt/homebrew/") != null;
     if (!has_placeholder and !has_homebrew_path) return false;
 
-    // Replace in-place
-    var result: [1024 * 1024]u8 = undefined;
-    const result_cap = result.len;
+    // Worst-case growth is `@@HOMEBREW_CELLAR@@` (19 bytes) →
+    // `/opt/nanobrew/prefix/Cellar` (27 bytes), i.e. +8 bytes per
+    // 19. Doubling the input size + a small constant comfortably
+    // covers any pathological all-placeholders content.
+    const result_cap = n * 2 + 4096;
+    const result = alloc.alloc(u8, result_cap) catch return false;
+    defer alloc.free(result);
+
     var out_len: usize = 0;
     var i: usize = 0;
     while (i < n) {
@@ -209,10 +230,15 @@ fn walkAndReplaceText(io: std.Io, dir_path: []const u8) void {
 
         switch (entry.kind) {
             .directory => {
-                // Skip directories that never contain executable path placeholders.
-                if (std.mem.eql(u8, entry.name, "locale") or
-                    std.mem.eql(u8, entry.name, "charset"))
-                    continue;
+                // Recurse into every directory. The per-file extension
+                // skip list already excludes .mo/.gmo/.wmo gettext files,
+                // and the binary-magic + NUL probe filters non-text data.
+                // Earlier versions skipped 'locale' wholesale, but libx11
+                // ships text Compose files at share/X11/locale/*/Compose
+                // that include "@@HOMEBREW_CELLAR@@/libx11/...". Skipping
+                // the directory left those placeholders unreplaced and
+                // broke libx11-dependent installs (see smoke-test.sh
+                // "no @@HOMEBREW_*@@ placeholders" check).
                 walkAndReplaceText(io, child_path);
             },
             .sym_link => {
@@ -265,7 +291,13 @@ fn walkAndReplaceText(io: std.Io, dir_path: []const u8) void {
                 // Single open: stat + probe in one fd
                 const file = std.Io.Dir.openFileAbsolute(io, child_path, .{}) catch continue;
                 const file_stat = file.stat(io) catch { file.close(io); continue; };
-                if (file_stat.size == 0 or file_stat.size > 1024 * 1024) { file.close(io); continue; }
+                // Cap at 4 MiB — large enough for auto-generated single-
+                // header libraries (e.g. vulkan-headers' vulkan.hpp at
+                // 1.1 MiB) and verbose ChangeLogs (e.g. gnutls at 1.9 MiB)
+                // that reference @@HOMEBREW_*@@ paths. Files larger than
+                // this are almost always datasets / locale tables / pdfs
+                // that wouldn't contain placeholders.
+                if (file_stat.size == 0 or file_stat.size > 4 * 1024 * 1024) { file.close(io); continue; }
 
                 var probe: [512]u8 = undefined;
                 const probe_n = file.readPositionalAll(io, &probe, 0) catch { file.close(io); continue; };
