@@ -18,32 +18,34 @@ const AR_HEADER_SIZE = 60;
 const Compression = enum { none, gzip, xz, zstd };
 
 /// Extract a .deb to a destination directory.
-pub fn extractDeb(alloc: std.mem.Allocator, deb_path: []const u8, dest_dir: []const u8) !void {
-    const tar_data = try decompressDataTar(alloc, deb_path);
+/// `io` must be threadsafe when invoked from a parallel worker pool —
+/// see `native_tar.extractToDir` for the full rationale.
+pub fn extractDeb(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, dest_dir: []const u8) !void {
+    const tar_data = try decompressDataTar(alloc, io, deb_path);
     defer alloc.free(tar_data);
 
-    const files = native_tar.extractToDir(alloc, tar_data, dest_dir) catch return error.ExtractFailed;
+    const files = native_tar.extractToDir(alloc, io, tar_data, dest_dir) catch return error.ExtractFailed;
     for (files) |f| alloc.free(f);
     alloc.free(files);
 }
 
 /// Extract a .deb directly to / (for system packages in Docker).
-pub fn extractDebToPrefix(alloc: std.mem.Allocator, deb_path: []const u8) !void {
-    const tar_data = try decompressDataTar(alloc, deb_path);
+pub fn extractDebToPrefix(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8) !void {
+    const tar_data = try decompressDataTar(alloc, io, deb_path);
     defer alloc.free(tar_data);
 
-    const files = native_tar.extractToDir(alloc, tar_data, "/") catch return error.ExtractFailed;
+    const files = native_tar.extractToDir(alloc, io, tar_data, "/") catch return error.ExtractFailed;
     for (files) |f| alloc.free(f);
     alloc.free(files);
 }
 
 /// Extract a .deb directly to / and return the list of installed file paths.
 /// Caller owns the returned slice and its strings.
-pub fn extractDebToPrefixWithFiles(alloc: std.mem.Allocator, deb_path: []const u8) ![][]const u8 {
-    const tar_data = try decompressDataTar(alloc, deb_path);
+pub fn extractDebToPrefixWithFiles(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8) ![][]const u8 {
+    const tar_data = try decompressDataTar(alloc, io, deb_path);
     defer alloc.free(tar_data);
 
-    return native_tar.extractToDir(alloc, tar_data, "/") catch return error.ExtractFailed;
+    return native_tar.extractToDir(alloc, io, tar_data, "/") catch return error.ExtractFailed;
 }
 
 /// Extract the control.tar from a .deb to a temp directory and run postinst if present.
@@ -66,7 +68,7 @@ pub fn runPostinst(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, p
     }.f;
 
     // Decompress control.tar in memory
-    const ctrl_tar_data = decompressControlTar(alloc, deb_path) catch return;
+    const ctrl_tar_data = decompressControlTar(alloc, lib_io, deb_path) catch return;
     defer alloc.free(ctrl_tar_data);
 
     // Extract control.tar to temp directory using native tar
@@ -79,7 +81,7 @@ pub fn runPostinst(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8, p
     std.Io.Dir.createDirAbsolute(lib_io, ctrl_dir, .default_dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(lib_io, ctrl_dir) catch {};
 
-    const files = native_tar.extractToDir(alloc, ctrl_tar_data, ctrl_dir) catch return;
+    const files = native_tar.extractToDir(alloc, lib_io, ctrl_tar_data, ctrl_dir) catch return;
     for (files) |f| alloc.free(f);
     alloc.free(files);
 
@@ -165,11 +167,11 @@ pub fn isPathSafe(path: []const u8) bool {
 
 /// List files inside a tar archive (in memory, already decompressed).
 /// Rejects paths with traversal components ("..") for safety.
-pub fn listTarFiles(alloc: std.mem.Allocator, tar_data: []const u8) ![][]const u8 {
+pub fn listTarFiles(alloc: std.mem.Allocator, io: std.Io, tar_data: []const u8) ![][]const u8 {
     const result = native_tar.listFiles(alloc, tar_data) catch return error.ListFailed;
 
     if (result.rejected > 0) {
-        const lib_io = std.Io.Threaded.global_single_threaded.io();
+        const lib_io = io;
         var msg_buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "    warning: rejected {d} unsafe paths from archive\n", .{result.rejected}) catch msg_buf[0..0];
         std.Io.File.stderr().writeStreamingAll(lib_io, msg) catch {};
@@ -180,8 +182,8 @@ pub fn listTarFiles(alloc: std.mem.Allocator, tar_data: []const u8) ![][]const u
 
 /// Decompress the data.tar member from a .deb into memory.
 /// Returns the plain tar data. Caller owns the returned slice.
-fn decompressDataTar(alloc: std.mem.Allocator, deb_path: []const u8) ![]u8 {
-    const member = try readArMember(alloc, deb_path, "data.tar");
+fn decompressDataTar(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8) ![]u8 {
+    const member = try readArMember(alloc, io, deb_path, "data.tar");
     defer alloc.free(member.data);
 
     return switch (member.compression) {
@@ -197,8 +199,8 @@ fn decompressDataTar(alloc: std.mem.Allocator, deb_path: []const u8) ![]u8 {
 
 /// Decompress the control.tar member from a .deb into memory.
 /// Returns the plain tar data. Caller owns the returned slice.
-fn decompressControlTar(alloc: std.mem.Allocator, deb_path: []const u8) ![]u8 {
-    const member = try readArMember(alloc, deb_path, "control.tar");
+fn decompressControlTar(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8) ![]u8 {
+    const member = try readArMember(alloc, io, deb_path, "control.tar");
     defer alloc.free(member.data);
 
     return switch (member.compression) {
@@ -218,8 +220,9 @@ const ArMember = struct {
 };
 
 /// Read an ar archive member whose name starts with `prefix` into memory.
-fn readArMember(alloc: std.mem.Allocator, ar_path: []const u8, prefix: []const u8) !ArMember {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+/// `io` must be threadsafe when invoked from a parallel worker.
+fn readArMember(alloc: std.mem.Allocator, io: std.Io, ar_path: []const u8, prefix: []const u8) !ArMember {
+    const lib_io = io;
     const file = try std.Io.Dir.openFileAbsolute(lib_io, ar_path, .{});
     defer file.close(lib_io);
 

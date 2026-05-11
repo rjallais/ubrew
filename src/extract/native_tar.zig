@@ -242,14 +242,22 @@ pub fn listFiles(alloc: std.mem.Allocator, tar_data: []const u8) !TarListResult 
 /// Extract all entries from a tar archive (in memory) into dest_dir.
 /// Returns list of extracted file paths (relative, without leading /).
 /// The tar data must already be decompressed.
-pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []const u8) ![][]const u8 {
+///
+/// `io` must be threadsafe — when this is called from a parallel extract
+/// worker pool (e.g. `nb install --deb` fanning out 8 workers), every
+/// thread shares this `io` to do its createFile/writeStreaming/delete
+/// calls. Earlier versions used `std.Io.Threaded.global_single_threaded.io()`
+/// here and the singleton's vtable + pipe-aggregation state would corrupt
+/// under concurrent use, surfacing as `nb install --deb cowsay` SIGSEGV.
+/// Always thread the caller's `g_io` through.
+pub fn extractToDir(alloc: std.mem.Allocator, io: std.Io, tar_data: []const u8, dest_dir: []const u8) ![][]const u8 {
     var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |f| alloc.free(f);
         files.deinit(alloc);
     }
     var rejected: usize = 0;
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = io;
     var pos: usize = 0;
     var gnu_long_name: ?[]const u8 = null;
     var gnu_long_link: ?[]const u8 = null;
@@ -339,12 +347,12 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
 
         switch (typeflag) {
             TypeFlag.directory => {
-                makeDirRecursive(abs_path) catch {};
+                makeDirRecursive(lib_io, abs_path) catch {};
             },
             TypeFlag.regular, TypeFlag.regular_alt => {
                 // Ensure parent directory exists
                 if (std.fs.path.dirname(abs_path)) |parent| {
-                    makeDirRecursive(parent) catch {};
+                    makeDirRecursive(lib_io, parent) catch {};
                 }
 
                 const data_end = pos + file_size;
@@ -354,7 +362,7 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
                 const mode_val = parseOctal(&header.mode);
                 const mode: std.posix.mode_t = @intCast(mode_val & 0o0777);
 
-                writeFile(abs_path, tar_data[pos..data_end], mode) catch {
+                writeFile(lib_io, abs_path, tar_data[pos..data_end], mode) catch {
                     // Skip files we can't write (permission errors, etc.)
                     pos += alignToBlock(file_size);
                     continue;
@@ -368,7 +376,7 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
                 }
 
                 if (std.fs.path.dirname(abs_path)) |parent| {
-                    makeDirRecursive(parent) catch {};
+                    makeDirRecursive(lib_io, parent) catch {};
                 }
 
                 // Remove existing file/symlink before creating
@@ -390,7 +398,7 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
             },
             TypeFlag.hardlink => {
                 if (std.fs.path.dirname(abs_path)) |parent| {
-                    makeDirRecursive(parent) catch {};
+                    makeDirRecursive(lib_io, parent) catch {};
                 }
 
                 // Resolve the link target relative to dest_dir
@@ -424,7 +432,7 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
     }
 
     if (rejected > 0) {
-        const lib_io2 = std.Io.Threaded.global_single_threaded.io();
+        const lib_io2 = io;
         var msg_buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "    warning: rejected {d} unsafe paths from archive\n", .{rejected}) catch msg_buf[0..0];
         std.Io.File.stderr().writeStreamingAll(lib_io2, msg) catch {};
@@ -434,8 +442,9 @@ pub fn extractToDir(alloc: std.mem.Allocator, tar_data: []const u8, dest_dir: []
 }
 
 /// Create a file with the given content and mode.
-fn writeFile(path: []const u8, data: []const u8, mode: std.posix.mode_t) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+/// `io` must be threadsafe; see `extractToDir`'s docs.
+fn writeFile(io: std.Io, path: []const u8, data: []const u8, mode: std.posix.mode_t) !void {
+    const lib_io = io;
     const perms: std.Io.File.Permissions = std.Io.File.Permissions.fromMode(mode);
     const file = try std.Io.Dir.createFileAbsolute(lib_io, path, .{ .permissions = perms });
     defer file.close(lib_io);
@@ -443,14 +452,15 @@ fn writeFile(path: []const u8, data: []const u8, mode: std.posix.mode_t) !void {
 }
 
 /// Recursively create directories (like mkdir -p).
-fn makeDirRecursive(path: []const u8) !void {
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+/// `io` must be threadsafe; see `extractToDir`'s docs.
+fn makeDirRecursive(io: std.Io, path: []const u8) !void {
+    const lib_io = io;
     std.Io.Dir.createDirAbsolute(lib_io, path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => return,
         error.FileNotFound => {
             // Parent doesn't exist — create it first
             if (std.fs.path.dirname(path)) |parent| {
-                try makeDirRecursive(parent);
+                try makeDirRecursive(io, parent);
                 std.Io.Dir.createDirAbsolute(lib_io, path, .default_dir) catch |e| switch (e) {
                     error.PathAlreadyExists => return,
                     else => return e,

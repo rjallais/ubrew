@@ -968,7 +968,7 @@ fn fullInstallOne(
         const source_cache_key = if (f.install_binaries.len > 0 and nb.store.isValidSha256(f.source_sha256)) f.source_sha256 else "";
         fast: {
             if (source_cache_key.len == 0) break :fast;
-            if (!nb.store.hasRelocatedEntry(source_cache_key)) break :fast;
+            if (!nb.store.hasRelocatedEntry(g_io, source_cache_key)) break :fast;
             var fv_buf: [256]u8 = undefined;
             const fv = f.effectiveVersion(&fv_buf);
             phase.store(@intFromEnum(Phase.installing), .release);
@@ -1024,8 +1024,8 @@ fn fullInstallOne(
 
         // 2. Extract into store (skip if already there)
         phase.store(@intFromEnum(Phase.extracting), .release);
-        if (!nb.store.hasEntry(f.bottle_sha256)) {
-            nb.store.ensureEntry(alloc, blob_path, f.bottle_sha256) catch |err| {
+        if (!nb.store.hasEntry(g_io, f.bottle_sha256)) {
+            nb.store.ensureEntry(alloc, g_io, blob_path, f.bottle_sha256) catch |err| {
                 stderr.print("nb: {s}: extract failed: {}\n", .{ f.name, err }) catch {};
                 had_error.store(true, .release);
                 phase.store(@intFromEnum(Phase.failed), .release);
@@ -1036,9 +1036,9 @@ fn fullInstallOne(
         // 3. Materialize (clonefile into Cellar)
         phase.store(@intFromEnum(Phase.installing), .release);
         fast: {
-            if (!nb.store.hasRelocatedEntry(f.bottle_sha256)) break :fast;
+            if (!nb.store.hasRelocatedEntry(g_io, f.bottle_sha256)) break :fast;
             var fv_buf: [256]u8 = undefined;
-            const fv = nb.store.detectEntryVersion(f.bottle_sha256, f.name, f.version, &fv_buf) orelse
+            const fv = nb.store.detectEntryVersion(g_io, f.bottle_sha256, f.name, f.version, &fv_buf) orelse
                 nb.cellar.detectKegVersion(f.name, f.version, &fv_buf) orelse
                 f.version;
             nb.store.materializeFromRelocated(g_io, f.bottle_sha256, f.name, fv) catch break :fast;
@@ -3068,7 +3068,7 @@ fn runRollback(alloc: std.mem.Allocator, args: []const []const u8) void {
 
         const prev = hist[hist.len - 1];
 
-        if (prev.sha256.len > 0 and !nb.store.hasEntry(prev.sha256)) {
+        if (prev.sha256.len > 0 and !nb.store.hasEntry(g_io, prev.sha256)) {
             stderr.print("nb: store entry for previous version of '{s}' is missing\n", .{name}) catch {};
             continue;
         }
@@ -4095,12 +4095,22 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
     // because each worker owns its own slot via the next_idx counter and
     // writes the resulting file list back into `installed_files`. No two
     // workers ever touch the same item, so no locking is needed.
+    //
+    // The `io` field is the main thread's `g_io` (a real threadsafe
+    // Threaded executor); workers share it for createFile/writeStreaming/
+    // deleteFile inside `native_tar.extractToDir`. Previously every
+    // worker called `std.Io.Threaded.global_single_threaded.io()` directly
+    // from inside extractToDir/writeFile/makeDirRecursive — the singleton
+    // is "init_single_threaded" by design and its vtable + internal pipe
+    // state corrupted under concurrent use, surfacing as the `nb install
+    // --deb cowsay` reinstall SIGSEGV. Threading g_io through is the fix.
     const ExtractCtx = struct {
         items: []ExtractItem,
         resolved: []const nb.deb_index.DebPackage,
         next_idx: *std.atomic.Value(usize),
         installed_count: *std.atomic.Value(usize),
         alloc_: std.mem.Allocator,
+        io: std.Io,
     };
 
     const extractWorkerFn = struct {
@@ -4117,7 +4127,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
                 // so `nb list` only shows packages whose tarball really
                 // landed on disk. Errors leave `installed_files = null`
                 // and skip the installed-count bump.
-                const files = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, cache_path) catch continue;
+                const files = nb.deb_extract.extractDebToPrefixWithFiles(ctx.alloc_, ctx.io, cache_path) catch continue;
                 item_ptr.installed_files = files;
                 _ = ctx.installed_count.fetchAdd(1, .monotonic);
             }
@@ -4133,6 +4143,7 @@ fn runDebInstall(alloc: std.mem.Allocator, packages: []const []const u8, repo_sp
         .next_idx = &next_extract_idx,
         .installed_count = &installed_atomic,
         .alloc_ = alloc,
+        .io = g_io,
     };
 
     // Use up to 8 threads for extraction

@@ -26,27 +26,29 @@ pub fn isValidSha256(sha256: []const u8) bool {
 
 /// Ensure a store entry exists for the given SHA256.
 /// If not, extract the blob tarball into the store.
-pub fn ensureEntry(alloc: std.mem.Allocator, blob_path: []const u8, sha256: []const u8) !void {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn ensureEntry(alloc: std.mem.Allocator, io: std.Io, blob_path: []const u8, sha256: []const u8) !void {
     if (!isValidSha256(sha256)) return error.InvalidSha256;
 
     var dir_buf: [512]u8 = undefined;
     const store_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return error.PathTooLong;
 
     // Already extracted?
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), store_path, .{}) catch {
+    std.Io.Dir.accessAbsolute(io, store_path, .{}) catch {
         // Need to extract
-        try tar.extractToStore(alloc, blob_path, sha256);
+        try tar.extractToStore(alloc, io, blob_path, sha256);
         return;
     };
 }
 
 /// Check if a store entry exists.
-pub fn hasEntry(sha256: []const u8) bool {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn hasEntry(io: std.Io, sha256: []const u8) bool {
     if (!isValidSha256(sha256)) return false;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return false;
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), p, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, p, .{}) catch return false;
     return true;
 }
 
@@ -57,13 +59,14 @@ pub fn entryPath(sha256: []const u8, buf: []u8) []const u8 {
 }
 
 /// Find the version directory contained in a raw store entry.
-pub fn detectEntryVersion(sha256: []const u8, name: []const u8, version: []const u8, result_buf: *[256]u8) ?[]const u8 {
+/// `io` must be threadsafe when called from a parallel install worker.
+pub fn detectEntryVersion(io: std.Io, sha256: []const u8, name: []const u8, version: []const u8, result_buf: *[256]u8) ?[]const u8 {
     if (!isValidSha256(sha256)) return null;
 
     var name_dir_buf: [512]u8 = undefined;
     const name_dir = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}/{s}", .{ STORE_DIR, sha256, name }) catch return null;
 
-    const lib_io = std.Io.Threaded.global_single_threaded.io();
+    const lib_io = io;
     var exact_buf: [512]u8 = undefined;
     const exact = std.fmt.bufPrint(&exact_buf, "{s}/{s}", .{ name_dir, version }) catch return null;
     if (std.Io.Dir.openDirAbsolute(lib_io, exact, .{})) |d| {
@@ -96,12 +99,12 @@ pub fn detectEntryVersion(sha256: []const u8, name: []const u8, version: []const
 }
 
 /// Remove a store entry (when refcount drops to 0).
-pub fn removeEntry(sha256: []const u8) void {
+pub fn removeEntry(io: std.Io, sha256: []const u8) void {
     if (!isValidSha256(sha256)) return;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_DIR, sha256 }) catch return;
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), p) catch {};
+    std.Io.Dir.cwd().deleteTree(io, p) catch {};
 }
 
 // ── Relocated store ───────────────────────────────────────────────────────────
@@ -111,12 +114,12 @@ pub fn removeEntry(sha256: []const u8) void {
 // can skip both text-scan and install_name_tool entirely.
 
 /// Check if a post-relocation snapshot exists for this blob.
-pub fn hasRelocatedEntry(sha256: []const u8) bool {
+pub fn hasRelocatedEntry(io: std.Io, sha256: []const u8) bool {
     if (!isValidSha256(sha256)) return false;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_RELOCATED_DIR, sha256 }) catch return false;
-    std.Io.Dir.accessAbsolute(std.Io.Threaded.global_single_threaded.io(), p, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, p, .{}) catch return false;
     return true;
 }
 
@@ -198,12 +201,12 @@ pub fn relocatedEntryPath(sha256: []const u8, buf: []u8) []const u8 {
 }
 
 /// Remove the post-relocation snapshot for a sha256.
-pub fn removeRelocatedEntry(sha256: []const u8) void {
+pub fn removeRelocatedEntry(io: std.Io, sha256: []const u8) void {
     if (!isValidSha256(sha256)) return;
 
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ STORE_RELOCATED_DIR, sha256 }) catch return;
-    std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), p) catch {};
+    std.Io.Dir.cwd().deleteTree(io, p) catch {};
 }
 
 const testing = std.testing;
