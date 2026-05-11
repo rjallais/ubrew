@@ -4,7 +4,12 @@ All notable changes to nanobrew are documented here.
 
 ## Unreleased
 
+_No unreleased changes yet._
+
+## [0.1.193] - 2026-05-11
+
 ### Added
+- **`nb cleanup --prune-kegs`** — new flag that drops phantom DB entries pointing at kegs that no longer exist on disk, with a hint when the 256-entry batch cap is hit so users know to re-run. (#279)
 - **Verified upstream speed registry path** — nanobrew can now resolve selected formulae and casks from a curated verified upstream registry before falling back to Homebrew metadata. GitHub Release formulae install through the native source-archive path with declared binary artifacts, Homebrew bottle formula locks install through the native bottle path, and GitHub/vendor casks reuse the native cask install pipeline. The registry is loaded from a local cache, then the hosted registry, then the embedded fallback.
 - **Seeded upstream coverage** — embedded registry now includes 256 formula records (GitHub Release binaries, resolved vendor binaries, and generated Homebrew bottle locks) and 103 cask records. The current registry covers 100/100 Homebrew top formulae and 100/100 top casks for the April 25, 2026 analytics snapshot.
 - **Programmatic upstream seeding tools** — added seeders for popular formulae and casks using Homebrew analytics, Homebrew bottle URL/SHA locks, dependency lists, optional formula dependency-closure seeding, GitHub release assets, pinned vendor URLs, direct binary downloads, checksums, platform matching, binary-only cask handling, Caskroom-relative binary normalization, cask binary target preservation, and artifact inference.
@@ -38,6 +43,21 @@ All notable changes to nanobrew are documented here.
 - **Formula seeder no longer misses single-file release archives** — release assets containing one top-level binary, such as `starship`, are preserved instead of being mistaken for a common root directory. The seeder also avoids auto-promoting platform-suffixed single binaries such as `yq_darwin_arm64` until formula artifact target names are supported.
 - **Already-installed formula installs avoid full relocation work** — no-op `nb install` runs now check whether public links need repair before relinking, instead of rerunning relocation, text placeholder scans, framework sealing, and link writes for every installed dependency.
 - **Relocated-store reinstalls preserve actual bottle revision directories** — fast reinstalls now detect the real version directory from the raw store entry before cloning a relocated snapshot, fixing packages whose formula version differs from the bottle directory, such as `yt-dlp` `2026.3.17_1`.
+- **`nb remove --deb` is now cwd-independent** — deb removal stores absolute paths in `state.json`, and tolerates older databases that recorded relative paths by prepending `/` when reading. Previously, removing from a directory other than `/` would silently no-op.
+- **Process-wide threadsafe Io accessor** — call sites that previously reached for `std.Io.Threaded.global_single_threaded.io()` now share a process-wide threadsafe accessor seeded from `main`, fixing intermittent races during parallel extract/store operations. The default initializer falls back to the singleton so tests and pre-`main` use still see a valid Io.
+- **Five correctness fixes in the apt-replacement path**, including: native xz decompression that releases its `Decompress` buffer through `deinit` rather than the original pointer; threading the caller's `Io` into postinst execution so subprocess spawns use the initialized IO instead of the failing global allocator; serialized `patchelf` auto-install across parallel workers; an `apt-get update` before patchelf auto-install; and repair of literal `/home/linuxbrew/` paths plus a symlinked `etc/` for #269.
+- **DB parser partial-allocation leaks** — `pushHistory`, the DB parser, and several install paths now cascade-free already-successful dupes when a later step fails, preventing slow leaks during retries.
+- **`@@HOMEBREW_*@@` relocation for files >1 MiB and locale directories** — the placeholder rewriter no longer skips large files or locale subtrees that previously slipped through.
+- **`nb upgrade` rejects unknown flags and uninstalled package names** instead of silently no-op'ing.
+- **`nb services list` memory leaks plugged**.
+- **`nb install` thread io through the install path** to fix Linux `CopyFailed` (#276).
+- **HTTP User-Agent override** — nanobrew now overrides Zig's default User-Agent instead of appending to it, so requests no longer leak `zig/0.16.0 (std.http)` to upstreams (#258).
+
+### Known issues
+- **`nb install --deb` exits with status 139 (SIGSEGV) on Linux even though files install correctly** — pre-existing since v0.1.190 and tracked under CI's `continue-on-error: true # Known Zig std.http.Client + musl TLS segfault`. The crash is in runtime/libc teardown after `main()` returns; install/extract/postinst all complete and files are present on disk. Reproducible cleanly under Apple `container`; usually masked in `tests/deb-parity.sh` by piping `nb` output through `tail`, which absorbs the signal. Tracked as a release-blocker for the next cycle. Workaround for Dockerfile users: pipe through `tail` or wrap in `( … ) || true` so a downstream `RUN` step doesn't fail.
+
+### Release artifacts
+- **macOS arm64 + x86_64 tarballs are signed (Developer ID Application: Rachit Pradhan, WWP9DLJ27P), hardened-runtime, and notarized via Apple's notary service.** Notary submission IDs `aa0dfb8f-47d1-4079-bff4-4907352cc116` (arm64) and `782b6fa4-03e5-4e50-8b95-2a95d75abc0c` (x86_64). Gatekeeper fetches the notarization ticket online on first run, so browser downloads no longer prompt as "unidentified developer".
 
 ### Coverage Planning
 - **Top-100 formula and cask coverage completed** — generated and curated resolved records move formulae from 11/100 to 100/100 covered and casks from 18/100 to 100/100 covered. The latest local coverage run reports 5,125,336 / 5,125,336 formula installs and 1,609,375 / 1,609,375 cask installs covered in the top-100 30-day analytics sets.
