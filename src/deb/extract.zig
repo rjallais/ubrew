@@ -40,12 +40,30 @@ pub fn extractDebToPrefix(alloc: std.mem.Allocator, io: std.Io, deb_path: []cons
 }
 
 /// Extract a .deb directly to / and return the list of installed file paths.
-/// Caller owns the returned slice and its strings.
+/// Caller owns the returned slice and its strings. Paths are absolute
+/// (prefixed with `/`) so `nb remove --deb` doesn't depend on the caller's
+/// cwd — `native_tar.extractToDir`'s isPathSafe rejects absolute tar
+/// entries, so the entries it returns are always relative-to-dest_dir
+/// (`usr/bin/hello`) and `std.Io.Dir.deleteFileAbsolute` against those
+/// would resolve relative to cwd at remove time. Storing absolute paths
+/// in the DB makes the file list a stable, cwd-independent record.
 pub fn extractDebToPrefixWithFiles(alloc: std.mem.Allocator, io: std.Io, deb_path: []const u8) ![][]const u8 {
     const tar_data = try decompressDataTar(alloc, io, deb_path);
     defer alloc.free(tar_data);
 
-    return native_tar.extractToDir(alloc, io, tar_data, "/") catch return error.ExtractFailed;
+    const relative = native_tar.extractToDir(alloc, io, tar_data, "/") catch return error.ExtractFailed;
+    errdefer {
+        for (relative) |f| alloc.free(f);
+        alloc.free(relative);
+    }
+
+    // Re-allocate each entry with a leading "/" prefix and free the original.
+    for (relative, 0..) |entry, i| {
+        const absolute = std.fmt.allocPrint(alloc, "/{s}", .{entry}) catch return error.OutOfMemory;
+        alloc.free(entry);
+        relative[i] = absolute;
+    }
+    return relative;
 }
 
 /// Extract the control.tar from a .deb to a temp directory and run postinst if present.
