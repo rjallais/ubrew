@@ -2102,10 +2102,41 @@ fn runUpdate(alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    // Download SHA256 checksum
+    // Download SHA256 checksum (native HTTP with curl/wget fallback).
+    // The native std.http client can fail on GitHub's CDN redirect chain
+    // (signed Azure blob URL); fall back to curl, then wget.
     stdout.print("==> Verifying checksum...\n", .{}) catch {};
-    const sha_body = nb.fetch.get(alloc, sha_url) catch {
-        stderr.print("nb: update failed: could not download SHA256 checksum\n", .{}) catch {};
+    const sha_body: []u8 = sha_blk: {
+        if (nb.fetch.get(alloc, sha_url)) |body| {
+            break :sha_blk body;
+        } else |_| {}
+        if (std.process.run(alloc, g_io, .{
+            .argv = &.{ "curl", "-fsSL", "--retry", "3", sha_url },
+            .stdout_limit = .unlimited,
+            .stderr_limit = .unlimited,
+        })) |c| {
+            defer alloc.free(c.stderr);
+            const ok = switch (c.term) {
+                .exited => |code| code == 0,
+                else => false,
+            };
+            if (ok and c.stdout.len > 0) break :sha_blk c.stdout;
+            alloc.free(c.stdout);
+        } else |_| {}
+        if (std.process.run(alloc, g_io, .{
+            .argv = &.{ "wget", "-q", "--tries=3", "-O", "-", sha_url },
+            .stdout_limit = .unlimited,
+            .stderr_limit = .unlimited,
+        })) |w| {
+            defer alloc.free(w.stderr);
+            const ok = switch (w.term) {
+                .exited => |code| code == 0,
+                else => false,
+            };
+            if (ok and w.stdout.len > 0) break :sha_blk w.stdout;
+            alloc.free(w.stdout);
+        } else |_| {}
+        stderr.print("nb: update failed: could not download SHA256 checksum (tried native HTTP, curl, wget)\n", .{}) catch {};
         std.process.exit(1);
     };
     defer alloc.free(sha_body);
