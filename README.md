@@ -87,14 +87,22 @@ cd nanobrew && ./install.sh
 ### Upgrading
 
 ```bash
-# v0.1.191 and later: self-update works in one call
+# v0.1.193 and later: self-update works in one call
 nb update
-
-# v0.1.190 exactly: has a file-naming bug in the extract step that
-# prevents it from self-upgrading to v0.1.191. Re-run the installer
-# once to get unstuck, then `nb update` works for future releases:
-curl -fsSL https://nanobrew.trilok.ai | bash
 ```
+
+If you're on **v0.1.192 or older** and `nb update` errors with
+`could not download SHA256 checksum`, the self-updater on your installed
+binary can't reach past a redirect-chain bug in its native HTTP client
+(fixed in v0.1.193). Re-run the installer once to get unstuck, then
+`nb update` will work for all future releases:
+
+```bash
+curl -fsSL https://nanobrew.trilok.ai/install | bash
+```
+
+The same bug also affected exactly v0.1.190 via a different code path
+(file-naming bug in the extract step); the same one-liner unsticks it.
 
 ## Usage
 
