@@ -517,12 +517,33 @@ pub fn linkKegWithOptions(name: []const u8, version: []const u8, options: LinkOp
 
     if (options.mode == .private_dependency) unlinkShimLinks(keg_dir);
 
+    // Detect kegs that need wrapper shims for env vars even in global mode
+    // (e.g. git with libexec/git-core needs GIT_EXEC_PATH)
+    var needs_env_shim = false;
+    if (options.mode == .global) {
+        var git_core_buf: [512]u8 = undefined;
+        const git_core_path = std.fmt.bufPrint(&git_core_buf, "{s}/libexec/git-core", .{keg_dir}) catch "";
+        if (git_core_path.len > 0) {
+            if (std.Io.Dir.openDirAbsolute(lib_io, git_core_path, .{})) |d| {
+                var bd = d;
+                bd.close(lib_io);
+                needs_env_shim = true;
+            } else |_| {}
+        }
+    }
+
     for (subdir_mappings) |mapping| {
         var sub_buf: [512]u8 = undefined;
         const keg_subdir = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ keg_dir, mapping.src }) catch continue;
         if (isExecutableSubdir(mapping.src)) {
             switch (options.mode) {
-                .global => linkSubdir(keg_subdir, mapping.dest, keg_dir),
+                .global => {
+                    if (needs_env_shim) {
+                        linkSubdirAsShims(keg_subdir, mapping.dest, keg_dir, &.{});
+                    } else {
+                        linkSubdir(keg_subdir, mapping.dest, keg_dir);
+                    }
+                },
                 .shim_root => linkSubdirAsShims(keg_subdir, mapping.dest, keg_dir, options.shim_path_entries),
                 .private_dependency => unlinkSubdir(keg_subdir, mapping.dest),
             }
