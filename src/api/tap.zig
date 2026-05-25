@@ -294,6 +294,8 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
     defer deps.deinit(alloc);
     var build_deps: std.ArrayList([]const u8) = .empty;
     defer build_deps.deinit(alloc);
+    var install_bins: std.ArrayList([]const u8) = .empty;
+    defer install_bins.deinit(alloc);
 
     // Track block nesting for on_macos/on_linux/bottle/test
     var in_bottle: bool = false;
@@ -439,6 +441,16 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
                 }
             }
         }
+
+        // bin.install / sbin.install
+        if (startsWith(line, "bin.install") or startsWith(line, "sbin.install")) {
+            if (extractBinInstallNames(line)) |names| {
+                for (names) |maybe_name| {
+                    const bin_name = maybe_name orelse break;
+                    try install_bins.append(alloc, try alloc.dupe(u8, bin_name));
+                }
+            }
+        }
     }
 
     // Extract version from URL if not found explicitly
@@ -482,6 +494,7 @@ pub fn parseRubyFormula(alloc: std.mem.Allocator, name: []const u8, src: []const
         .bottle_sha256 = b_sha,
         .dependencies = try deps.toOwnedSlice(alloc),
         .build_deps = try build_deps.toOwnedSlice(alloc),
+        .install_binaries = try install_bins.toOwnedSlice(alloc),
     };
 }
 
@@ -537,6 +550,51 @@ fn extractQuotedAfter(line: []const u8, keyword: []const u8) ?[]const u8 {
     // Find closing quote
     const q2 = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
     return rest[0..q2];
+}
+
+/// Extract binary names from `bin.install` / `sbin.install` Ruby directives.
+/// Handles: `bin.install "a"`, `bin.install "a", "b"`, `bin.install "src" => "dst"`.
+/// For rename syntax, only the source (left-hand) name is returned.
+fn extractBinInstallNames(line: []const u8) ?[8]?[]const u8 {
+    const install_idx = std.mem.indexOf(u8, line, ".install") orelse return null;
+    var rest = line[install_idx + ".install".len ..];
+    // Skip leading whitespace and optional open-paren
+    while (rest.len > 0 and (rest[0] == ' ' or rest[0] == '\t' or rest[0] == '(')) rest = rest[1..];
+
+    var result: [8]?[]const u8 = .{null} ** 8;
+    var count: usize = 0;
+
+    while (rest.len > 0 and count < 8) {
+        const q1 = std.mem.indexOfScalar(u8, rest, '"') orelse
+            (std.mem.indexOfScalar(u8, rest, '\'') orelse break);
+        const quote_char = rest[q1];
+        const after_q1 = rest[q1 + 1 ..];
+        const q2 = std.mem.indexOfScalar(u8, after_q1, quote_char) orelse break;
+        const name = after_q1[0..q2];
+
+        rest = after_q1[q2 + 1 ..];
+
+        // Check for rename syntax (=>)
+        var trimmed = rest;
+        while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+        if (std.mem.startsWith(u8, trimmed, "=>")) {
+            const after_arrow = trimmed[2..];
+            const tq1 = std.mem.indexOfScalar(u8, after_arrow, '"') orelse
+                (std.mem.indexOfScalar(u8, after_arrow, '\'') orelse break);
+            const tq_char = after_arrow[tq1];
+            const after_tq1 = after_arrow[tq1 + 1 ..];
+            const tq2 = std.mem.indexOfScalar(u8, after_tq1, tq_char) orelse break;
+            rest = after_tq1[tq2 + 1 ..];
+        }
+
+        if (name.len > 0) {
+            result[count] = name;
+            count += 1;
+        }
+    }
+
+    if (count == 0) return null;
+    return result;
 }
 
 /// Find bottle sha256 matching our platform tag.
@@ -960,4 +1018,70 @@ test "findBottleSha256 - matching tag" {
     if (is_macos and builtin.cpu.arch == .aarch64) {
         try testing.expectEqualStrings("abcdef", sha.?);
     }
+}
+
+test "extractBinInstallNames - single binary" {
+    const result = extractBinInstallNames("bin.install \"crush\"") orelse unreachable;
+    try testing.expectEqualStrings("crush", result[0].?);
+    try testing.expect(result[1] == null);
+}
+
+test "extractBinInstallNames - multiple binaries" {
+    const result = extractBinInstallNames("bin.install \"a\", \"b\", \"c\"") orelse unreachable;
+    try testing.expectEqualStrings("a", result[0].?);
+    try testing.expectEqualStrings("b", result[1].?);
+    try testing.expectEqualStrings("c", result[2].?);
+    try testing.expect(result[3] == null);
+}
+
+test "extractBinInstallNames - rename syntax" {
+    const result = extractBinInstallNames("bin.install \"crush\" => \"crush-cli\"") orelse unreachable;
+    try testing.expectEqualStrings("crush", result[0].?);
+    try testing.expect(result[1] == null);
+}
+
+test "extractBinInstallNames - sbin" {
+    const result = extractBinInstallNames("sbin.install \"daemon\"") orelse unreachable;
+    try testing.expectEqualStrings("daemon", result[0].?);
+}
+
+test "extractBinInstallNames - parenthesized call" {
+    const result = extractBinInstallNames("bin.install(\"tool\")") orelse unreachable;
+    try testing.expectEqualStrings("tool", result[0].?);
+}
+
+test "parseRubyFormula - extracts install_binaries" {
+    const src =
+        \\class Zmx < Formula
+        \\  version "0.5.0"
+        \\  url "https://example.com/zmx-0.5.0.tar.gz"
+        \\  sha256 "abc123"
+        \\  def install
+        \\    bin.install "zmx"
+        \\  end
+        \\end
+    ;
+    const formula = try parseRubyFormula(testing.allocator, "zmx", src);
+    defer formula.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), formula.install_binaries.len);
+    try testing.expectEqualStrings("zmx", formula.install_binaries[0]);
+}
+
+test "parseRubyFormula - extracts install_binaries with rename" {
+    const src =
+        \\class Crush < Formula
+        \\  version "1.0.0"
+        \\  url "https://example.com/crush-1.0.0.tar.gz"
+        \\  sha256 "def456"
+        \\  def install
+        \\    bin.install "crush" => "crush-cli"
+        \\    sbin.install "crushd"
+        \\  end
+        \\end
+    ;
+    const formula = try parseRubyFormula(testing.allocator, "crush", src);
+    defer formula.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), formula.install_binaries.len);
+    try testing.expectEqualStrings("crush", formula.install_binaries[0]);
+    try testing.expectEqualStrings("crushd", formula.install_binaries[1]);
 }

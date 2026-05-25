@@ -107,7 +107,7 @@ fn milliTimestamp() i64 {
 
 const ROOT = paths.ROOT;
 const PREFIX = paths.PREFIX;
-const VERSION = "0.1.193";
+const VERSION = "0.1.194";
 
 pub fn main(init: std.process.Init) !void {
     g_io = init.io;
@@ -166,8 +166,9 @@ pub fn main(init: std.process.Init) !void {
         .migrate => runMigrate(alloc),
     }
 
-    // Check for updates (once per day, non-blocking)
-    checkForUpdate(alloc);
+    // Check for updates (once per day, non-blocking); skip after self-update
+    // to avoid a spurious banner from the stale in-memory VERSION constant.
+    if (cmd != .update) checkForUpdate(alloc);
 }
 fn parseCommand(arg: []const u8) ?Command {
     const cmds = .{
