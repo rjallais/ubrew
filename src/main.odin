@@ -9,15 +9,30 @@ import "cask"
 import "formula"
 import "installer"
 
-main :: proc() {
-    fmt.println("=== ubrew — The Odin Package Manager Experiment ===")
+print_usage :: proc() {
+    fmt.println("\x1b[1mubrew\x1b[0m \x1b[90mv0.1.0\x1b[0m — The Odin Package Manager Experiment")
+    fmt.println("\n  Faster than zerobrew. Faster than homebrew. Written in Odin.")
+    fmt.println("  Native compiled binary + perfect JSON parsing + curl driver.")
+    fmt.println("  Works on Linux.")
+    fmt.println("\nUSAGE:")
+    fmt.println("  ubrew <command> [arguments]")
+    fmt.println("\nCOMMANDS:")
+    fmt.println("  install <formula>          Install standard Homebrew CLI formula (bottle)")
+    fmt.println("  <cask_token>               Resolve and display Homebrew Cask metadata")
+    fmt.println("  help, --help, -h           Show this help banner")
+    fmt.println("\nEXAMPLES:")
+    fmt.println("  ubrew install tree")
+    fmt.println("  ubrew google-chrome")
+    fmt.println("  ubrew help")
+}
 
-    if len(os.args) < 2 {
-        fmt.println("Usage:")
-        fmt.println("  ubrew <cask_token>          (Resolve Cask metadata)")
-        fmt.println("  ubrew install <formula>    (Install a CLI formula)")
-        os.exit(1)
+main :: proc() {
+    if len(os.args) < 2 || os.args[1] == "help" || os.args[1] == "--help" || os.args[1] == "-h" {
+        print_usage()
+        os.exit(0)
     }
+
+    fmt.println("=== ubrew — The Odin Package Manager Experiment ===")
 
     if os.args[1] == "install" {
         if len(os.args) < 3 {
