@@ -18376,5 +18376,580 @@
         "sha256": "required"
       }
     }
+,
+    {
+      "kind": "formula",
+      "token": "ublue-os/tap/heic-to-dynamic-gnome-wallpaper",
+      "name": "heic-to-dynamic-gnome-wallpaper",
+      "desc": "Convert macOS HEIC dynamic wallpapers to GNOME dynamic wallpapers",
+      "homepage": "https://github.com/fia0/heic-to-dynamic-gnome-wallpaper"
+    },
+    {
+      "kind": "formula",
+      "token": "ublue-os/tap/linux-mcp-server",
+      "name": "linux-mcp-server",
+      "desc": "MCP server for Linux system administration and diagnostics",
+      "homepage": "https://rhel-lightspeed.github.io/linux-mcp-server/"
+    },
+    {
+      "kind": "formula",
+      "token": "ublue-os/tap/pmbootstrap",
+      "name": "pmbootstrap",
+      "desc": "Sophisticated chroot / build / flash tool to develop and install postmarketOS",
+      "homepage": "https://gitlab.postmarketos.org/postmarketOS/pmbootstrap"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/1password-gui-linux",
+      "name": "1Password",
+      "desc": "Password manager that keeps all passwords secure behind one password",
+      "homepage": "https://1password.com/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-cli-linux",
+      "name": "Google Antigravity CLI",
+      "desc": "Terminal interface for Antigravity agents",
+      "homepage": "https://antigravity.google/product/antigravity-cli"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-ide-linux",
+      "name": "Google Antigravity IDE",
+      "desc": "AI Coding Agent IDE",
+      "homepage": "https://antigravity.google/product/antigravity-ide"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-linux",
+      "name": "Google Antigravity",
+      "desc": "Agent orchestration platform",
+      "homepage": "https://antigravity.google/product/antigravity-2"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/asusctl-linux",
+      "name": "asusctl",
+      "desc": "ASUS laptop control CLI and immutable-friendly system daemon payload",
+      "homepage": "https://gitlab.com/asus-linux/asusctl"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/aurora-wallpapers",
+      "name": "aurora-wallpapers",
+      "desc": "Wallpapers for Aurora",
+      "homepage": "https://github.com/projectbluefin/artwork"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bazzite-wallpapers",
+      "name": "bazzite-wallpapers",
+      "desc": "Wallpapers for Bazzite",
+      "homepage": "https://bazzite.gg/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bluefin-wallpapers-extra",
+      "name": "bluefin-wallpapers-extra",
+      "desc": "Extra Wallpapers for Bluefin",
+      "homepage": "https://github.com/ublue-os/artwork"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bluefin-wallpapers",
+      "name": "bluefin-wallpapers",
+      "desc": "Wallpapers for Bluefin",
+      "homepage": "https://github.com/projectbluefin/artwork"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/framework-tool",
+      "name": "Framework System Tool",
+      "desc": "System tool for Framework laptop hardware management",
+      "homepage": "https://github.com/FrameworkComputer/framework-system"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/framework-wallpapers",
+      "name": "framework-wallpapers",
+      "desc": "Wallpapers for Framework laptops",
+      "homepage": "https://github.com/projectbluefin/artwork"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/goose-linux",
+      "name": "Goose",
+      "desc": "Open source, extensible AI agent that goes beyond code suggestions",
+      "homepage": "https://block.github.io/goose/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/jetbrains-toolbox-linux",
+      "name": "JetBrains Toolbox",
+      "desc": "JetBrains tools manager",
+      "homepage": "https://www.jetbrains.com/toolbox-app/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/lm-studio-linux",
+      "name": "LM Studio",
+      "desc": "Discover, download, and run local LLMs",
+      "homepage": "https://lmstudio.ai/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/rog-control-center-linux",
+      "name": "ROG Control Center",
+      "desc": "ASUS ROG Control Center GUI and user daemon with XDG-first installation",
+      "homepage": "https://gitlab.com/asus-linux/asusctl"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/visual-studio-code-linux",
+      "name": "Microsoft Visual Studio Code",
+      "desc": "Open-source code editor",
+      "homepage": "https://code.visualstudio.com/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/visual-studio-code-linux@insiders",
+      "name": "Microsoft Visual Studio Code Insiders",
+      "desc": "Open-source code editor (Insiders build)",
+      "homepage": "https://code.visualstudio.com/insiders/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/vscodium-linux",
+      "name": "VSCodium",
+      "desc": "Open-source code editor",
+      "homepage": "https://vscodium.com/"
+    },
+    {
+      "token": "homebrew/cask-fonts/font-jetbrains-mono-nerd-font",
+      "name": "JetBrainsMono Nerd Font families (JetBrains Mono)",
+      "kind": "cask",
+      "homepage": "https://github.com/ryanoasis/nerd-fonts",
+      "desc": "JetBrains Mono Nerd Font family",
+      "upstream": {
+        "type": "github_release",
+        "repo": "ryanoasis/nerd-fonts",
+        "verified": true
+      },
+      "analytics": {
+        "cask_install_30d_rank": 26,
+        "cask_install_30d_count": "17,334"
+      },
+      "assets": {
+        "macos-arm64": {
+          "pattern": "JetBrainsMono.zip"
+        },
+        "macos-x86_64": {
+          "pattern": "JetBrainsMono.zip"
+        }
+      },
+      "artifacts": [
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Bold.ttf"
+        }
+      ],
+      "resolved": {
+        "tag": "v3.4.0",
+        "version": "3.4.0",
+        "assets": {
+          "macos-arm64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          },
+          "macos-x86_64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          }
+        }
+      },
+      "verification": {
+        "sha256": "required"
+      }
+    }
   ]
 }
