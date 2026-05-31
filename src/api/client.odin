@@ -6,6 +6,7 @@ import "core:encoding/json"
 import "core:strings"
 import "core:c/libc"
 import "../cask"
+import "../formula"
 
 fetch_cask :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/cask/%s.json", token)
@@ -124,4 +125,69 @@ destroy_cask :: proc(c: cask.Cask) {
         }
     }
     delete(c.artifacts)
+}
+
+fetch_formula :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
+    url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
+    
+    temp_file := "/tmp/ubrew_fetch_formula.json"
+    cmd := fmt.tprintf("curl -sSL \"%s\" -o %s", url, temp_file)
+    
+    cmd_cstr := strings.clone_to_cstring(cmd, context.temp_allocator)
+    exit_code := libc.system(cmd_cstr)
+    if exit_code != 0 {
+        return f, .EOF
+    }
+    defer os.remove(temp_file)
+
+    data, read_err := os.read_entire_file(temp_file, context.allocator)
+    if read_err != nil {
+        return f, .EOF
+    }
+    defer delete(data)
+
+    json_val, parse_err := json.parse(data)
+    if parse_err != nil {
+        return f, parse_err
+    }
+    defer json.destroy_value(json_val)
+
+    root_obj := json_val.(json.Object)
+
+    f.name = strings.clone(root_obj["name"].(json.String))
+    f.desc = strings.clone(root_obj["desc"].(json.String))
+
+    versions := root_obj["versions"].(json.Object)
+    f.version = strings.clone(versions["stable"].(json.String))
+
+    if bottle_val, ok2 := root_obj["bottle"]; ok2 {
+        bottle_obj := bottle_val.(json.Object)
+        if stable_val, ok3 := bottle_obj["stable"]; ok3 {
+            stable_obj := stable_val.(json.Object)
+            if files_val, ok4 := stable_obj["files"]; ok4 {
+                files_obj := files_val.(json.Object)
+                
+                target_key := "x86_64_linux"
+                if _, exists := files_obj[target_key]; !exists {
+                    target_key = "all"
+                }
+
+                if target_val, exists := files_obj[target_key]; exists {
+                    target_obj := target_val.(json.Object)
+                    f.bottle_url = strings.clone(target_obj["url"].(json.String))
+                    f.bottle_sha256 = strings.clone(target_obj["sha256"].(json.String))
+                }
+            }
+        }
+    }
+
+    return f, nil
+}
+
+destroy_formula :: proc(f: formula.Formula) {
+    delete(f.name)
+    delete(f.desc)
+    delete(f.version)
+    delete(f.bottle_url)
+    delete(f.bottle_sha256)
 }
