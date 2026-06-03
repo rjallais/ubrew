@@ -1,0 +1,29 @@
+[tools]
+odin = "dev-2026-05"
+
+[env]
+UBREW_TELEMETRY = "0" # Disable telemetry in development environments
+
+[tasks.build]
+description = "Build the ubrew executable using the Odin compiler"
+run = "odin build src -out:ubrew"
+sources = ["src/**/*.odin"]
+outputs = ["ubrew"]
+
+[tasks.run]
+description = "Run ubrew with arguments"
+run = "./ubrew"
+depends = ["build"]
+
+[tasks.test]
+description = "Run integration smoke tests"
+run = "./tests/smoke-test.sh ./ubrew"
+depends = ["build"]
+
+[tasks.clean]
+description = "Clean up compiler build artifacts"
+run = "rm -f ubrew"
+
+[tasks.check]
+description = "Type check all Odin source files"
+run = "odin check src"

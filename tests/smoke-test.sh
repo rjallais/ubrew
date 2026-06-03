@@ -19,6 +19,12 @@ echo ""
 sudo "$NB" init >/dev/null 2>&1 || true
 export PATH="/opt/nanobrew/prefix/bin:$PATH"
 
+# Ensure required 3rd-party taps are registered (idempotent).
+# `ublue-os/tap` provides casks used by tests below.
+# `justrach/nanobrew` exercises the new GitHub formula-fetch path.
+sudo "$NB" tap add ublue-os/tap https://github.com/ublue-os/homebrew-tap 2>/dev/null || true
+sudo "$NB" tap add justrach/nanobrew https://github.com/justrach/nanobrew 2>/dev/null || true
+
 # ===================================================================
 # Basic install + binary verification
 # ===================================================================
@@ -126,6 +132,29 @@ else
   fail "Cellar directory not found at $CELLAR_DIR"
 fi
 
+echo ""
+echo "--- Test: installed binaries have correct dynamic linker (not @@HOMEBREW_PREFIX@@) ---"
+UBREW_CELLAR="/opt/ubrew/prefix/Cellar"
+if [ -d "$UBREW_CELLAR" ]; then
+  # Check the PT_INTERP segment specifically via patchelf --print-interpreter,
+  # since the binary may legitimately contain @-strings as RPATH or constant data.
+  BAD_INTERP=""
+  for bin in $(find "$UBREW_CELLAR" -type f -executable 2>/dev/null); do
+    interp=$(patchelf --print-interpreter "$bin" 2>/dev/null || true)
+    if [[ "$interp" == *"@@HOMEBREW_PREFIX@@"* ]]; then
+      BAD_INTERP="$BAD_INTERP $bin"
+    fi
+  done
+  if [ -z "$BAD_INTERP" ]; then
+    pass "no installed binaries have @@HOMEBREW_PREFIX@@ as interpreter"
+  else
+    fail "installed binaries still have @@HOMEBREW_PREFIX@@ interpreter"
+    echo "$BAD_INTERP" | sed 's/^/      /'
+  fi
+else
+  fail "ubrew Cellar directory not found at $UBREW_CELLAR"
+fi
+
 # ===================================================================
 # Search
 # ===================================================================
@@ -138,6 +167,75 @@ if grep -q "ripgrep" <<<"$SEARCH_OUT"; then
 else
   fail "search ripgrep output missing 'ripgrep'"
   echo "      output: $(echo "$SEARCH_OUT" | head -3)"
+fi
+
+echo ""
+echo "--- Test: search ublue-os (3rd-party tap formulae + casks) ---"
+SEARCH_UBLUE=$("$NB" search ublue-os 2>&1) || true
+if grep -q "ublue-os/tap" <<<"$SEARCH_UBLUE"; then
+  pass "search ublue-os contains 3rd-party tap results"
+else
+  fail "search ublue-os output missing 3rd-party tap results"
+  echo "      output: $(echo "$SEARCH_UBLUE" | head -5)"
+fi
+
+echo ""
+echo "--- Test: info --cask ublue-os/tap/visual-studio-code-linux (3rd-party tap cask) ---"
+CASK_UBLUE=$("$NB" info --cask ublue-os/tap/visual-studio-code-linux 2>&1) || true
+if grep -q "Visual Studio Code" <<<"$CASK_UBLUE"; then
+  pass "info --cask ublue-os/tap/visual-studio-code-linux works"
+else
+  fail "info --cask ublue-os/tap/visual-studio-code-linux failed"
+  echo "      output: $(echo "$CASK_UBLUE" | head -5)"
+fi
+
+if [ "$(uname -s)" = "Linux" ]; then
+  echo ""
+  echo "--- Test: info --cask ublue-os/tap/bluefin-wallpapers (wallpaper cask, DE-aware) ---"
+  WALLPAPER_OUT=$("$NB" info --cask ublue-os/tap/bluefin-wallpapers 2>&1) || true
+  if grep -q "bluefin-wallpapers" <<<"$WALLPAPER_OUT" && grep -q "Wallpaper" <<<"$WALLPAPER_OUT"; then
+    pass "info --cask wallpaper cask works (DE-aware asset selection)"
+  else
+    fail "info --cask ublue-os/tap/bluefin-wallpapers failed"
+    echo "      output: $(echo "$WALLPAPER_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: info --cask ublue-os/tap/lm-studio-linux (AppImage cask) ---"
+  APPIMAGE_OUT=$("$NB" info --cask ublue-os/tap/lm-studio-linux 2>&1) || true
+  if grep -q "LM Studio" <<<"$APPIMAGE_OUT" && grep -q "AppImage" <<<"$APPIMAGE_OUT"; then
+    pass "info --cask ublue-os/tap/lm-studio-linux works (AppImage)"
+  else
+    fail "info --cask ublue-os/tap/lm-studio-linux failed"
+    echo "      output: $(echo "$APPIMAGE_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: tap -> search -> info flow for 3rd-party formula ---"
+  TAP_SEARCH_OUT=$("$NB" search nanobrew 2>&1) || true
+  if grep -q "justrach/nanobrew/nanobrew" <<<"$TAP_SEARCH_OUT"; then
+    pass "search nanobrew returns tapped formula from GitHub"
+  else
+    fail "search nanobrew did not return tapped formula"
+    echo "      output: $(echo "$TAP_SEARCH_OUT" | head -5)"
+  fi
+  TAP_INFO_OUT=$("$NB" info justrach/nanobrew/nanobrew 2>&1) || true
+  if grep -q "macOS-only" <<<"$TAP_INFO_OUT"; then
+    pass "info justrach/nanobrew/nanobrew detects macOS-only formula"
+  else
+    fail "info justrach/nanobrew/nanobrew did not detect macOS-only"
+    echo "      output: $(echo "$TAP_INFO_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: info dash resolves via oldname/alias to dash-shell ---"
+  DASH_OUT=$("$NB" info dash 2>&1) || true
+  if grep -q "dash-shell" <<<"$DASH_OUT"; then
+    pass "info dash resolves to dash-shell via oldname alias"
+  else
+    fail "info dash did not resolve to dash-shell"
+    echo "      output: $(echo "$DASH_OUT" | head -5)"
+  fi
 fi
 
 # ===================================================================

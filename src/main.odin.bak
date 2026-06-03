@@ -87,9 +87,6 @@ ensure_ubrew_dirs :: proc() -> bool {
     return true
 }
 
-
-
-
 run_init :: proc() {
     if !ensure_ubrew_dirs() {
         os.exit(1)

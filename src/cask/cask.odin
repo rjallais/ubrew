@@ -13,10 +13,27 @@ Binary_Artifact :: struct {
     target: string,
 }
 
+Wallpaper_Artifact :: struct {
+	glob: string,
+}
+
+AppImage_Artifact :: struct {
+	source: string,
+	target: string,
+}
+
+Generic_Artifact :: struct {
+	source: string,
+	target: string,
+}
+
 Artifact :: union {
-    App_Artifact,
-    Font_Artifact,
-    Binary_Artifact,
+	App_Artifact,
+	Font_Artifact,
+	Binary_Artifact,
+	Wallpaper_Artifact,
+	AppImage_Artifact,
+	Generic_Artifact,
 }
 
 Cask :: struct {

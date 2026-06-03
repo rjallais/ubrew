@@ -1,5 +1,3 @@
 # ignore compiled ubrew binaries
 ubrew
 /tmp/
-.zig-cache
-zig-out
