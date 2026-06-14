@@ -11,12 +11,45 @@ import "../kernel"
 import "../platform"
 import "../tap"
 
-REGISTRY_PATH :: "registry/upstream.json"
+get_registry_path :: proc(allocator := context.temp_allocator) -> string {
+	opt_path := "/opt/ubrew/db/upstream.json"
+	if os.is_file(opt_path) {
+		return strings.clone(opt_path, allocator)
+	}
+	
+	if os.is_file("registry/upstream.json") {
+		return strings.clone("registry/upstream.json", allocator)
+	}
+	
+	exe_path, exe_err := os.get_executable_path(allocator)
+	if exe_err == nil && len(exe_path) > 0 {
+		if idx := strings.last_index(exe_path, "/"); idx >= 0 {
+			dir := exe_path[:idx]
+			rel_path := fmt.tprintf("%s/registry/upstream.json", dir)
+			if os.is_file(rel_path) {
+				return rel_path
+			}
+			rel_path2 := fmt.tprintf("%s/../registry/upstream.json", dir)
+			if os.is_file(rel_path2) {
+				return rel_path2
+			}
+		}
+	}
+	
+	return strings.clone("registry/upstream.json", allocator)
+}
 API_CACHE_DIR :: "/opt/ubrew/cache/api"
 FORMULA_LIST_CACHE :: API_CACHE_DIR + "/formula.json"
 CASK_LIST_CACHE :: API_CACHE_DIR + "/cask.json"
 FORMULA_LIST_URL :: "https://formulae.brew.sh/api/formula.json"
 CASK_LIST_URL :: "https://formulae.brew.sh/api/cask.json"
+
+// Phase 2: compact TSV search index files. Built from the 30MB formula.json /
+// 15MB cask.json dumps on first search (or `update`). Each line is one
+// record: `name\tdesc\tversion\n` (casks also have token). Reads/scans are
+// ~50x faster than parsing the full JSON dump.
+FORMULA_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.formulae.tsv"
+CASK_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.casks.tsv"
 
 registry_mmap_parse :: proc(path: string) -> (json.Value, json.Error) {
 	mf, ok := kernel.mapped_file_open(path)
@@ -110,7 +143,7 @@ fetch_cached_api_list :: proc(url, cache_path: string) -> (data: []u8, err: os.E
 	defer os.remove(temp_file)
 	defer os.close(temp_f)
 
-	dl_args := []string{"curl", "-s", "-f", "-L", url, "-o", temp_file}
+        dl_args := []string{"curl", "-s", "-f", "-L", "--compressed", url, "-o", temp_file}
 	if !platform.exec_cmd("curl", dl_args) {
 		return nil, .EOF
 	}
@@ -182,6 +215,86 @@ json_field_string_raw :: proc(obj, key: string) -> string {
 
 		return ""
 	}
+}
+
+// json_field_array_as_csv extracts a JSON array field and returns its
+// string elements as a comma-separated value. E.g. for
+// `"executables":["jq","jq.py"]` it returns "jq,jq.py".
+// Used by build_formula_search_index to populate the executables column.
+json_field_array_as_csv :: proc(obj, key: string) -> string {
+	pattern := fmt.tprintf("\"%s\":[", key)
+	start_search := 0
+	for {
+		idx := strings.index(obj[start_search:], pattern)
+		if idx < 0 {
+			return ""
+		}
+		idx += start_search
+		if idx > 0 {
+			prev := obj[idx - 1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') ||
+				(prev >= '0' && prev <= '9') || prev == '_' {
+				start_search = idx + 1
+				continue
+			}
+		}
+		arr_start := idx + len(pattern)
+		depth := 1
+		i := arr_start
+		in_str := false
+		esc := false
+		result := make([dynamic]u8, 0, 64, context.temp_allocator)
+		first := true
+		for i < len(obj) {
+			c := obj[i]
+			if in_str {
+				if esc {
+					esc = false
+				} else if c == '\\' {
+					esc = true
+				} else if c == '"' {
+					in_str = false
+				}
+				i += 1
+				continue
+			}
+			if c == '"' {
+				if !first {
+					append(&result, ',')
+				}
+				first = false
+				i += 1
+				s := i
+				esc2 := false
+				for i < len(obj) {
+					cc := obj[i]
+					if esc2 {
+						esc2 = false
+					} else if cc == '\\' {
+						esc2 = true
+					} else if cc == '"' {
+						break
+					}
+					i += 1
+				}
+				if i > s {
+					for j := s; j < i; j += 1 {
+						append(&result, obj[j])
+					}
+				}
+				i += 1
+				continue
+			}
+			if c == '[' { depth += 1 }
+			else if c == ']' {
+				depth -= 1
+				if depth == 0 { break }
+			}
+			i += 1
+		}
+		return string(result[:])
+	}
+	return ""
 }
 
 append_api_formulae_matches_fast :: proc(data: []u8, out: ^[dynamic]Formula_Search_Result, query_lower: string, limit: int) {
@@ -404,6 +517,10 @@ fetch_cask :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
         return c, nil
     }
 
+    if c_tap, _, ok := fetch_cask_tap(token); ok {
+        return c_tap, nil
+    }
+
     // Third-party taps (token contains '/') are not present in the Homebrew cask API.
     // We fall back to our local verified upstream registry when the API fetch fails.
     c2, err2 := fetch_cask_registry(token)
@@ -414,31 +531,177 @@ fetch_cask :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     return c, err
 }
 
+ruby_to_cask :: proc(rc: tap.Ruby_Cask) -> (c: cask.Cask, ok: bool) {
+	c.token = strings.clone(rc.token, context.allocator)
+	c.name = strings.clone(rc.name, context.allocator)
+	c.desc = strings.clone(rc.desc, context.allocator)
+	c.version = strings.clone(rc.version, context.allocator)
+	c.url = strings.clone(rc.url, context.allocator)
+	c.sha256 = strings.clone(rc.sha256, context.allocator)
+	c.homepage = strings.clone(rc.homepage, context.allocator)
+	c.auto_updates = false
+
+	is_appimage := strings.contains(strings.to_lower(rc.url), "appimage")
+	is_wallpaper := strings.contains(strings.to_lower(rc.token), "wallpaper")
+
+	artifacts_list := make([dynamic]cask.Artifact, context.allocator)
+
+	if is_wallpaper {
+		append(&artifacts_list, cask.Wallpaper_Artifact{glob = strings.clone("*", context.allocator)})
+	} else {
+		// Process binaries
+		for b, i in rc.binaries {
+			src := b
+			if strings.has_prefix(src, "squashfs-root/") {
+				src = src[len("squashfs-root/"):]
+			}
+			tgt := i < len(rc.binary_targets) ? rc.binary_targets[i] : ""
+			if tgt == "" {
+				tgt = os.base(src)
+			}
+			
+			if is_appimage {
+				append(&artifacts_list, cask.AppImage_Artifact{
+					source = strings.clone(src, context.allocator),
+					target = strings.clone(tgt, context.allocator),
+				})
+			} else {
+				append(&artifacts_list, cask.Binary_Artifact{
+					source = strings.clone(src, context.allocator),
+					target = strings.clone(tgt, context.allocator),
+				})
+			}
+		}
+
+		// Process artifacts
+		for b, i in rc.artifact_sources {
+			src := b
+			if strings.has_prefix(src, "squashfs-root/") {
+				src = src[len("squashfs-root/"):]
+			}
+			tgt := i < len(rc.artifact_targets) ? rc.artifact_targets[i] : ""
+			if tgt == "" {
+				tgt = os.base(src)
+			}
+
+			append(&artifacts_list, cask.Generic_Artifact{
+				source = strings.clone(src, context.allocator),
+				target = strings.clone(tgt, context.allocator),
+			})
+		}
+	}
+
+	c.artifacts = artifacts_list[:]
+	return c, true
+}
+
+fetch_cask_tap :: proc(token: string) -> (c: cask.Cask, tap_name: string, ok: bool) {
+	target_tap, cask_name := parse_tap_token(token)
+	defer delete(target_tap)
+	defer delete(cask_name)
+	if len(target_tap) == 0 {
+		return c, "", false
+	}
+
+	tap_entries := tap.read_taps()
+	defer {
+		for e in tap_entries {
+			tap.destroy_read_tap_entry(e)
+		}
+		delete(tap_entries)
+	}
+
+	if len(tap_entries) == 0 {
+		return c, "", false
+	}
+
+	// Find the matching tap entry
+	matched: tap.Tap
+	matched_ok := false
+	for e in tap_entries {
+		if e.name == target_tap {
+			matched = tap.tap_from_entry(e)
+			matched_ok = true
+			break
+		}
+	}
+	if !matched_ok {
+		return c, "", false
+	}
+	defer tap.destroy_tap(matched)
+
+	resolved_cask_name := cask_name
+	if len(cask_name) == 0 {
+		resolved_cask_name = matched.name
+		if idx := strings.index(resolved_cask_name, "/"); idx >= 0 {
+			resolved_cask_name = resolved_cask_name[idx + 1:]
+		}
+	}
+
+	if !tap.tap_is_trusted(matched.name) {
+		if !tap.prompt_and_trust_tap(matched.name) {
+			fmt.eprintf("Error: Tap '%s' is not trusted. To trust it, run: ubrew tap trust %s\n", matched.name, matched.name)
+			os.exit(1)
+		}
+	}
+
+	ruby_src, fetched := tap.fetch_cask_ruby(matched, resolved_cask_name)
+	if !fetched {
+		return c, "", false
+	}
+	defer delete(ruby_src)
+
+	rc, parsed := tap.parse_ruby_cask(ruby_src, resolved_cask_name)
+	if !parsed {
+		return c, "", false
+	}
+	defer tap.destroy_ruby_cask(rc)
+
+	converted, conv_ok := ruby_to_cask(rc)
+	if !conv_ok {
+		return c, "", false
+	}
+	return converted, matched.name, true
+}
+
+
 fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/cask/%s.json", token)
 
-    temp_f, terr := os.create_temp_file("", "ubrew_fetch_cask_*.json")
-    if terr != nil {
-        return c, .EOF
-    }
-    // Clone the name so it remains valid after we close the file handle.
-    temp_file := strings.clone(os.name(temp_f), context.allocator)
-    defer delete(temp_file)
-    defer os.remove(temp_file)
-    defer os.close(temp_f)
+    // Check the per-cask cache (warmed by warm_casks_cache_parallel).
+    cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
+    data, read_err := os.read_entire_file(cache_path, context.allocator)
+    needs_download := read_err != nil || len(data) == 0
 
-    if !strings.has_prefix(url, "http://") && !strings.has_prefix(url, "https://") {
-        return c, .EOF
-    }
+    if needs_download {
+        if read_err == nil {
+            delete(data)
+        }
 
-    dl_args := []string{"curl", "-s", "-f", "-L", url, "-o", temp_file}
-    if !platform.exec_cmd("curl", dl_args) {
-        return c, .EOF
-    }
+        temp_f, terr := os.create_temp_file("", "ubrew_fetch_cask_*.json")
+        if terr != nil {
+            return c, .EOF
+        }
+        temp_file := strings.clone(os.name(temp_f), context.allocator)
+        defer delete(temp_file)
+        defer os.remove(temp_file)
+        defer os.close(temp_f)
 
-    data, read_err := os.read_entire_file(temp_file, context.allocator)
-    if read_err != nil {
-        return c, .EOF
+        if !strings.has_prefix(url, "http://") && !strings.has_prefix(url, "https://") {
+            return c, .EOF
+        }
+
+        dl_args := []string{"curl", "-s", "-f", "-L", url, "-o", temp_file}
+        if !platform.exec_cmd("curl", dl_args) {
+            return c, .EOF
+        }
+
+        new_data, new_err := os.read_entire_file(temp_file, context.allocator)
+        if new_err != nil {
+            return c, .EOF
+        }
+        _ = os.write_entire_file(cache_path, new_data)
+        data = new_data
     }
     defer delete(data)
 
@@ -451,6 +714,12 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     root_obj := json_val.(json.Object)
 
     c.token = strings.clone(root_obj["token"].(json.String))
+
+    if desc_val, exists := root_obj["desc"]; exists {
+        if desc_str, ok := desc_val.(json.String); ok {
+            c.desc = strings.clone(desc_str)
+        }
+    }
 
     if name_val, exists := root_obj["name"]; exists {
         name_arr := name_val.(json.Array)
@@ -467,6 +736,11 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     c.url = strings.clone(root_obj["url"].(json.String))
     c.sha256 = strings.clone(root_obj["sha256"].(json.String))
     c.homepage = strings.clone(root_obj["homepage"].(json.String))
+    if auto_val, exists := root_obj["auto_updates"]; exists {
+        if auto_bool, ok := auto_val.(json.Boolean); ok {
+            c.auto_updates = bool(auto_bool)
+        }
+    }
 
     artifacts_list := make([dynamic]cask.Artifact)
     if arts, ok2 := root_obj["artifacts"]; ok2 {
@@ -514,7 +788,7 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
 }
 
 fetch_cask_registry :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
-	json_val, parse_err := registry_mmap_parse(REGISTRY_PATH)
+	json_val, parse_err := registry_mmap_parse(get_registry_path())
 	if parse_err != nil {
 		return c, parse_err
 	}
@@ -553,6 +827,8 @@ fetch_cask_registry :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
         } else {
             c.name = strings.clone(name)
         }
+
+        c.desc = strings.clone(json_string_or_empty(rec_obj, "desc"))
 
         c.homepage = strings.clone(json_string_or_empty(rec_obj, "homepage"))
 
@@ -616,6 +892,7 @@ fetch_cask_registry :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
 destroy_cask :: proc(c: cask.Cask) {
     delete(c.token)
     delete(c.name)
+    delete(c.desc)
     delete(c.version)
     delete(c.url)
     delete(c.sha256)
@@ -815,6 +1092,13 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
     }
     defer tap.destroy_tap(matched)
 
+    if !tap.tap_is_trusted(matched.name) {
+        if !tap.prompt_and_trust_tap(matched.name) {
+            fmt.eprintf("Error: Tap '%s' is not trusted. To trust it, run: ubrew tap trust %s\n", matched.name, matched.name)
+            os.exit(1)
+        }
+    }
+
     ruby_src, fetched := tap.fetch_formula_ruby(matched, formula_name)
     if !fetched {
         return f, "", false
@@ -977,28 +1261,40 @@ contains_string_in_json_array :: proc(obj, key, target_lower: string) -> bool {
 fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
 
-    temp_f, terr := os.create_temp_file("", "ubrew_fetch_formula_*.json")
-    if terr != nil {
-        return f, .EOF
-    }
-    // Clone the name so it remains valid after we close the file handle.
-    temp_file := strings.clone(os.name(temp_f), context.allocator)
-    defer delete(temp_file)
-    defer os.remove(temp_file)
-    defer os.close(temp_f)
+    // Check the per-formula cache (warmed by warm_formulae_cache_parallel).
+    cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
+    data, read_err := os.read_entire_file(cache_path, context.allocator)
+    needs_download := read_err != nil || len(data) == 0
 
-    if !strings.has_prefix(url, "http://") && !strings.has_prefix(url, "https://") {
-        return f, .EOF
-    }
+    if needs_download {
+        if read_err == nil {
+            delete(data)
+        }
 
-    dl_args := []string{"curl", "-s", "-f", "-L", url, "-o", temp_file}
-    if !platform.exec_cmd("curl", dl_args) {
-        return f, .EOF
-    }
+        temp_f, terr := os.create_temp_file("", "ubrew_fetch_formula_*.json")
+        if terr != nil {
+            return f, .EOF
+        }
+        temp_file := strings.clone(os.name(temp_f), context.allocator)
+        defer delete(temp_file)
+        defer os.remove(temp_file)
+        defer os.close(temp_f)
 
-    data, read_err := os.read_entire_file(temp_file, context.allocator)
-    if read_err != nil {
-        return f, .EOF
+        if !strings.has_prefix(url, "http://") && !strings.has_prefix(url, "https://") {
+            return f, .EOF
+        }
+
+        dl_args := []string{"curl", "-s", "-f", "-L", url, "-o", temp_file}
+        if !platform.exec_cmd("curl", dl_args) {
+            return f, .EOF
+        }
+
+        new_data, new_err := os.read_entire_file(temp_file, context.allocator)
+        if new_err != nil {
+            return f, .EOF
+        }
+        _ = os.write_entire_file(cache_path, new_data)
+        data = new_data
     }
     defer delete(data)
 
@@ -1072,7 +1368,7 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
 }
 
 fetch_formula_registry :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
-	json_val, parse_err := registry_mmap_parse(REGISTRY_PATH)
+	json_val, parse_err := registry_mmap_parse(get_registry_path())
 	if parse_err != nil {
 		return f, parse_err
 	}
@@ -1201,7 +1497,7 @@ cask_results_contains :: proc(results: []Cask_Search_Result, token: string) -> b
 }
 
 append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, query_lower: string, limit: int) {
-	json_val, parse_err := registry_mmap_parse(REGISTRY_PATH)
+	json_val, parse_err := registry_mmap_parse(get_registry_path())
 	if parse_err != nil {
 		return
 	}
@@ -1246,7 +1542,7 @@ append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, q
 }
 
 append_registry_cask_matches :: proc(out: ^[dynamic]Cask_Search_Result, query_lower: string, limit: int) {
-	json_val, parse_err := registry_mmap_parse(REGISTRY_PATH)
+	json_val, parse_err := registry_mmap_parse(get_registry_path())
 	if parse_err != nil {
 		return
 	}
@@ -1301,11 +1597,56 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 
     append_registry_formulae_matches(&results, query_lower, limit)
 
-    data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
-    if read_err == nil {
-        defer delete(data)
-        append_api_formulae_matches_fast(data, &results, query_lower, limit)
-    }
+	// Phase 2: try the compact TSV index first (built by build_search_index
+	// at update time). ~500KB, substring scan in <10ms. Falls back to the
+	// 30MB JSON dump path if the index doesn't exist yet.
+	if index_results := search_index_formulae(query_lower, limit); len(index_results) > 0 {
+		defer delete(index_results)
+		for r in index_results {
+			exists := false
+			for existing in results {
+				if existing.name == r.name {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				append(&results, r)
+				if len(results) >= limit {
+					break
+				}
+			}
+		}
+	} else {
+		// Auto-build the index if missing (first search after install/cleanup)
+		if !os.is_file(FORMULA_SEARCH_INDEX) {
+			build_formula_search_index()
+		}
+		if index_results2 := search_index_formulae(query_lower, limit); len(index_results2) > 0 {
+			defer delete(index_results2)
+			for r in index_results2 {
+				exists := false
+				for existing in results {
+					if existing.name == r.name {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					append(&results, r)
+					if len(results) >= limit {
+						break
+					}
+				}
+			}
+		} else {
+			data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
+			if read_err == nil {
+				defer delete(data)
+				append_api_formulae_matches_fast(data, &results, query_lower, limit)
+			}
+		}
+	}
 
     append_tap_formulae_matches(&results, query_lower, limit)
 
@@ -1548,15 +1889,23 @@ fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
             // page even for missing files. The Contents API at
             // https://api.github.com/repos/.../contents/... is what we want.
             api_url := fmt.tprintf("https://api.github.com/repos/%s%s?ref=%s", owner_repo, suffix, t.branch)
-            curl_args := []string{
-                "curl",
-                "-sfSL",
-                "--no-progress-meter",
-                "-H", "Accept: application/vnd.github+json",
-                api_url,
-                "-o", cache_path,
+            curl_args := make([dynamic]string, context.temp_allocator)
+            append(&curl_args, "curl")
+            append(&curl_args, "-sfSL")
+            append(&curl_args, "--no-progress-meter")
+            append(&curl_args, "-H")
+            append(&curl_args, "Accept: application/vnd.github+json")
+            // Optional GitHub token bumps the rate limit from 60/hr (per IP,
+            // unauthenticated) to 5000/hr. We only add the header when a
+            // token is available via `gh auth token` or $GH_TOKEN.
+            if token := platform.get_gh_token(); len(token) > 0 {
+                append(&curl_args, "-H")
+                append(&curl_args, fmt.tprintf("Authorization: Bearer %s", token))
             }
-            curl_ok := platform.exec_cmd("curl", curl_args)
+            append(&curl_args, api_url)
+            append(&curl_args, "-o")
+            append(&curl_args, cache_path)
+            curl_ok := platform.exec_cmd("curl", curl_args[:])
             if !curl_ok {
                 continue
             }
@@ -1595,10 +1944,31 @@ search_casks :: proc(query: string, limit: int = 25) -> (out: []Cask_Search_Resu
 
     append_registry_cask_matches(&results, query_lower, limit)
 
-    data, read_err := fetch_cached_api_list(CASK_LIST_URL, CASK_LIST_CACHE)
-    if read_err == nil {
-        defer delete(data)
-        append_api_cask_matches_fast(data, &results, query_lower, limit)
+    // Phase 2: try the compact TSV index first. Falls back to the
+    // 15MB JSON dump if the index doesn't exist.
+    if index_results := search_index_casks(query_lower, limit); len(index_results) > 0 {
+        defer delete(index_results)
+        for r in index_results {
+            exists := false
+            for existing in results {
+                if existing.token == r.token {
+                    exists = true
+                    break
+                }
+            }
+            if !exists {
+                append(&results, r)
+                if len(results) >= limit {
+                    break
+                }
+            }
+        }
+    } else {
+        data, read_err := fetch_cached_api_list(CASK_LIST_URL, CASK_LIST_CACHE)
+        if read_err == nil {
+            defer delete(data)
+            append_api_cask_matches_fast(data, &results, query_lower, limit)
+        }
     }
 
     if len(results) == 0 {
@@ -1607,3 +1977,962 @@ search_casks :: proc(query: string, limit: int = 25) -> (out: []Cask_Search_Resu
 
     return results[:], nil
 }
+
+// fetch_urls_parallel_http2 issues all (url, out_file) pairs as parallel
+// HTTP/2 requests over a single TCP+TLS connection (via curl's --http2
+// --parallel). Replaces the posix.fork()-per-URL pattern used in
+// run_update and run_upgrade. The HTTP/2 multiplexer lets many requests
+// share one connection, so latency is dominated by the single TLS
+// handshake + first request (~50-200ms cold, ~5-30ms warm), not N
+// handshakes.
+//
+// `urls` and `out_files` must have the same length; `out_files[i]` is
+// the destination for `urls[i]`. The file is overwritten on success;
+// on failure (e.g. HTTP 4xx with the -f flag) the file is NOT touched.
+// `headers` is a list of "Name: value" pairs applied to every request.
+//
+// Returns true iff curl exited 0. Use per-file checks (e.g.
+// verify_tap_cache) to inspect individual outputs.
+fetch_urls_parallel_http2 :: proc(urls, out_files: []string, headers: []string, z_files: []string = nil) -> bool {
+    if len(urls) != len(out_files) || len(urls) == 0 {
+        return false
+    }
+    args := make([dynamic]string, context.temp_allocator)
+    defer delete(args)
+    append(&args, "curl")
+    // No `-f`: with `--parallel`, `-f` causes ALL output files to be
+    // discarded when any single request fails (curl bug/feature). We
+    // want the successful ones to land on disk so verify_tap_cache can
+    // check them; the failed ones will leave behind a JSON error blob
+    // (e.g. "rate limit exceeded") that starts with `{` and is rejected
+    // by verify_tap_cache.
+    append(&args, "-sL")
+    append(&args, "--compressed")
+    append(&args, "--no-progress-meter")
+    append(&args, "--http2")
+    append(&args, "--parallel")
+    for h in headers {
+        append(&args, "-H")
+        append(&args, h)
+    }
+    for i in 0..<len(urls) {
+        if len(z_files) > i && len(z_files[i]) > 0 {
+            append(&args, "-z")
+            append(&args, z_files[i])
+        }
+        append(&args, "-o")
+        append(&args, out_files[i])
+        append(&args, urls[i])
+    }
+    return platform.exec_cmd("curl", args[:])
+}
+
+// warm_formulae_cache_parallel batch-fetches the per-formula JSON files
+// for `names` that are not already cached, using a single
+// --http2 --parallel curl invocation. The cached files are written to
+// API_CACHE_DIR/formula-<name>.json, which is the path that
+// fetch_formula_homebrew reads from. After this call, a subsequent
+// per-name fetch_formula loop hits the warm cache for every name and
+// only does a (sequential) disk read + JSON parse per formula.
+//
+// Returns the count of formulae that were actually fetched over the
+// network (i.e. not already cached).
+warm_formulae_cache_parallel :: proc(names: []string) -> int {
+    if len(names) == 0 {
+        return 0
+    }
+    refresh := os.get_env("UBREW_REFRESH", context.temp_allocator) == "1"
+    urls := make([dynamic]string, context.temp_allocator)
+    out_files := make([dynamic]string, context.temp_allocator)
+    defer {
+        delete(urls)
+        delete(out_files)
+    }
+    for name in names {
+        cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
+        if !refresh && os.is_file(cache_path) {
+            fi, fi_err := os.stat(cache_path, context.temp_allocator)
+            if fi_err == nil && fi.size > 0 {
+                continue
+            }
+        }
+        url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
+        append(&urls, url)
+        append(&out_files, cache_path)
+    }
+    if len(urls) == 0 {
+        return 0
+    }
+    _ = fetch_urls_parallel_http2(urls[:], out_files[:], nil)
+    return len(urls)
+}
+
+// warm_casks_cache_parallel is the cask counterpart of
+// warm_formulae_cache_parallel.
+warm_casks_cache_parallel :: proc(tokens: []string) -> int {
+	if len(tokens) == 0 {
+		return 0
+	}
+	refresh := os.get_env("UBREW_REFRESH", context.temp_allocator) == "1"
+	urls := make([dynamic]string, context.temp_allocator)
+	out_files := make([dynamic]string, context.temp_allocator)
+	defer {
+		delete(urls)
+		delete(out_files)
+	}
+	for token in tokens {
+		cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
+		if !refresh && os.is_file(cache_path) {
+			fi, fi_err := os.stat(cache_path, context.temp_allocator)
+			if fi_err == nil && fi.size > 0 {
+				continue
+			}
+		}
+		url := fmt.tprintf("https://formulae.brew.sh/api/cask/%s.json", token)
+		append(&urls, url)
+		append(&out_files, cache_path)
+	}
+	if len(urls) == 0 {
+		return 0
+	}
+	_ = fetch_urls_parallel_http2(urls[:], out_files[:], nil)
+	return len(urls)
+}
+
+// which_formula returns the list of homebrew-core formula names whose
+// `executables` array contains `cmd`. Tries the compact TSV index first
+// (~5ms); falls back to the 30MB JSON scan (~140ms) if the index is
+// missing. The result excludes any formulae that are already provided
+// by something on PATH (so the suggestion is useful rather than redundant).
+//
+// This is the homebrew equivalent of the `command-not-found` hook
+// data: when the user types an unknown command, the shell handler
+// asks "which formula provides X?" and suggests an install.
+which_formula :: proc(cmd: string) -> []string {
+	if indexed := which_formula_indexed(cmd); indexed != nil {
+		return indexed
+	}
+
+	// Auto-build the index if missing (first which-formula call)
+	if !os.is_file(FORMULA_SEARCH_INDEX) {
+		build_formula_search_index()
+		if indexed2 := which_formula_indexed(cmd); indexed2 != nil {
+			return indexed2
+		}
+	}
+
+	data, rerr := os.read_entire_file(FORMULA_LIST_CACHE, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return nil
+	}
+	defer delete(data)
+
+	matches := make([dynamic]string, context.allocator)
+	// Walk the JSON dump and find every formula whose `executables`
+	// array contains the cmd string. Skip formulae that already have
+	// the binary on PATH (those aren't the ones the user is missing).
+	text := string(data)
+	depth := 0
+	obj_start := 0
+	in_string := false
+	escaped := false
+	for i := 0; i < len(text); i += 1 {
+		c := text[i]
+		if in_string {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				in_string = false
+			}
+			continue
+		}
+		if c == '"' {
+			in_string = true
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				obj_start = i
+			}
+			depth += 1
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth -= 1
+			if depth == 0 {
+				obj := text[obj_start:i+1]
+				name := json_field_string_raw(obj, "name")
+				if name == "" {
+					continue
+				}
+				if formula_provides_executable(obj, cmd) {
+					append(&matches, strings.clone(name, context.allocator))
+				}
+			}
+		}
+	}
+	return matches[:]
+}
+
+// which_formula_indexed uses the compact TSV search index (with its
+// executables column) instead of scanning the 30MB formula.json. Returns
+// nil if the index doesn't exist (caller should fall back to the JSON scan).
+// Returns an empty (non-nil) slice if the index exists but has no matches.
+which_formula_indexed :: proc(cmd: string) -> []string {
+	data, rerr := os.read_entire_file(FORMULA_SEARCH_INDEX, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return nil
+	}
+	defer delete(data)
+
+	cmd_lower := strings.to_lower(cmd, context.temp_allocator)
+	matches := make([dynamic]string, context.allocator)
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' {
+			end += 1
+		}
+		if end > start {
+			line := text[start:end]
+			tab1 := strings.index_byte(line, '\t')
+			if tab1 > 0 {
+				name := line[:tab1]
+				rest := line[tab1+1:]
+				tab2 := strings.index_byte(rest, '\t')
+				if tab2 >= 0 {
+					rest2 := rest[tab2+1:]
+					tab3 := strings.index_byte(rest2, '\t')
+					if tab3 >= 0 {
+						execs_str := rest2[tab3+1:]
+						if execs_str != "" && csv_contains(execs_str, cmd, cmd_lower) {
+							append(&matches, strings.clone(name, context.allocator))
+						}
+					}
+				}
+			}
+		}
+		start = end + 1
+	}
+	// Return a non-nil empty slice to distinguish "index exists but no
+	// matches" from "index doesn't exist". Odin treats []string{} with
+	// nil data as == nil, so we must ensure the result is non-nil.
+	if len(matches) == 0 {
+		dummy := make([dynamic]string, 0, 1, context.allocator)
+		return dummy[:]
+	}
+	return matches[:]
+}
+
+// csv_contains checks whether a comma-separated value string contains
+// the given command as an exact element. Both original and lowercased
+// cmd are provided so we can do a fast check on the already-lowered input.
+csv_contains :: proc(csv, cmd, cmd_lower: string) -> bool {
+	s := 0
+	for s <= len(csv) {
+		comma := strings.index_byte(csv[s:], ',')
+		e: int
+		if comma >= 0 {
+			e = s + comma
+		} else {
+			e = len(csv)
+		}
+		elem := csv[s:e]
+		if len(elem) == len(cmd) && strings.to_lower(elem, context.temp_allocator) == cmd_lower {
+			return true
+		}
+		if comma < 0 { break }
+		s = e + 1
+	}
+	return false
+}
+
+// formula_provides_executable returns true iff the formula object's
+// `executables` array contains `cmd` as a string element. Operates on
+// the raw JSON object text (the same view as `append_api_formulae_matches_fast`).
+formula_provides_executable :: proc(obj, cmd: string) -> bool {
+	// Locate `"executables":[...]`
+	marker := `"executables":[`
+	start := strings.index(obj, marker)
+	if start < 0 {
+		return false
+	}
+	// Find the matching close bracket
+	arr_start := start + len(marker)
+	depth := 1
+	i := arr_start
+	in_string := false
+	escaped := false
+	for i < len(obj) {
+		c := obj[i]
+		if in_string {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				in_string = false
+			}
+			i += 1
+			continue
+		}
+		if c == '"' {
+			// Start of a string element. Read until closing quote.
+			i += 1
+			s := i
+			esc2 := false
+			for i < len(obj) {
+				cc := obj[i]
+				if esc2 {
+					esc2 = false
+				} else if cc == '\\' {
+					esc2 = true
+				} else if cc == '"' {
+					break
+				}
+				i += 1
+			}
+			if i >= len(obj) {
+				return false
+			}
+			if i - s == len(cmd) && obj[s:i] == cmd {
+				return true
+			}
+			i += 1
+			continue
+		}
+		if c == '[' { depth += 1 }
+		else if c == ']' {
+			depth -= 1
+			if depth == 0 {
+				return false
+			}
+		}
+		i += 1
+	}
+	return false
+}
+
+refresh_cache_file :: proc(url, cache_path, temp_pattern: string) -> bool {
+	_ = os.make_directory_all(API_CACHE_DIR, os.perm(0o755))
+
+	temp_f, terr := os.create_temp_file("", temp_pattern)
+	if terr != nil {
+		return false
+	}
+	temp_file := strings.clone(os.name(temp_f), context.allocator)
+	defer delete(temp_file)
+	defer os.remove(temp_file)
+	defer os.close(temp_f)
+
+	curl_args := make([dynamic]string, context.temp_allocator)
+	append(&curl_args, "curl")
+	append(&curl_args, "-s")
+	append(&curl_args, "-f")
+	append(&curl_args, "-L")
+	append(&curl_args, "--compressed")
+	append(&curl_args, "--no-progress-meter")
+	if os.is_file(cache_path) {
+		append(&curl_args, "-z")
+		append(&curl_args, cache_path)
+	}
+	append(&curl_args, url)
+	append(&curl_args, "-o")
+	append(&curl_args, temp_file)
+
+	if !platform.exec_cmd("curl", curl_args[:]) {
+		return false
+	}
+
+	fi, fi_err := os.stat(temp_file, context.temp_allocator)
+	if fi_err == nil && fi.size > 0 {
+		cp_args := []string{"cp", temp_file, cache_path}
+		_ = platform.exec_cmd("cp", cp_args)
+	}
+
+	return os.is_file(cache_path)
+}
+
+refresh_homebrew_api_lists :: proc() -> bool {
+	_ = os.make_directory_all(API_CACHE_DIR, os.perm(0o755))
+
+	temp_f1, terr1 := os.create_temp_file("", "ubrew_formula_list_*.json")
+	if terr1 != nil do return false
+	temp_file1 := strings.clone(os.name(temp_f1), context.allocator)
+	defer delete(temp_file1)
+	defer os.remove(temp_file1)
+	defer os.close(temp_f1)
+
+	temp_f2, terr2 := os.create_temp_file("", "ubrew_cask_list_*.json")
+	if terr2 != nil do return false
+	temp_file2 := strings.clone(os.name(temp_f2), context.allocator)
+	defer delete(temp_file2)
+	defer os.remove(temp_file2)
+	defer os.close(temp_f2)
+
+	curl_args := make([dynamic]string, context.temp_allocator)
+	append(&curl_args, "curl")
+	append(&curl_args, "-s")
+	append(&curl_args, "-L")
+	append(&curl_args, "--compressed")
+	append(&curl_args, "--no-progress-meter")
+	append(&curl_args, "--http2")
+	append(&curl_args, "--parallel")
+
+	// First URL: formula.json
+	if os.is_file(FORMULA_LIST_CACHE) {
+		append(&curl_args, "-z")
+		append(&curl_args, FORMULA_LIST_CACHE)
+	}
+	append(&curl_args, "-o")
+	append(&curl_args, temp_file1)
+	append(&curl_args, FORMULA_LIST_URL)
+
+	// Second URL: cask.json
+	if os.is_file(CASK_LIST_CACHE) {
+		append(&curl_args, "-z")
+		append(&curl_args, CASK_LIST_CACHE)
+	}
+	append(&curl_args, "-o")
+	append(&curl_args, temp_file2)
+	append(&curl_args, CASK_LIST_URL)
+
+	if !platform.exec_cmd("curl", curl_args[:]) {
+		return false
+	}
+
+	fi1, fi_err1 := os.stat(temp_file1, context.temp_allocator)
+	if fi_err1 == nil && fi1.size > 0 {
+		cp_args := []string{"cp", temp_file1, FORMULA_LIST_CACHE}
+		_ = platform.exec_cmd("cp", cp_args)
+	}
+
+	fi2, fi_err2 := os.stat(temp_file2, context.temp_allocator)
+	if fi_err2 == nil && fi2.size > 0 {
+		cp_args := []string{"cp", temp_file2, CASK_LIST_CACHE}
+		_ = platform.exec_cmd("cp", cp_args)
+	}
+
+	return os.is_file(FORMULA_LIST_CACHE) && os.is_file(CASK_LIST_CACHE)
+}
+
+tap_primary_candidates :: proc(t: tap.Tap, allocator := context.allocator) -> []string {
+	out := make([dynamic]string, allocator)
+	// Primary: the owner/repo from the explicit URL (if given), otherwise
+	// the tap's own name (e.g. "valkyrie00/bbrew" -> "valkyrie00/bbrew").
+	if len(t.url) > 0 {
+		if owner_repo := extract_owner_repo_from_github_url(t.url); len(owner_repo) > 0 {
+			append(&out, owner_repo)
+		}
+	} else if strings.contains(t.name, "/") {
+		append(&out, t.name)
+	}
+	// Secondary: homebrew-<repo> variant (for taps named like
+	// "valkyrie00/bbrew" that are actually at "valkyrie00/homebrew-bbrew").
+	if strings.contains(t.name, "/") {
+		slash := strings.index(t.name, "/")
+		user := t.name[:slash]
+		repo := t.name[slash + 1:]
+		hb := fmt.tprintf("%s/homebrew-%s", user, repo)
+		already_present := false
+		for rc in out {
+			if rc == hb {
+				already_present = true
+				break
+			}
+		}
+		if !already_present {
+			append(&out, hb)
+		}
+	}
+	return out[:]
+}
+
+tap_api_url :: proc(t: tap.Tap, owner_repo: string, suffix: string) -> string {
+	return fmt.tprintf("https://api.github.com/repos/%s%s?ref=%s", owner_repo, suffix, t.branch)
+}
+
+verify_tap_cache :: proc(t: tap.Tap) -> bool {
+	cache_path := fmt.tprintf("%s/cache/taps/%s/Formula_listing.json", "/opt/ubrew", t.name)
+	data, rerr := os.read_entire_file(cache_path, context.allocator)
+	if rerr != nil {
+		return false
+	}
+	defer delete(data)
+	if len(data) == 0 {
+		return false
+	}
+	i := 0
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
+		i += 1
+	}
+	return i < len(data) && data[i] == '['
+}
+
+// Phase 2: build a compact TSV search index from the JSON dump.
+// The full formula.json is 30MB / 8403 formulae and cask.json is 15MB /
+// ~5000 casks. The formulae index is `name\tdesc\tversion\texecutables\n`
+// per record (~600KB). The casks index is `token\tname\tdesc\tversion\n`
+// per record (~250KB). Substring search on the TSV is ~50x faster than
+// parsing the JSON for matches. The executables column also enables
+// which_formula to do a fast index lookup instead of scanning the 30MB
+// formula.json.
+//
+// Writes to a temp file in API_CACHE_DIR then atomically renames over
+// the target. Returns true on success.
+build_formula_search_index :: proc() -> bool {
+	data, rerr := os.read_entire_file(FORMULA_LIST_CACHE, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return false
+	}
+	defer delete(data)
+
+	// Build the whole TSV in memory first, then write once. Writing
+	// 8403 lines char-by-char through fmt.wprintf is ~50,000 unbuffered
+	// syscalls and takes 50+ seconds. A single bulk write is <10ms.
+	buf := make([dynamic]u8, 0, 1 << 20, context.allocator)
+	defer delete(buf)
+
+	text := string(data)
+	depth := 0
+	obj_start := 0
+	in_string := false
+	escaped := false
+	written := 0
+	for i := 0; i < len(text); i += 1 {
+		c := text[i]
+		if in_string {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				in_string = false
+			}
+			continue
+		}
+		if c == '"' {
+			in_string = true
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				obj_start = i
+			}
+			depth += 1
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth -= 1
+			if depth == 0 {
+				obj := text[obj_start:i+1]
+				name := json_field_string_raw(obj, "name")
+				if name == "" {
+					continue
+				}
+			desc := json_field_string_raw(obj, "desc")
+			version := json_field_string_raw(obj, "stable")
+			execs := json_field_array_as_csv(obj, "executables")
+			append_tsv_field(&buf, name)
+			append(&buf, '\t')
+			append_tsv_field(&buf, desc)
+			append(&buf, '\t')
+			append_tsv_field(&buf, version)
+			append(&buf, '\t')
+			append_tsv_field(&buf, execs)
+			append(&buf, '\n')
+				written += 1
+			}
+		}
+	}
+	if written == 0 {
+		return false
+	}
+
+	// Atomic write via temp file and rename.
+	tmp_path := fmt.tprintf("%s.tmp", FORMULA_SEARCH_INDEX)
+	if werr := os.write_entire_file(tmp_path, buf[:]); werr != nil {
+		return false
+	}
+	if rename_err := os.rename(tmp_path, FORMULA_SEARCH_INDEX); rename_err != nil {
+		os.remove(tmp_path)
+		return false
+	}
+	return true
+}
+
+build_cask_search_index :: proc() -> bool {
+	data, rerr := os.read_entire_file(CASK_LIST_CACHE, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return false
+	}
+	defer delete(data)
+
+	buf := make([dynamic]u8, 0, 1 << 19, context.allocator)
+	defer delete(buf)
+
+	text := string(data)
+	depth := 0
+	obj_start := 0
+	in_string := false
+	escaped := false
+	written := 0
+	for i := 0; i < len(text); i += 1 {
+		c := text[i]
+		if in_string {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				in_string = false
+			}
+			continue
+		}
+		if c == '"' {
+			in_string = true
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				obj_start = i
+			}
+			depth += 1
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth -= 1
+			if depth == 0 {
+				obj := text[obj_start:i+1]
+				token := json_field_string_raw(obj, "token")
+				if token == "" {
+					continue
+				}
+				name := json_field_string_raw(obj, "name")
+				if name == "" {
+					name = token
+				}
+				desc := json_field_string_raw(obj, "desc")
+				version := json_field_string_raw(obj, "version")
+				append_tsv_field(&buf, token)
+				append(&buf, '\t')
+				append_tsv_field(&buf, name)
+				append(&buf, '\t')
+				append_tsv_field(&buf, desc)
+				append(&buf, '\t')
+				append_tsv_field(&buf, version)
+				append(&buf, '\n')
+				written += 1
+			}
+		}
+	}
+	if written == 0 {
+		return false
+	}
+
+	// Atomic write via temp file and rename.
+	tmp_path := fmt.tprintf("%s.tmp", CASK_SEARCH_INDEX)
+	if werr := os.write_entire_file(tmp_path, buf[:]); werr != nil {
+		return false
+	}
+	if rename_err := os.rename(tmp_path, CASK_SEARCH_INDEX); rename_err != nil {
+		os.remove(tmp_path)
+		return false
+	}
+	return true
+}
+
+build_search_index :: proc() -> (formulae_ok, casks_ok: bool) {
+	// Skip rebuild if the JSON dumps haven't changed since the last
+	// index build. mtime check avoids the 170ms cost of re-parsing
+	// 45MB of JSON on every `ubrew update` (which is called frequently
+	// in workflows like `update && upgrade`).
+	if !index_is_stale() {
+		return true, true
+	}
+	formulae_ok = build_formula_search_index()
+	casks_ok = build_cask_search_index()
+	return
+}
+
+// index_is_stale returns true iff the index files are missing or older
+// than the underlying JSON dumps. Used to skip the index rebuild on
+// `update` calls that didn't actually refresh the JSON.
+index_is_stale :: proc() -> bool {
+	pairs := [][]string{
+		{FORMULA_LIST_CACHE, FORMULA_SEARCH_INDEX},
+		{CASK_LIST_CACHE, CASK_SEARCH_INDEX},
+	}
+	for pair in pairs {
+		src, dst := pair[0], pair[1]
+		src_info, src_err := os.stat(src, context.allocator)
+		if src_err != nil {
+			return true
+		}
+		defer os.file_info_delete(src_info, context.allocator)
+		if !os.is_file(dst) {
+			return true
+		}
+		dst_info, dst_err := os.stat(dst, context.allocator)
+		if dst_err != nil {
+			return true
+		}
+		defer os.file_info_delete(dst_info, context.allocator)
+		if time.time_to_unix(src_info.modification_time) >
+		   time.time_to_unix(dst_info.modification_time) {
+			return true
+		}
+	}
+	return false
+}
+
+// tsv_escape replaces \t \n \r in a string with single spaces so the
+// field doesn't break the line structure. The TSV format is
+// delimiter-separated, so we only need to scrub the three "new-field"
+// characters.
+tsv_escape :: proc(s: string) -> string {
+	out := make([dynamic]u8, 0, len(s), context.temp_allocator)
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if c == '\t' || c == '\n' || c == '\r' {
+			append(&out, ' ')
+		} else {
+			append(&out, c)
+		}
+	}
+	return string(out[:])
+}
+
+// append_tsv_field is the in-place version of tsv_escape: appends the
+// scrubbed bytes directly to a buffer (no allocation per call). Used by
+// the bulk-write path in build_*_search_index.
+append_tsv_field :: proc(buf: ^[dynamic]u8, s: string) {
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if c == '\t' || c == '\n' || c == '\r' {
+			append(buf, ' ')
+		} else {
+			append(buf, c)
+		}
+	}
+}
+
+search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Search_Result {
+	mf, ok := kernel.mapped_file_open(FORMULA_SEARCH_INDEX)
+	if !ok {
+		return nil
+	}
+	defer kernel.mapped_file_close(&mf)
+
+	data := kernel.mapped_file_bytes(&mf)
+	if len(data) == 0 {
+		return nil
+	}
+
+	out := make([dynamic]Formula_Search_Result)
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' {
+			end += 1
+		}
+		if end > start {
+			line := text[start:end]
+			tab1 := strings.index_byte(line, '\t')
+			if tab1 > 0 {
+				name := line[:tab1]
+				rest := line[tab1+1:]
+				tab2 := strings.index_byte(rest, '\t')
+				desc, version: string
+				if tab2 >= 0 {
+					desc = rest[:tab2]
+					rest2 := rest[tab2+1:]
+					tab3 := strings.index_byte(rest2, '\t')
+					if tab3 >= 0 {
+						version = rest2[:tab3]
+					} else {
+						version = rest2
+					}
+				} else {
+					desc = rest
+				}
+				if lower_contains(name, query_lower) || lower_contains(desc, query_lower) {
+					append(&out, Formula_Search_Result{
+						name = strings.clone(name),
+						desc = strings.clone(desc),
+						version = strings.clone(version),
+					})
+					if len(out) >= limit {
+						break
+					}
+				}
+			}
+		}
+		start = end + 1
+	}
+
+	return out[:]
+}
+
+search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Result {
+	mf, ok := kernel.mapped_file_open(CASK_SEARCH_INDEX)
+	if !ok {
+		return nil
+	}
+	defer kernel.mapped_file_close(&mf)
+
+	data := kernel.mapped_file_bytes(&mf)
+	if len(data) == 0 {
+		return nil
+	}
+
+	out := make([dynamic]Cask_Search_Result)
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' {
+			end += 1
+		}
+		if end > start {
+			line := text[start:end]
+			tab1 := strings.index_byte(line, '\t')
+			if tab1 > 0 {
+				token := line[:tab1]
+				rest := line[tab1+1:]
+				tab2 := strings.index_byte(rest, '\t')
+				name, desc, version: string
+				if tab2 >= 0 {
+					name = rest[:tab2]
+					rest2 := rest[tab2+1:]
+					tab3 := strings.index_byte(rest2, '\t')
+					if tab3 >= 0 {
+						desc = rest2[:tab3]
+						version = rest2[tab3+1:]
+					} else {
+						desc = rest2
+					}
+				} else {
+					name = rest
+				}
+				if lower_contains(token, query_lower) || lower_contains(name, query_lower) || lower_contains(desc, query_lower) {
+					append(&out, Cask_Search_Result{
+						token = strings.clone(token),
+						name = strings.clone(name),
+						desc = strings.clone(desc),
+						version = strings.clone(version),
+					})
+					if len(out) >= limit {
+						break
+					}
+				}
+			}
+		}
+		start = end + 1
+	}
+
+	return out[:]
+}
+
+
+
+
+is_core_formula :: proc(name: string) -> bool {
+	data, rerr := os.read_entire_file(FORMULA_SEARCH_INDEX, context.temp_allocator)
+	if rerr != nil || len(data) == 0 do return false
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' do end += 1
+		if end > start {
+			line := text[start:end]
+			tab := strings.index_byte(line, '\t')
+			if tab > 0 {
+				f_name := line[:tab]
+				if f_name == name {
+					return true
+				}
+			}
+		}
+		start = end + 1
+	}
+	return false
+}
+
+is_core_cask :: proc(name: string) -> bool {
+	data, rerr := os.read_entire_file(CASK_SEARCH_INDEX, context.temp_allocator)
+	if rerr != nil || len(data) == 0 do return false
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' do end += 1
+		if end > start {
+			line := text[start:end]
+			tab := strings.index_byte(line, '\t')
+			if tab > 0 {
+				c_name := line[:tab]
+				if c_name == name {
+					return true
+				}
+			}
+		}
+		start = end + 1
+	}
+	return false
+}
+
+warm_mixed_cache_parallel :: proc(formula_names, cask_tokens: []string) -> int {
+	if len(formula_names) == 0 && len(cask_tokens) == 0 {
+		return 0
+	}
+	refresh := os.get_env("UBREW_REFRESH", context.temp_allocator) == "1"
+	urls := make([dynamic]string, context.temp_allocator)
+	out_files := make([dynamic]string, context.temp_allocator)
+	defer {
+		delete(urls)
+		delete(out_files)
+	}
+
+	for name in formula_names {
+		if strings.contains(name, "/") do continue
+
+		cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
+		if !refresh && os.is_file(cache_path) {
+			fi, fi_err := os.stat(cache_path, context.temp_allocator)
+			if fi_err == nil && fi.size > 0 {
+				continue
+			}
+		}
+		url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
+		append(&urls, url)
+		append(&out_files, cache_path)
+	}
+
+	for token in cask_tokens {
+		if strings.contains(token, "/") do continue
+
+		cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
+		if !refresh && os.is_file(cache_path) {
+			fi, fi_err := os.stat(cache_path, context.temp_allocator)
+			if fi_err == nil && fi.size > 0 {
+				continue
+			}
+		}
+		url := fmt.tprintf("https://formulae.brew.sh/api/cask/%s.json", token)
+		append(&urls, url)
+		append(&out_files, cache_path)
+	}
+
+	if len(urls) == 0 {
+		return 0
+	}
+	_ = fetch_urls_parallel_http2(urls[:], out_files[:], nil)
+	return len(urls)
+}
+
