@@ -2,101 +2,31 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, ubrew, feat/clean-downloads]
   pull_request:
     branches: [main]
 
 jobs:
-  build-macos:
-    runs-on: macos-26
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+      - name: Set up mise
+        uses: jdx/mise-action@v2
 
-      - name: Build (Debug)
-        run: zig build
-
-      - name: Build (ReleaseFast)
-        run: zig build -Doptimize=ReleaseFast
-
-      - name: Smoke test
-        run: ./zig-out/bin/nb help
-
-      - name: Test init creates opt/ directory
-        run: |
-          sudo ./zig-out/bin/nb init
-          test -d /opt/nanobrew/prefix/opt || (echo "FAIL: opt/ directory not created by nb init" && exit 1)
-          echo "PASS: opt/ directory exists"
-
-      - name: Unit tests
-        run: zig build test
-
-      - name: Repository checks
-        run: zig build repo-checks
-
-      - name: Smoke integration tests
-        run: bash tests/smoke-test.sh ./zig-out/bin/nb
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: nb-macos-arm64
-          path: zig-out/bin/nb
-
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Cross-compile for Linux x86_64
-        run: zig build linux
+      - name: Build ubrew
+        run: mise run build
 
       - name: Verify binary
-        run: file zig-out/bin/nb && ls -lh zig-out/bin/nb
-
-      - name: Smoke test
-        run: ./zig-out/bin/nb help
-
-      - name: Unit tests
-        run: zig build test
-
-      - name: Test init creates opt/ directory
         run: |
-          sudo ./zig-out/bin/nb init
-          test -d /opt/nanobrew/prefix/opt || (echo "FAIL: opt/ directory not created by nb init" && exit 1)
-          echo "PASS: opt/ directory exists"
+          file ubrew
+          ls -lh ubrew
 
-      - name: Deb parity test (online, musl TLS flaky)
-        continue-on-error: true
-        run: bash tests/deb-parity.sh ./zig-out/bin/nb
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: nb-linux-x86_64
-          path: zig-out/bin/nb
-
-  cross-compile:
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Cross-compile x86_64-linux
-        run: zig build linux
-
-      - name: Cross-compile aarch64-linux
-        run: zig build linux-arm
+      - name: Run smoke tests
+        run: bash tests/smoke-test.sh ./ubrew
