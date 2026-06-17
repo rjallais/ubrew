@@ -37,12 +37,11 @@ jobs:
           sudo mkdir -p /opt
           sudo ln -sfn /opt/ubrew /opt/nanobrew
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y lldb
+            sudo apt-get update && sudo apt-get install -y gdb
+            gdb -batch -ex "run" -ex "bt" --args ./ubrew tap trust ublue-os/tap
           fi
-          if command -v lldb >/dev/null 2>&1; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             lldb --batch -o "run" -o "thread backtrace" -o "quit" -- ./ubrew tap trust ublue-os/tap
-          else
-            ./ubrew tap trust ublue-os/tap
           fi
           ./ubrew tap trust justrach/nanobrew
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
