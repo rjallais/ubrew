@@ -40,7 +40,7 @@ jobs:
             sudo apt-get update && sudo apt-get install -y lldb
           fi
           if command -v lldb >/dev/null 2>&1; then
-            lldb --batch -o "run" -o "bt" -- ./ubrew tap trust ublue-os/tap
+            lldb --batch -o "run" -o "thread backtrace" -o "quit" -- ./ubrew tap trust ublue-os/tap
           else
             ./ubrew tap trust ublue-os/tap
           fi
