@@ -7370,7 +7370,8 @@ run_mirror :: proc(args: []string) {
 
 run_trust :: proc(args: []string) {
 	json_opt := false
-	pkg_names := make([dynamic]string, context.temp_allocator)
+	pkg_names := make([dynamic]string, context.allocator)
+	defer delete(pkg_names)
 	
 	for a in args {
 		if a == "--json=v1" {
