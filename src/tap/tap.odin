@@ -432,7 +432,6 @@ trusted_taps_save :: proc(names: [dynamic]string) {
 	result := strings.to_string(buf)
 	_ = os.write_entire_file(TRUSTED_TAPS_FILE, result)
 	strings.builder_destroy(&buf)
-	delete(result)
 }
 
 tap_is_trusted :: proc(name: string) -> bool {
