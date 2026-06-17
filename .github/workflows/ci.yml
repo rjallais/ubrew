@@ -38,12 +38,6 @@ jobs:
           sudo ln -sfn /opt/ubrew /opt/nanobrew
           ./ubrew tap trust ublue-os/tap
           ./ubrew tap trust justrach/nanobrew
-          echo "=== DIAGNOSTIC INSTALLS ==="
-          ./ubrew install tree || true
-          ./ubrew install lua || true
-          /opt/ubrew/prefix/bin/tree --version || true
-          /opt/ubrew/prefix/bin/lua -v || true
-          echo "========================="
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
           echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
 
