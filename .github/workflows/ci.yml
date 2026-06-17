@@ -11,6 +11,7 @@ jobs:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
@@ -35,6 +36,9 @@ jobs:
           sudo chown -R $USER /opt/ubrew
           sudo mkdir -p /opt
           sudo ln -sfn /opt/ubrew /opt/nanobrew
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y lldb
+          fi
           if command -v lldb >/dev/null 2>&1; then
             lldb --batch -o "run" -o "bt" -- ./ubrew tap trust ublue-os/tap
           else
