@@ -25,6 +25,7 @@ jobs:
 
       - name: Verify binary
         run: |
+          chmod +x ubrew
           file ubrew
           ls -lh ubrew
 
