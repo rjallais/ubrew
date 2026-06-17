@@ -54,21 +54,3 @@ mapped_file_close :: proc(mf: ^Mapped_File) {
 		mf.len = 0
 	}
 }
-
-mapped_file_prefetch :: proc(mf: ^Mapped_File, offset, length: i64) {
-	if mf.data == nil {
-		return
-	}
-	if offset >= mf.len {
-		return
-	}
-	actual_len := length
-	if offset + actual_len > mf.len {
-		actual_len = mf.len - offset
-	}
-	posix.posix_madvise(
-		rawptr(cast(uintptr)mf.data + uintptr(offset)),
-		c.size_t(actual_len),
-		.WILLNEED,
-	)
-}

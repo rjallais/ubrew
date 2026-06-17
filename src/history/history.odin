@@ -242,50 +242,9 @@ record_upgrade :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynami
 	record(names, entries_map, name, version, .Upgrade, from_ver, from_rev, allocator)
 }
 
-record_reinstall :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
-                         name: string, version: string, allocator := context.allocator) {
-	record(names, entries_map, name, version, .Reinstall, allocator = allocator)
-}
-
 record_uninstall :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
                          name: string, version: string, allocator := context.allocator) {
 	record(names, entries_map, name, version, .Uninstall, allocator = allocator)
-}
-
-get_latest :: proc(entries_map: map[string][dynamic]Entry, name: string) -> (entry: Entry, found: bool) {
-	entries, ok := entries_map[name]
-	if !ok || len(entries) == 0 {
-		return Entry{}, false
-	}
-	return entries[len(entries) - 1], true
-}
-
-get_previous :: proc(entries_map: map[string][dynamic]Entry, name: string) -> (entry: Entry, found: bool) {
-	entries, ok := entries_map[name]
-	if !ok || len(entries) < 2 {
-		return Entry{}, false
-	}
-	for i := len(entries) - 2; i >= 0; i -= 1 {
-		if entries[i].action != "uninstall" {
-			return entries[i], true
-		}
-	}
-	return Entry{}, false
-}
-
-remove :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry, name: string) {
-	delete_key(entries_map, name)
-	new_names := make([dynamic]string, context.temp_allocator)
-	for n in names[:] {
-		if n != name {
-			append(&new_names, n)
-		}
-	}
-	clear(names)
-	for n in new_names[:] {
-		append(names, n)
-	}
-	delete(new_names)
 }
 
 destroy :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry) {

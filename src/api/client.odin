@@ -2732,23 +2732,6 @@ index_is_stale :: proc() -> bool {
 	return false
 }
 
-// tsv_escape replaces \t \n \r in a string with single spaces so the
-// field doesn't break the line structure. The TSV format is
-// delimiter-separated, so we only need to scrub the three "new-field"
-// characters.
-tsv_escape :: proc(s: string) -> string {
-	out := make([dynamic]u8, 0, len(s), context.temp_allocator)
-	for i := 0; i < len(s); i += 1 {
-		c := s[i]
-		if c == '\t' || c == '\n' || c == '\r' {
-			append(&out, ' ')
-		} else {
-			append(&out, c)
-		}
-	}
-	return string(out[:])
-}
-
 // append_tsv_field is the in-place version of tsv_escape: appends the
 // scrubbed bytes directly to a buffer (no allocation per call). Used by
 // the bulk-write path in build_*_search_index.
@@ -2885,8 +2868,17 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 
 
 is_core_formula :: proc(name: string) -> bool {
-	data, rerr := os.read_entire_file(FORMULA_SEARCH_INDEX, context.temp_allocator)
-	if rerr != nil || len(data) == 0 do return false
+	mf, ok := kernel.mapped_file_open(FORMULA_SEARCH_INDEX)
+	if !ok {
+		return false
+	}
+	defer kernel.mapped_file_close(&mf)
+
+	data := kernel.mapped_file_bytes(&mf)
+	if len(data) == 0 {
+		return false
+	}
+
 	text := string(data)
 	start := 0
 	for start < len(text) {
@@ -2908,8 +2900,17 @@ is_core_formula :: proc(name: string) -> bool {
 }
 
 is_core_cask :: proc(name: string) -> bool {
-	data, rerr := os.read_entire_file(CASK_SEARCH_INDEX, context.temp_allocator)
-	if rerr != nil || len(data) == 0 do return false
+	mf, ok := kernel.mapped_file_open(CASK_SEARCH_INDEX)
+	if !ok {
+		return false
+	}
+	defer kernel.mapped_file_close(&mf)
+
+	data := kernel.mapped_file_bytes(&mf)
+	if len(data) == 0 {
+		return false
+	}
+
 	text := string(data)
 	start := 0
 	for start < len(text) {

@@ -107,45 +107,6 @@ exec_cmd :: proc(bin: string, args: []string) -> bool {
 	return false
 }
 
-// fork_exec_async forks and execs `bin` with `args` without waiting for the
-// child to finish. Returns the child pid (>0) on success, -1 on failure.
-// Use wait_pid_status to reap the child later. The convention is the same
-// as exec_cmd: `args[0]` is the program name.
-fork_exec_async :: proc(bin: string, args: []string) -> int {
-	if GLOBAL_DEBUG {
-		fmt.print("+ ")
-		for arg, idx in args {
-			if idx > 0 do fmt.print(" ")
-			fmt.print(arg)
-		}
-		fmt.println()
-	}
-	argv := make([]cstring, len(args) + 1, context.temp_allocator)
-	for i in 0..<len(args) {
-		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
-	}
-	argv[len(args)] = nil
-
-	bin_cstr := strings.clone_to_cstring(bin, context.temp_allocator)
-
-	pid := posix.fork()
-	if pid == 0 {
-		posix.execvp(bin_cstr, &argv[0])
-		posix.exit(1)
-	} else if pid > 0 {
-		return int(pid)
-	}
-	return -1
-}
-
-// wait_pid_status blocks until `pid` exits and returns true iff the child
-// exited with status 0.
-wait_pid_status :: proc(pid: int) -> bool {
-	status: c.int
-	posix.waitpid(posix.pid_t(pid), &status, nil)
-	return status == 0
-}
-
 exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> (output: string, truncated: bool) {
 	argv := make([]cstring, len(args) + 1, context.temp_allocator)
 	for i in 0..<len(args) {

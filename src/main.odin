@@ -4189,6 +4189,7 @@ run_update :: proc(args: []string) {
 
 		temp_file_formula := ""
 		temp_file_cask := ""
+		temp_file_upstream := ""
 		rebuild_index := false
 
 		if verbose {
@@ -4241,16 +4242,21 @@ run_update :: proc(args: []string) {
 			append(&z_files, z_val)
 		}
 
-		// 3. Add upstream.json to queue
+		// 3. Add upstream.json to queue (staged download)
 		_ = os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
 		db_path := installer.UBREW_ROOT + "/db/upstream.json"
-		append(&urls, "https://raw.githubusercontent.com/rjallais/ubrew/main/registry/upstream.json")
-		append(&out_files, db_path)
-		z_val := ""
-		if os.is_file(db_path) {
-			z_val = db_path
+		temp_f3, terr3 := os.create_temp_file("", "ubrew_upstream_*.json")
+		if terr3 == nil {
+			temp_file_upstream = strings.clone(os.name(temp_f3), context.allocator)
+			os.close(temp_f3)
+			append(&urls, "https://raw.githubusercontent.com/rjallais/ubrew/main/registry/upstream.json")
+			append(&out_files, temp_file_upstream)
+			z_val := ""
+			if os.is_file(db_path) {
+				z_val = db_path
+			}
+			append(&z_files, z_val)
 		}
-		append(&z_files, z_val)
 
 		// 4. Add tap Formula_listing.json requests
 		job_taps := make([dynamic]^tap.Tap, context.allocator)
@@ -4344,6 +4350,21 @@ run_update :: proc(args: []string) {
 			if fi_err == nil && fi.size > 0 {
 				if os.rename(temp_file_cask, api.CASK_LIST_CACHE) == nil {
 					rebuild_index = true
+				}
+			}
+		}
+		if temp_file_upstream != "" {
+			defer {
+				os.remove(temp_file_upstream)
+				delete(temp_file_upstream)
+			}
+			fi, fi_err := os.stat(temp_file_upstream, context.temp_allocator)
+			if fi_err == nil && fi.size > 0 {
+				if data, rerr := os.read_entire_file(temp_file_upstream, context.temp_allocator); rerr == nil && len(data) > 0 {
+					if val, json_err := json.parse(data); json_err == nil {
+						json.destroy_value(val)
+						_ = os.rename(temp_file_upstream, db_path)
+					}
 				}
 			}
 		}

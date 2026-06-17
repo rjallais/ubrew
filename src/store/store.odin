@@ -16,32 +16,8 @@ store_entry_path :: proc(sha256: string, buf: []u8) -> string {
 	return fmt.bprintf(buf[:], "%s/%s", STORE_DIR, sha256)
 }
 
-store_has_entry :: proc(sha256: string) -> bool {
-	if !is_valid_sha256(sha256) {
-		return false
-	}
-	buf: [512]u8
-	path := store_entry_path(sha256, buf[:])
-	return os.is_dir(path)
-}
-
 store_ensure_dir :: proc() -> bool {
 	return os.make_directory_all(STORE_DIR, os.perm(0o755)) == nil
-}
-
-store_ensure_entry :: proc(sha256: string) -> bool {
-	if !is_valid_sha256(sha256) {
-		return false
-	}
-
-	buf: [512]u8
-	dest := store_entry_path(sha256, buf[:])
-
-	if os.is_dir(dest) {
-		return true
-	}
-
-	return os.make_directory_all(dest, os.perm(0o755)) == nil
 }
 
 store_has_relocated_entry :: proc(sha256: string) -> bool {
@@ -107,22 +83,4 @@ store_materialize_from_relocated :: proc(sha256: string, name: string, version: 
 	}
 
 	return platform.cow_copy(src_result, dst_result)
-}
-
-store_remove_entry :: proc(sha256: string) {
-	if !is_valid_sha256(sha256) {
-		return
-	}
-	buf: [512]u8
-	path := store_entry_path(sha256, buf[:])
-	os.remove_all(path)
-}
-
-store_remove_relocated_entry :: proc(sha256: string) {
-	if !is_valid_sha256(sha256) {
-		return
-	}
-	buf: [512]u8
-	result := fmt.bprintf(buf[:], "%s/%s", STORE_RELOCATED_DIR, sha256)
-	os.remove_all(result)
 }

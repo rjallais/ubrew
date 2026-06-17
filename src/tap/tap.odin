@@ -251,32 +251,6 @@ derive_branch_from_url :: proc(url: string) -> string {
 	return strings.clone(rest[:quote_end], context.allocator)
 }
 
-// url_to_tap_name converts a GitHub URL like "https://github.com/justrach/nanobrew"
-// to a tap name like "justrach/nanobrew". Returns "" for non-GitHub URLs.
-url_to_tap_name :: proc(url: string) -> string {
-	if !strings.contains(url, "github.com") {
-		return strings.clone("", context.allocator)
-	}
-
-	// Use context.temp_allocator for intermediate strings so they are
-	// reclaimed at scope exit. The final return is heap-allocated.
-	stripped, _ := strings.replace_all(url, "https://github.com/", "", allocator = context.temp_allocator)
-	stripped, _ = strings.replace_all(stripped, "http://github.com/", "", allocator = context.temp_allocator)
-	stripped, _ = strings.replace_all(stripped, "git@github.com:", "", allocator = context.temp_allocator)
-	if strings.has_suffix(stripped, ".git") {
-		stripped = stripped[:len(stripped) - 4]
-	}
-	if strings.has_suffix(stripped, "/") {
-		stripped = stripped[:len(stripped) - 1]
-	}
-
-	parts := strings.split(stripped, "/", context.temp_allocator)
-	if len(parts) < 2 {
-		return strings.clone("", context.allocator)
-	}
-	return strings.clone(fmt.tprintf("%s/%s", parts[0], parts[1]), context.allocator)
-}
-
 // tap_from_entry builds a Tap struct from a Read_Tap_Entry, inferring the
 // GitHub URL and branch if not explicitly provided. The returned Tap owns
 // its own copies of the strings, so destroying both the Tap and the source
@@ -533,5 +507,7 @@ fetch_cask_ruby :: proc(t: Tap, cask_name: string) -> (string, bool) {
 	if ferr != nil || len(fetched_data) == 0 {
 		return "", false
 	}
+	_ = os.make_directory_all(fmt.tprintf("%s/%s/Casks", TAPS_CACHE_DIR, t.name), os.perm(0o755))
+	_ = os.write_entire_file(cache_path, fetched_data)
 	return string(fetched_data), true
 }

@@ -914,19 +914,3 @@ scan_version :: proc(s: string, ver_start, strip_end: int) -> bool {
 	// If we ended with two or more dots and at least 2 dots, accept.
 	return dot_count >= 2 && i > ver_start + 1
 }
-
-// unquote_github_url strips the branch reference and `.git` extension from a
-// GitHub URL. Returns the cleaned https URL.
-unquote_github_url :: proc(url: string) -> string {
-	clean := url
-	if strings.has_prefix(clean, "git@github.com:") {
-		clean = strings.concatenate({"https://github.com/", clean[len("git@github.com:"):]}, context.temp_allocator)
-	}
-	if strings.has_suffix(clean, ".git") {
-		clean = clean[:len(clean) - 4]
-	}
-	if strings.has_suffix(clean, "/") {
-		clean = clean[:len(clean) - 1]
-	}
-	return strings.clone(clean, context.allocator)
-}

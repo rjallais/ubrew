@@ -19,15 +19,6 @@ blob_has :: proc(sha256: string) -> bool {
 	return os.is_file(path)
 }
 
-blob_evict :: proc(sha256: string) {
-	if !is_valid_sha256(sha256) {
-		return
-	}
-	buf: [512]u8
-	path := blob_path(sha256, buf[:])
-	os.remove(path)
-}
-
 blob_ensure_dir :: proc() -> bool {
 	return os.make_directory_all(BLOBS_DIR, os.perm(0o755)) == nil
 }
