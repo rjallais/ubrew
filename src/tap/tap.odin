@@ -393,11 +393,14 @@ fetch_formula_ruby :: proc(t: Tap, formula_name: string) -> (contents: string, o
 
 TRUSTED_TAPS_FILE :: "/opt/ubrew/db/trusted_taps.txt"
 
-trusted_taps_load :: proc() -> (names: [dynamic]string, err: bool) {
-	names = make([dynamic]string, context.allocator)
+trusted_taps_load :: proc() -> ([dynamic]string, bool) {
+	names := make([dynamic]string, context.allocator)
 	data, rerr := os.read_entire_file(TRUSTED_TAPS_FILE, context.allocator)
-	if rerr != nil || len(data) == 0 {
-		return names, rerr != nil
+	if rerr != nil {
+		return names, true
+	}
+	if len(data) == 0 {
+		return names, false
 	}
 	defer delete(data)
 	text := string(data)
@@ -448,6 +451,12 @@ tap_is_trusted :: proc(name: string) -> bool {
 
 tap_trust :: proc(name: string) -> bool {
 	names, _ := trusted_taps_load()
+	defer {
+		for n in names {
+			delete(n)
+		}
+		delete(names)
+	}
 	// Check if already trusted
 	for n in names {
 		if n == name {
