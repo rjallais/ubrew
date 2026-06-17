@@ -35,7 +35,7 @@ jobs:
           sudo chown -R $USER /opt/ubrew
           sudo mkdir -p /opt
           sudo ln -sfn /opt/ubrew /opt/nanobrew
-          ./ubrew tap trust ublue-os/tap
+          gdb -batch -ex "run" -ex "bt" --args ./ubrew tap trust ublue-os/tap
           ./ubrew tap trust justrach/nanobrew
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
           echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
