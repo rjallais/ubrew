@@ -10,7 +10,7 @@ when ODIN_OS == .Darwin {
 
 	foreign libsystem {
 		@(link_name="clonefile")
-		clonefile :: proc "c" (src: [^]c.char, dst: [^]c.char, flags: c.uint) -> c.int ---
+		clonefile :: proc "c" (src: cstring, dst: cstring, flags: c.uint) -> c.int ---
 	}
 
 	CLONE_NOFOLLOW :: c.uint(0x0001)

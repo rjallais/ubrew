@@ -533,15 +533,19 @@ extract_bin_install_names :: proc(line: string) -> [dynamic]string {
 	return out
 }
 
-// is_block_opener returns true if the trimmed line is a Ruby block opener
-// (ends with " do" or is just "do"). It does NOT match methods that take a
-// `do` block argument like `foo do |x|` -- those are handled by the parser
-// only if they end with " do" too.
+// is_block_opener returns true if the trimmed line is a Ruby block opener.
 is_block_opener :: proc(trimmed: string) -> bool {
 	if trimmed == "do" { return true }
 	if strings.has_suffix(trimmed, " do") { return true }
 	if strings.has_suffix(trimmed, " do |") { return true }
-	// " do |x|" style
+	// Match " do |...|" style
+	if strings.contains(trimmed, " do |") && strings.has_suffix(trimmed, "|") { return true }
+	if strings.has_prefix(trimmed, "def ") { return true }
+	if strings.has_prefix(trimmed, "class ") { return true }
+	if strings.has_prefix(trimmed, "if ") { return true }
+	if strings.has_prefix(trimmed, "unless ") { return true }
+	if strings.has_prefix(trimmed, "case ") { return true }
+	if trimmed == "begin" || strings.has_prefix(trimmed, "begin ") { return true }
 	return false
 }
 
@@ -772,7 +776,7 @@ parse_ruby_formula :: proc(src: string, platform: Platform) -> (f: Ruby_Formula,
 	if len(f.version) == 0 && len(f.url) > 0 {
 		inferred := version_from_url(f.url)
 		if len(inferred) > 0 {
-			f.version = strings.clone(inferred, context.allocator)
+			f.version = inferred
 		}
 	}
 

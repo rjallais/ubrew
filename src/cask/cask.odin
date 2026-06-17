@@ -37,11 +37,13 @@ Artifact :: union {
 }
 
 Cask :: struct {
-    token:     string,
-    name:      string,
-    version:   string,
-    url:       string,
-    sha256:    string,
-    homepage:  string,
-    artifacts: []Artifact,
+    token:        string,
+    name:         string,
+    desc:         string,
+    version:      string,
+    url:          string,
+    sha256:       string,
+    homepage:     string,
+    artifacts:    []Artifact,
+    auto_updates: bool,
 }

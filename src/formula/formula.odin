@@ -3,6 +3,7 @@ package formula
 Formula :: struct {
     name:          string,
     desc:          string,
+    homepage:      string,
     version:       string,
     bottle_url:    string,
     bottle_sha256: string,
@@ -17,4 +18,5 @@ Formula :: struct {
     // the canonical Homebrew formula registry. Used for cache invalidation
     // and dependency display.
     tap:           string,
+    aliases:       []string,
 }
