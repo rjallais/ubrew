@@ -33,30 +33,30 @@ reset_nb() {
   rm -f /opt/nanobrew/prefix/bin/dash /opt/nanobrew/prefix/bin/dash-shell 2>/dev/null
   rm -rf /opt/nanobrew/prefix/Cellar/dash-shell
   rm -rf /opt/nanobrew/store/* /opt/nanobrew/store-relocated/* 2>/dev/null
-  $NB uninstall $PKG >/dev/null 2>&1
+  "$NB" uninstall "$PKG" >/dev/null 2>&1
 }
 
 reset_wax() {
   rm -f "${HOME}/.local/wax/bin/dash" "${HOME}/.local/wax/bin/dash-shell" 2>/dev/null
   rm -rf "${HOME}/.local/wax/Cellar/dash-shell"
-  $WAX uninstall -y $PKG >/dev/null 2>&1
+  "$WAX" uninstall -y "$PKG" >/dev/null 2>&1
 }
 
 reset_bru() {
-  rm -f $HOMEBREW_PREFIX/bin/dash $HOMEBREW_PREFIX/bin/dash-shell 2>/dev/null
-  rm -rf $HOMEBREW_PREFIX/Cellar/dash-shell
+  rm -f "$HOMEBREW_PREFIX/bin/dash" "$HOMEBREW_PREFIX/bin/dash-shell" 2>/dev/null
+  rm -rf "$HOMEBREW_PREFIX/Cellar/dash-shell"
 }
 
 reset_stout() {
   rm -rf "${HOME}/.local/share/stout" "${HOME}/.stout" 2>/dev/null
-  $STOUT uninstall $PKG >/dev/null 2>&1
+  "$STOUT" uninstall "$PKG" >/dev/null 2>&1
 }
 
 reset_zb() {
   rm -f "${HOME}/.local/share/zerobrew/prefix/bin/dash" "${HOME}/.local/share/zerobrew/prefix/bin/dash-shell" 2>/dev/null
   rm -rf "${HOME}/.local/share/zerobrew/prefix/Cellar/dash-shell"
   rm -rf "${HOME}/.local/share/zerobrew/store"/* 2>/dev/null
-  $ZB uninstall $PKG >/dev/null 2>&1
+  "$ZB" uninstall "$PKG" >/dev/null 2>&1
 }
 
 reset_all() {
@@ -68,8 +68,20 @@ median() {
 }
 
 to_ms() {
-  # $1 = "XmY.YYYs" or "X.YYYs"  ->  milliseconds
-  echo "$1" | awk -F'[m,s]' '{printf "%d\n", $1*60*1000+$2*1000+$3*1000+0.5}'
+  # $1 = "XmY.YYYs" or "X.YYYs" or "X.YYY"  ->  milliseconds
+  echo "$1" | awk -F'[m,s]' '
+    {
+      if ($0 ~ /m/) {
+        m = $1; s = $2;
+      } else {
+        m = 0; s = $1;
+      }
+      gsub(/[^0-9.]/, "", s);
+      val_m = (m ~ /^[0-9.]+$/) ? m : 0;
+      val_s = (s ~ /^[0-9.]+$/) ? s : 0;
+      printf "%d\n", val_m*60*1000 + val_s*1000 + 0.5
+    }
+  '
 }
 
 bench() {
@@ -78,7 +90,7 @@ bench() {
   local times=()
   for i in $(seq 1 $RUNS); do
     local t ms
-    t=$( { time "$@" >/dev/null 2>&1; } 2>&1 | awk '/real/{print $2}')
+    t=$( { TIMEFORMAT=$'real\t%3R'; time "$@" >/dev/null 2>&1; } 2>&1 | awk '/real/{print $2}')
     ms=$(to_ms "$t")
     times+=("$ms")
   done
@@ -92,13 +104,15 @@ bench() {
 # warmup it's <100ms.)
 warmup() {
   echo "[warm-up: 1 install per tool]"
-  reset_all
-  $UBREW install $PKG >/dev/null 2>&1
-  $NB install $PKG >/dev/null 2>&1
-  $WAX install -y $PKG >/dev/null 2>&1
-  $BRU install $PKG >/dev/null 2>&1
-  $ZB init >/dev/null 2>&1
-  $ZB install $PKG >/dev/null 2>&1
+  # Reset only the five tools that are benchmarked and warmed up for package installation.
+  # stout is excluded because it does not support/is not included in the install benchmarks.
+  reset_ubrew ; reset_nb ; reset_wax ; reset_bru ; reset_zb
+  "$UBREW" install "$PKG" >/dev/null 2>&1
+  "$NB" install "$PKG" >/dev/null 2>&1
+  "$WAX" install -y "$PKG" >/dev/null 2>&1
+  "$BRU" install "$PKG" >/dev/null 2>&1
+  "$ZB" init >/dev/null 2>&1
+  "$ZB" install "$PKG" >/dev/null 2>&1
   echo ""
 }
 
@@ -108,11 +122,11 @@ case "$SCENARIO" in
     warmup
     for i in 1 2 3; do
       echo "--- run $i ---"
-      reset_ubrew ; bench "ubrew" $UBREW install $PKG
-      reset_nb    ; bench "nb"    $NB install $PKG
-      reset_wax   ; bench "wax"   $WAX install -y $PKG
-      reset_bru   ; bench "bru"   $BRU install $PKG
-      reset_zb    ; bench "zb"    $ZB install $PKG
+      reset_ubrew ; bench "ubrew" "$UBREW" install "$PKG"
+      reset_nb    ; bench "nb"    "$NB" install "$PKG"
+      reset_wax   ; bench "wax"   "$WAX" install -y "$PKG"
+      reset_bru   ; bench "bru"   "$BRU" install "$PKG"
+      reset_zb    ; bench "zb"    "$ZB" install "$PKG"
     done
     ;;
 
@@ -121,11 +135,11 @@ case "$SCENARIO" in
     warmup
     for i in 1 2 3; do
       echo "--- run $i ---"
-      reset_ubrew ; bench "ubrew" $UBREW install $PKG
-      reset_nb    ; bench "nb"    $NB install $PKG
-      reset_wax   ; bench "wax"   $WAX install -y $PKG
-      reset_bru   ; bench "bru"   $BRU install $PKG
-      reset_zb    ; bench "zb"    $ZB install $PKG
+      reset_ubrew ; bench "ubrew" "$UBREW" install "$PKG"
+      reset_nb    ; bench "nb"    "$NB" install "$PKG"
+      reset_wax   ; bench "wax"   "$WAX" install -y "$PKG"
+      reset_bru   ; bench "bru"   "$BRU" install "$PKG"
+      reset_zb    ; bench "zb"    "$ZB" install "$PKG"
     done
     ;;
 
@@ -133,12 +147,12 @@ case "$SCENARIO" in
     echo "=== update: full index refresh (14 taps) ==="
     for i in 1 2 3; do
       echo "--- run $i ---"
-      bench "ubrew" $UBREW update
-      bench "nb"    $NB update
-      bench "wax"   $WAX update
-      bench "bru"   $BRU update
-      bench "stout" $STOUT update
-      bench "zb"    $ZB update
+      bench "ubrew" "$UBREW" update
+      bench "nb"    "$NB" update
+      bench "wax"   "$WAX" update
+      bench "bru"   "$BRU" update
+      bench "stout" "$STOUT" update
+      bench "zb"    "$ZB" update
     done
     ;;
 
@@ -146,12 +160,12 @@ case "$SCENARIO" in
     echo "=== upgrade: nothing to upgrade ==="
     for i in 1 2 3; do
       echo "--- run $i ---"
-      bench "ubrew" $UBREW upgrade
-      bench "nb"    $NB upgrade
-      bench "wax"   $WAX upgrade
-      bench "bru"   $BRU upgrade
-      bench "stout" $STOUT upgrade
-      bench "zb"    $ZB upgrade
+      bench "ubrew" "$UBREW" upgrade
+      bench "nb"    "$NB" upgrade
+      bench "wax"   "$WAX" upgrade
+      bench "bru"   "$BRU" upgrade
+      bench "stout" "$STOUT" upgrade
+      bench "zb"    "$ZB" upgrade
     done
     ;;
 
@@ -159,12 +173,12 @@ case "$SCENARIO" in
     echo "=== $SCENARIO $PKG ==="
     for i in 1 2 3; do
       echo "--- run $i ---"
-      bench "ubrew" $UBREW $SCENARIO $PKG
-      bench "nb"    $NB $SCENARIO $PKG
-      bench "wax"   $WAX $SCENARIO $PKG
-      bench "bru"   $BRU $SCENARIO $PKG
-      bench "stout" $STOUT $SCENARIO $PKG
-      bench "zb"    $ZB $SCENARIO $PKG
+      bench "ubrew" "$UBREW" "$SCENARIO" "$PKG"
+      bench "nb"    "$NB" "$SCENARIO" "$PKG"
+      bench "wax"   "$WAX" "$SCENARIO" "$PKG"
+      bench "bru"   "$BRU" "$SCENARIO" "$PKG"
+      bench "stout" "$STOUT" "$SCENARIO" "$PKG"
+      bench "zb"    "$ZB" "$SCENARIO" "$PKG"
     done
     ;;
 
