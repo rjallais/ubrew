@@ -16,14 +16,14 @@ echo "    Binary: $NB"
 echo ""
 
 # Ensure nanobrew is initialised
-sudo "$NB" init >/dev/null 2>&1 || true
+sudo -n "$NB" init >/dev/null 2>&1 || true
 export PATH="/opt/nanobrew/prefix/bin:$PATH"
 
 # Ensure required 3rd-party taps are registered (idempotent).
 # `ublue-os/tap` provides casks used by tests below.
 # `justrach/nanobrew` exercises the new GitHub formula-fetch path.
-sudo "$NB" tap add ublue-os/tap https://github.com/ublue-os/homebrew-tap 2>/dev/null || true
-sudo "$NB" tap add justrach/nanobrew https://github.com/justrach/nanobrew 2>/dev/null || true
+sudo -n "$NB" tap add ublue-os/tap https://github.com/ublue-os/homebrew-tap 2>/dev/null || true
+sudo -n "$NB" tap add justrach/nanobrew https://github.com/justrach/nanobrew 2>/dev/null || true
 
 # ===================================================================
 # Basic install + binary verification
@@ -257,7 +257,7 @@ fi
 
 echo ""
 echo "--- Test: bundle dump ---"
-BUNDLE_OUT=$("$NB" bundle dump 2>&1) || true
+BUNDLE_OUT=$("$NB" bundle dump --force 2>&1) || true
 if grep -q 'brew "' <<<"$BUNDLE_OUT"; then
   pass "bundle dump contains brew format lines"
 elif [ -z "$BUNDLE_OUT" ]; then
@@ -304,10 +304,10 @@ fi
 echo ""
 echo "--- Test: doctor ---"
 DOCTOR_OUT=$("$NB" doctor 2>&1) || true
-if grep -qi "Checking nanobrew installation" <<<"$DOCTOR_OUT"; then
+if grep -qi "Checking ubrew installation" <<<"$DOCTOR_OUT"; then
   pass "doctor prints installation check banner"
 else
-  fail "doctor output missing 'Checking nanobrew installation'"
+  fail "doctor output missing 'Checking ubrew installation'"
   echo "      output: $(echo "$DOCTOR_OUT" | head -3)"
 fi
 # ===================================================================

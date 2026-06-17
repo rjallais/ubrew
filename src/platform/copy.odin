@@ -1,6 +1,7 @@
 package platform
 
 import "core:c"
+import "core:fmt"
 import "core:os"
 import "core:strings"
 
@@ -72,7 +73,17 @@ when ODIN_OS == .Linux {
 
 import "core:sys/posix"
 
+GLOBAL_DEBUG: bool = false
+
 exec_cmd :: proc(bin: string, args: []string) -> bool {
+	if GLOBAL_DEBUG {
+		fmt.print("+ ")
+		for arg, idx in args {
+			if idx > 0 do fmt.print(" ")
+			fmt.print(arg)
+		}
+		fmt.println()
+	}
 	// Convention: `args[0]` is the program name (so it shows up in
 	// `ps`/error messages as the user expects). We pass `args` directly
 	// to execvp. The trailing nil terminates the argv vector.
@@ -96,7 +107,46 @@ exec_cmd :: proc(bin: string, args: []string) -> bool {
 	return false
 }
 
-exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> string {
+// fork_exec_async forks and execs `bin` with `args` without waiting for the
+// child to finish. Returns the child pid (>0) on success, -1 on failure.
+// Use wait_pid_status to reap the child later. The convention is the same
+// as exec_cmd: `args[0]` is the program name.
+fork_exec_async :: proc(bin: string, args: []string) -> int {
+	if GLOBAL_DEBUG {
+		fmt.print("+ ")
+		for arg, idx in args {
+			if idx > 0 do fmt.print(" ")
+			fmt.print(arg)
+		}
+		fmt.println()
+	}
+	argv := make([]cstring, len(args) + 1, context.temp_allocator)
+	for i in 0..<len(args) {
+		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
+	}
+	argv[len(args)] = nil
+
+	bin_cstr := strings.clone_to_cstring(bin, context.temp_allocator)
+
+	pid := posix.fork()
+	if pid == 0 {
+		posix.execvp(bin_cstr, &argv[0])
+		posix.exit(1)
+	} else if pid > 0 {
+		return int(pid)
+	}
+	return -1
+}
+
+// wait_pid_status blocks until `pid` exits and returns true iff the child
+// exited with status 0.
+wait_pid_status :: proc(pid: int) -> bool {
+	status: c.int
+	posix.waitpid(posix.pid_t(pid), &status, nil)
+	return status == 0
+}
+
+exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> (output: string, truncated: bool) {
 	argv := make([]cstring, len(args) + 1, context.temp_allocator)
 	for i in 0..<len(args) {
 		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
@@ -107,7 +157,7 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> string {
 
 	pipe_fds: [2]posix.FD
 	if posix.pipe(&pipe_fds) != .OK {
-		return ""
+		return "", false
 	}
 
 	pid := posix.fork()
@@ -116,6 +166,15 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> string {
 		posix.close(pipe_fds[0])
 		posix.dup2(pipe_fds[1], posix.FD(1))
 		posix.close(pipe_fds[1])
+
+		// Redirect stderr to /dev/null to suppress noisy warnings/errors from captured commands
+		null_handle, open_err := os.open("/dev/null", os.O_WRONLY)
+		if open_err == nil {
+			null_fd := posix.FD(os.fd(null_handle))
+			posix.dup2(null_fd, posix.FD(2))
+			posix.close(null_fd)
+		}
+
 		posix.execvp(bin_cstr, &argv[0])
 		posix.exit(1)
 	} else if pid > 0 {
@@ -129,16 +188,27 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> string {
 			}
 			total += int(n)
 		}
+		// If we filled the buffer, the child may have written more that we
+		// couldn't fit. Probe with one more read; if it returns >0 the
+		// output was definitely truncated. The read blocks until data or EOF.
+		truncated = false
+		if total >= len(buf) - 1 {
+			extra: [1]u8
+			n := posix.read(pipe_fds[0], &extra[0], 1)
+			if n > 0 {
+				truncated = true
+			}
+		}
 		posix.close(pipe_fds[0])
 
 		status: c.int
 		posix.waitpid(pid, &status, nil)
 
-		return strings.trim_space(string(buf[:total]))
+		return strings.trim_space(string(buf[:total])), truncated
 	}
 	posix.close(pipe_fds[0])
 	posix.close(pipe_fds[1])
-	return ""
+	return "", false
 }
 
 cp_fallback :: proc(src: string, dst: string) -> bool {
@@ -156,4 +226,58 @@ cow_copy :: proc(src: string, dst: string) -> bool {
 		return true
 	}
 	return cp_fallback(src, dst)
+}
+
+@(private="file")
+_gh_token: string
+@(private="file")
+_gh_token_fetched: bool
+
+find_gh_binary :: proc() -> string {
+	// Try common absolute paths first. The child of `posix.execvp` does NOT
+	// search PATH for a relative name in some environments, so we need to
+	// resolve `gh` to a full path before calling exec.
+	candidates := []string{
+		"/usr/bin/gh",
+		"/usr/local/bin/gh",
+		"/opt/homebrew/bin/gh",
+		"/home/linuxbrew/.linuxbrew/bin/gh",
+	}
+	for c in candidates {
+		if os.is_file(c) {
+			return c
+		}
+	}
+	// Fall back to PATH search.
+	if path_env := os.get_env("PATH", context.temp_allocator); len(path_env) > 0 {
+		for dir in strings.split(path_env, ":", context.temp_allocator) {
+			full := fmt.tprintf("%s/gh", dir)
+			if os.is_file(full) {
+				return strings.clone(full, context.allocator)
+			}
+		}
+	}
+	return ""
+}
+
+get_gh_token :: proc() -> string {
+	if !_gh_token_fetched {
+		_gh_token_fetched = true
+		buf: [512]u8
+		gh_path := find_gh_binary()
+		if len(gh_path) > 0 {
+			args := []string{"gh", "auth", "token"}
+			token, was_truncated := exec_cmd_capture(gh_path, args, buf[:])
+			if !was_truncated && len(token) > 0 {
+				_gh_token = token
+			}
+		}
+		if _gh_token == "" {
+			_gh_token = os.get_env("GITHUB_TOKEN", context.temp_allocator)
+		}
+		if _gh_token != "" {
+			_gh_token = strings.clone(_gh_token, context.allocator)
+		}
+	}
+	return _gh_token
 }

@@ -212,7 +212,7 @@ derive_branch_from_url :: proc(url: string) -> string {
 
 	cmd_args := []string{
 		"curl",
-		"-sfSL",
+		"-sfL",
 		"--no-progress-meter",
 		"-H", "Accept: application/vnd.github+json",
 		api_url,
@@ -357,7 +357,7 @@ fetch_formula_ruby :: proc(t: Tap, formula_name: string) -> (contents: string, o
 	for url in candidates {
 		cmd_args := []string{
 			"curl",
-			"-sfSL",
+			"-sfL",
 			"--no-progress-meter",
 			url,
 			"-o", cache_path,
@@ -389,4 +389,141 @@ fetch_formula_ruby :: proc(t: Tap, formula_name: string) -> (contents: string, o
 		return cloned, true
 	}
 	return "", false
+}
+
+TRUSTED_TAPS_FILE :: "/opt/ubrew/db/trusted_taps.txt"
+
+trusted_taps_load :: proc() -> (names: [dynamic]string, err: bool) {
+	names = make([dynamic]string, context.allocator)
+	data, rerr := os.read_entire_file(TRUSTED_TAPS_FILE, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return names, rerr != nil
+	}
+	defer delete(data)
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' {
+			end += 1
+		}
+		if end > start {
+			line := strings.trim_space(text[start:end])
+			if len(line) > 0 {
+				append(&names, strings.clone(line, context.allocator))
+			}
+		}
+		start = end + 1
+	}
+	return names, false
+}
+
+trusted_taps_save :: proc(names: [dynamic]string) {
+	_ = os.make_directory_all("/opt/ubrew/db", os.perm(0o755))
+	buf: strings.Builder
+	strings.builder_init(&buf)
+	for name in names {
+		strings.write_string(&buf, name)
+		strings.write_byte(&buf, '\n')
+	}
+	result := strings.to_string(buf)
+	_ = os.write_entire_file(TRUSTED_TAPS_FILE, result)
+	strings.builder_destroy(&buf)
+	delete(result)
+}
+
+tap_is_trusted :: proc(name: string) -> bool {
+	if strings.has_prefix(name, "homebrew/") {
+		return true
+	}
+	names, _ := trusted_taps_load()
+	defer delete(names)
+	for n in names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+tap_trust :: proc(name: string) -> bool {
+	names, _ := trusted_taps_load()
+	// Check if already trusted
+	for n in names {
+		if n == name {
+			return true
+		}
+	}
+	_ = os.make_directory_all("/opt/ubrew/db", os.perm(0o755))
+	append(&names, strings.clone(name, context.allocator))
+	trusted_taps_save(names)
+	return true
+}
+
+tap_untrust :: proc(name: string) -> bool {
+	names, _ := trusted_taps_load()
+	defer delete(names)
+	found := false
+	new_names := make([dynamic]string, context.allocator)
+	for n in names {
+		if n == name {
+			found = true
+		} else {
+			append(&new_names, n)
+		}
+	}
+	trusted_taps_save(new_names)
+	return found
+}
+
+get_trusted_taps :: proc(allocator := context.allocator) -> []string {
+	names, _ := trusted_taps_load()
+	result := make([]string, len(names), allocator)
+	for n, i in names {
+		result[i] = strings.clone(n, allocator)
+	}
+	return result
+}
+
+prompt_and_trust_tap :: proc(name: string) -> bool {
+	fmt.printf("==> Tap '%s' is not trusted.\n", name)
+	fmt.printf("Do you want to trust this tap? (y/N) ")
+	buf := make([]u8, 16, context.temp_allocator)
+	n, _ := os.read(os.stdin, buf)
+	if n > 0 {
+		input := strings.trim_space(string(buf[:n]))
+		if input == "y" || input == "Y" {
+			return tap_trust(name)
+		}
+	}
+	return false
+}
+
+tap_cask_cache_path :: proc(t: Tap, cask_name: string) -> string {
+	return fmt.tprintf("%s/cache/taps/%s/Casks/%s.rb", "/opt/ubrew", t.name, cask_name)
+}
+
+fetch_cask_ruby :: proc(t: Tap, cask_name: string) -> (string, bool) {
+	cache_path := tap_cask_cache_path(t, cask_name)
+	data, rerr := os.read_entire_file(cache_path, context.allocator)
+	if rerr == nil && len(data) > 0 {
+		return string(data), true
+	}
+	// Fallback: try fetching from GitHub via curl
+	url := fmt.tprintf("https://raw.githubusercontent.com/%s/HEAD/Casks/%s.rb", t.name, cask_name)
+	tmp_f, terr := os.create_temp_file("", "cask-rb-")
+	if terr != nil {
+		return "", false
+	}
+	tmp_name := strings.clone(os.name(tmp_f), context.allocator)
+	defer {
+		os.close(tmp_f)
+		os.remove(tmp_name)
+	}
+	_ = platform.exec_cmd("curl", []string{"curl", "-fsL", "-o", tmp_name, url})
+	fetched_data, ferr := os.read_entire_file(tmp_name, context.allocator)
+	if ferr != nil || len(fetched_data) == 0 {
+		return "", false
+	}
+	return string(fetched_data), true
 }

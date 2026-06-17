@@ -2,10 +2,12 @@ package installer
 
 import "core:fmt"
 import "core:os"
+import "core:io"
 import "core:c/libc"
 import "core:strings"
 import "core:crypto/hash"
 import "core:encoding/hex"
+import "core:encoding/json"
 import "../cask"
 import "../formula"
 import "../kernel"
@@ -18,6 +20,19 @@ when ODIN_ARCH == .amd64 {
 	INTERPRETER :: "/lib/ld-linux-aarch64.so.1"
 } else {
 	INTERPRETER :: "/lib64/ld-linux-x86-64.so.2"
+}
+
+// is_safe_binary_name returns true if the name contains only characters
+// that are safe to interpolate into a shell command (alphanumeric, '-',
+// '_', '.', '/').
+is_safe_binary_name :: proc(name: string) -> bool {
+	for c in name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			 (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/') {
+			return false
+		}
+	}
+	return len(name) > 0
 }
 
 UBREW_ROOT :: "/opt/ubrew"
@@ -41,9 +56,29 @@ expand_home :: proc(path: string, allocator := context.allocator) -> string {
 	if home_dir == "" {
 		return strings.clone(path, allocator)
 	}
-	res1, _ := strings.replace_all(path, "~", home_dir, context.temp_allocator)
-	res2, _ := strings.replace_all(res1, "$HOME", home_dir, allocator)
-	return res2
+
+	p := path
+	expanded := false
+	if p == "~" {
+		p = home_dir
+		expanded = true
+	} else if strings.has_prefix(p, "~/") {
+		p = strings.concatenate({home_dir, p[1:]}, context.temp_allocator)
+		expanded = true
+	}
+
+	if p == "$HOME" {
+		p = home_dir
+		expanded = true
+	} else if strings.has_prefix(p, "$HOME/") {
+		p = strings.concatenate({home_dir, p[5:]}, context.temp_allocator)
+		expanded = true
+	}
+
+	if expanded {
+		return strings.clone(p, allocator)
+	}
+	return strings.clone(path, allocator)
 }
 
 dir_name :: proc(path: string) -> string {
@@ -100,7 +135,224 @@ wallpaper_install_dir :: proc(home_dir: string, product: string, de: Desktop_Env
 	return fmt.tprintf("%s/.local/share/backgrounds/%s", home_dir, product)
 }
 
-install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
+is_elf_file :: proc(path: string) -> bool {
+	f, err := os.open(path, os.O_RDONLY)
+	if err != nil {
+		return false
+	}
+	defer os.close(f)
+
+	buf: [4]u8
+	n, read_err := os.read(f, buf[:])
+	if read_err != nil || n != 4 {
+		return false
+	}
+
+	return buf[0] == 0x7f && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F'
+}
+
+// ELF constant for program header type "interpreter request".
+PT_INTERP :: 3
+
+// Read the file's ELF header and program headers in a single syscall pair
+// and return true iff the file is an ELF executable (or PIE) that carries
+// a PT_INTERP segment. Shared objects and statically-linked binaries
+// return false. We use this to skip `patchelf --set-interpreter` on
+// binaries that have no interpreter to rewrite — calling patchelf on
+// such files prints a noisy "cannot find section '.interp'" warning
+// and forks a child process for nothing.
+elf_has_interp :: proc(path: string) -> bool {
+	f, err := os.open(path, os.O_RDONLY)
+	if err != nil {
+		return false
+	}
+	defer os.close(f)
+
+	// 64-byte ELF identification + a few fields we need from the header.
+	// For 64-bit ELF: e_phoff is at offset 32, e_phentsize at 54,
+	// e_phnum at 56. Each 64-bit Phdr is 56 bytes; p_type is at 0.
+	ident: [16]u8
+	n, read_err := os.read(f, ident[:])
+	if read_err != nil || n != 16 {
+		return false
+	}
+	if ident[0] != 0x7f || ident[1] != 'E' || ident[2] != 'L' || ident[3] != 'F' {
+		return false
+	}
+	is_64 := ident[4] == 2
+	is_le  := ident[5] == 1
+	if !is_64 {
+		// We only build for 64-bit Linux; 32-bit ELFs are out of scope.
+		return false
+	}
+	if !is_le {
+		return false
+	}
+
+	// Read the rest of the ELF header (up through e_phnum). For 64-bit,
+	// the header is 64 bytes total; we already consumed 16.
+	rest: [48]u8
+	n2, read_err2 := os.read(f, rest[:])
+	if read_err2 != nil || n2 != 48 {
+		return false
+	}
+
+	read_u16 :: proc(b: []u8, off: int) -> u16 {
+		return u16(b[off]) | (u16(b[off+1]) << 8)
+	}
+	read_u64 :: proc(b: []u8, off: int) -> u64 {
+		v: u64 = 0
+		for i in 0..<8 {
+			v |= u64(b[off+i]) << (u8(i) * 8)
+		}
+		return v
+	}
+
+	// Layout of the 64-byte ELF64 header (offsets in the spec):
+	//   0  e_ident[16]
+	//  16  e_type (2), e_machine (2), e_version (4), e_entry (8)
+	//  32  e_phoff (8)
+	//  40  e_shoff (8)
+	//  48  e_flags (4), e_ehsize (2)
+	//  54  e_phentsize (2)
+	//  56  e_phnum (2), e_shentsize (2), e_shnum (2), e_shstrndx (2)
+	// `rest` is what comes after the 16-byte ident, so its index 0 is
+	// header offset 16. The fields we need start at rest[16], rest[38],
+	// rest[40].
+	e_phoff     := read_u64(rest[:], 16)  // header offset 32
+	e_phentsize := read_u16(rest[:], 38)  // header offset 54
+	e_phnum     := read_u16(rest[:], 40)  // header offset 56
+
+	if e_phnum == 0 || e_phentsize != 56 {
+		return false
+	}
+	// Guard against absurd header tables (corrupt or maliciously small
+	// files claiming a huge table). 1024 program headers is more than
+	// any real Linux binary has.
+	if e_phnum > 1024 {
+		return false
+	}
+
+	// Seek to e_phoff and walk program headers.
+	if _, seek_err := os.seek(f, i64(e_phoff), io.Seek_From.Start); seek_err != nil {
+		return false
+	}
+
+	phdr: [56]u8
+	for _ in 0..<int(e_phnum) {
+		n3, perr := os.read(f, phdr[:])
+		if perr != nil || n3 != 56 {
+			return false
+		}
+		p_type := u32(phdr[0]) | (u32(phdr[1]) << 8) | (u32(phdr[2]) << 16) | (u32(phdr[3]) << 24)
+		if p_type == PT_INTERP {
+			return true
+		}
+	}
+	return false
+}
+
+relocate_keg_binaries :: proc(dir: string, relocated_count: ^int) {
+	if fd, fd_err := os.open(dir); fd_err == nil {
+		defer os.close(fd)
+		if infos, read_err := os.read_directory_by_path(dir, -1, context.temp_allocator); read_err == nil {
+			for info in infos {
+				if info.type == .Directory {
+					relocate_keg_binaries(info.fullpath, relocated_count)
+				} else if info.type == .Regular {
+					is_exec := .Execute_User in info.mode || .Execute_Group in info.mode || .Execute_Other in info.mode
+					if is_exec && elf_has_interp(info.fullpath) {
+						// Probe the current interpreter. patchelf forks a
+						// child process to print it; if it already matches
+						// the target we skip the write entirely. This
+						// eliminates redundant writes for x86_64 Linux
+						// bottles that ship with the right ld.so path
+						// (which is most of them, since Homebrew targets
+						// the same path on x86_64 Linux).
+						print_buf: [512]u8
+						print_args := []string{"patchelf", "--print-interpreter", info.fullpath}
+						current, _ := platform.exec_cmd_capture("patchelf", print_args, print_buf[:])
+						current = strings.trim_space(current)
+						if current == INTERPRETER {
+							continue
+						}
+						chmod_args := []string{"chmod", "+w", info.fullpath}
+						platform.exec_cmd("chmod", chmod_args)
+						patch_args := []string{"patchelf", "--set-interpreter", INTERPRETER, info.fullpath}
+						if platform.exec_cmd("patchelf", patch_args) {
+							relocated_count^ += 1
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+relocate_single_file :: proc(path: string) {
+	// 1. If it's a symlink
+	target, read_link_err := os.read_link(path, context.temp_allocator)
+	if read_link_err == nil {
+		if strings.contains(target, "@@HOMEBREW_PREFIX@@") || strings.contains(target, "@@HOMEBREW_CELLAR@@") {
+			new_target, _ := strings.replace_all(target, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+			new_target, _ = strings.replace_all(new_target, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+			os.remove(path)
+			os.symlink(new_target, path)
+		}
+		return
+	}
+
+	// 2. If it's a regular file
+	if is_elf_file(path) {
+		rpath_buf: [2048]u8
+		rpath_args := []string{"patchelf", "--print-rpath", path}
+		rpath, rpath_truncated := platform.exec_cmd_capture("patchelf", rpath_args, rpath_buf[:])
+		rpath = strings.trim_space(rpath)
+		// Skip the rpath rewrite if the captured output was truncated —
+		// writing back a clipped rpath would corrupt the binary's RUNPATH.
+		// Long rpaths are rare in practice; the caller can reinstall with
+		// a larger buffer if needed.
+		if !rpath_truncated && (strings.contains(rpath, "@@HOMEBREW_PREFIX@@") || strings.contains(rpath, "@@HOMEBREW_CELLAR@@")) {
+			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+			chmod_args := []string{"chmod", "+w", path}
+			platform.exec_cmd("chmod", chmod_args)
+			set_args := []string{"patchelf", "--set-rpath", new_rpath, path}
+			platform.exec_cmd("patchelf", set_args)
+		} else if rpath_truncated {
+			fmt.eprintf("Warning: rpath for %s exceeded buffer; skipping rpath rewrite\n", path)
+		}
+	} else {
+		data, read_err := os.read_entire_file(path, context.temp_allocator)
+		if read_err == nil && len(data) > 0 {
+			content := string(data)
+			if strings.contains(content, "@@HOMEBREW_PREFIX@@") || strings.contains(content, "@@HOMEBREW_CELLAR@@") {
+				new_content, _ := strings.replace_all(content, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+				new_content, _ = strings.replace_all(new_content, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+				chmod_args := []string{"chmod", "+w", path}
+				platform.exec_cmd("chmod", chmod_args)
+				_ = os.write_entire_file_from_string(path, new_content)
+			}
+		}
+	}
+}
+
+relocate_keg_placeholders :: proc(dir: string) {
+	if fd, fd_err := os.open(dir); fd_err == nil {
+		defer os.close(fd)
+		if infos, read_err := os.read_directory_by_path(dir, -1, context.temp_allocator); read_err == nil {
+			for info in infos {
+				if info.type == .Directory {
+					relocate_keg_placeholders(info.fullpath)
+				} else {
+					relocate_single_file(info.fullpath)
+				}
+			}
+		}
+	}
+}
+
+install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> bool {
 	fmt.printf("==> Installing bottle: %s %s\n", f.name, f.version)
 
 	if len(f.bottle_url) == 0 {
@@ -110,7 +362,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
 
 	sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
 
-	if store.store_has_entry(sha) {
+	if store.store_has_relocated_entry(sha) {
 		fmt.printf("==> Found cached store entry for %s, materializing via COW...\n", sha[:12])
 		_ = store.store_ensure_dir()
 		if store.store_materialize_from_relocated(sha, f.name, f.version) {
@@ -126,32 +378,64 @@ install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
 	}
 
 	dl_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", CACHE_DIR, f.name, f.version)
-	fmt.printf("==> Downloading: %s\n", f.bottle_url)
+	already_downloaded := os.is_file(dl_path) && sha256_matches(dl_path, f.bottle_sha256)
 
-	if !strings.has_prefix(f.bottle_url, "http://") && !strings.has_prefix(f.bottle_url, "https://") {
-		fmt.println("Error: Invalid bottle URL scheme.")
-		return false
-	}
+	if !already_downloaded {
+		fmt.printf("==> Downloading: %s\n", f.bottle_url)
 
-	dl_args := []string{"curl", "-H", "Authorization: Bearer QQ==", "-L", f.bottle_url, "-o", dl_path}
-	if !platform.exec_cmd("curl", dl_args) {
-		fmt.println("Error: Download failed.")
-		return false
+		if !strings.has_prefix(f.bottle_url, "http://") && !strings.has_prefix(f.bottle_url, "https://") {
+			fmt.println("Error: Invalid bottle URL scheme.")
+			return false
+		}
+
+		dl_args := []string{"curl", "-#", "-H", "Authorization: Bearer QQ==", "-L", f.bottle_url, "-o", dl_path}
+		if !platform.exec_cmd("curl", dl_args) {
+			fmt.println("Error: Download failed.")
+			return false
+		}
+	} else {
+		fmt.printf("==> Already downloaded: %s\n", dl_path)
 	}
 	defer os.remove(dl_path)
 
-	fmt.printf("==> Creating prefix: %s\n", prefix)
+	if !sha256_matches(dl_path, f.bottle_sha256) {
+		fmt.println("Error: SHA256 verification failed for bottle.")
+		return false
+	}
+
+	if !os.is_dir(prefix) {
+		fmt.printf("==> Creating prefix: %s\n", prefix)
+	}
 	if !ensure_dir(prefix) {
 		return false
 	}
 
 	cellar_dir := PREFIX + "/Cellar"
 	keg_dir := fmt.tprintf("%s/%s/%s", cellar_dir, f.name, f.version)
-	_ = os.remove_all(keg_dir)
+	formula_cellar_dir := fmt.tprintf("%s/%s", cellar_dir, f.name)
+	_ = os.remove_all(formula_cellar_dir)
 
 	fmt.printf("==> Unpacking to: %s\n", cellar_dir)
 	ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
-	if !platform.exec_cmd("tar", ex_args) {
+	if platform.exec_cmd("tar", ex_args) {
+		if fd, fd_err := os.open(formula_cellar_dir); fd_err == nil {
+			defer os.close(fd)
+			if infos, read_err := os.read_directory_by_path(formula_cellar_dir, -1, context.temp_allocator); read_err == nil {
+				for info in infos {
+					if info.type == .Directory {
+						if info.name != f.version {
+							src_path := info.fullpath
+							dst_path := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
+							if rename_err := os.rename(src_path, dst_path); rename_err != nil {
+								fmt.printf("Warning: Failed to rename unpacked directory from %s to %s: %v\n", info.name, f.version, rename_err)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	} else {
 		if !ensure_dir(keg_dir) {
 			return false
 		}
@@ -162,48 +446,12 @@ install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
 		}
 	}
 
-	fmt.println("==> Performing native binary relocation...")
-	binary_path := fmt.tprintf("%s/bin/%s", keg_dir, f.name)
-	if os.is_file(binary_path) {
-		chmod_args := []string{"chmod", "+w", binary_path}
-		platform.exec_cmd("chmod", chmod_args)
-
-		patch_args := []string{"patchelf", "--set-interpreter", INTERPRETER, binary_path}
-		if platform.exec_cmd("patchelf", patch_args) {
-			fmt.printf("==> Successfully relocated %s binary interpreter!\n", f.name)
-		} else {
-			fmt.printf("==> Warning: patchelf failed to relocate %s (may not be dynamically linked or interpreter already correct)\n", f.name)
-		}
-	}
-
-	// The formula's primary binary may be named differently from the formula token
-	// (e.g. `dash-shell` installs a binary called `dash`). Walk the keg bin dir and
-	// patchelf every executable so the interpreter is correct before symlinking.
 	relocated_bin_count := 0
-	keg_bin_dir := fmt.tprintf("%s/bin", keg_dir)
-	if os.is_dir(keg_bin_dir) {
-		if infos, dir_err := os.read_directory_by_path(keg_bin_dir, -1, context.temp_allocator); dir_err == nil {
-			defer os.file_info_slice_delete(infos, context.allocator)
-			for info in infos {
-				if info.type != .Regular {
-					continue
-				}
-				full := info.fullpath
-				if full == binary_path {
-					continue
-				}
-				chmod_args := []string{"chmod", "+w", full}
-				platform.exec_cmd("chmod", chmod_args)
-				patch_args := []string{"patchelf", "--set-interpreter", INTERPRETER, full}
-				if platform.exec_cmd("patchelf", patch_args) {
-					relocated_bin_count += 1
-				}
-			}
-			if relocated_bin_count > 0 {
-				fmt.printf("==> Relocated %d additional binary interpreter(s)\n", relocated_bin_count)
-			}
-		}
+	relocate_keg_binaries(keg_dir, &relocated_bin_count)
+	if relocated_bin_count > 0 {
+		fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
 	}
+	relocate_keg_placeholders(keg_dir)
 
 	bin_dir := fmt.tprintf("%s/bin", keg_dir)
 	if os.is_dir(bin_dir) {
@@ -213,7 +461,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
 			infos, read_err := os.read_directory_by_path(bin_dir, -1, context.temp_allocator)
 			if read_err == nil {
 				for info in infos {
-					if info.type == .Regular {
+					if info.type == .Regular || info.type == .Symlink {
 						src_file := info.fullpath
 						dst_file := fmt.tprintf("%s/bin/%s", prefix, info.name)
 						os.remove(dst_file)
@@ -240,6 +488,34 @@ install_bottle :: proc(f: formula.Formula, prefix: string) -> bool {
 			fmt.printf("==> Saved store entry %s via COW\n", sha[:12])
 		}
 	}
+
+	// Create opt symlink
+	opt_dir := fmt.tprintf("%s/opt", prefix)
+	_ = os.make_directory_all(opt_dir, os.perm(0o755))
+	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
+	_ = os.remove(opt_link)
+	opt_target := fmt.tprintf("../Cellar/%s/%s", f.name, f.version)
+	_ = os.symlink(opt_target, opt_link)
+
+	// Write install receipt so `autoremove` can distinguish requested
+	// installs from dep-only installs.
+	receipt := Install_Receipt{
+		name                = strings.clone(f.name, context.allocator),
+		version             = strings.clone(f.version, context.allocator),
+		installed_on_request = on_request,
+		poured_from_bottle   = true,
+		tap                  = strings.clone(f.tap, context.allocator),
+		runtime_dependencies = nil,
+	}
+	defer destroy_install_receipt(receipt)
+	if len(f.dependencies) > 0 {
+		deps := make([dynamic]string, context.allocator)
+		for d in f.dependencies {
+			append(&deps, strings.clone(d, context.allocator))
+		}
+		receipt.runtime_dependencies = deps[:]
+	}
+	_ = write_install_receipt(keg_dir, receipt)
 
 	fmt.printf("==> Successful installation of %s into %s!\n", f.name, keg_dir)
 	return true
@@ -301,7 +577,7 @@ find_source_root :: proc(build_dir: string) -> string {
 	return build_dir
 }
 
-install_source :: proc(f: formula.Formula, prefix: string) -> bool {
+install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> bool {
 	fmt.printf("==> Installing %s %s from source\n", f.name, f.version)
 
 	if len(f.source_url) == 0 {
@@ -317,14 +593,26 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 	// Detect archive extension from source URL
 	ext := ".tar.gz"
 	url := f.source_url
+	is_archive := true
 	if strings.has_suffix(url, ".zip") {
 		ext = ".zip"
+	} else if strings.has_suffix(url, ".tar.gz") || strings.has_suffix(url, ".tgz") {
+		ext = ".tar.gz"
 	} else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
 		ext = ".tar.bz2"
 	} else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
 		ext = ".tar.xz"
 	} else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
 		ext = ".tar.zst"
+	} else {
+		is_archive = false
+		last_dot := strings.last_index_byte(url, '.')
+		last_slash := strings.last_index_byte(url, '/')
+		if last_dot > last_slash {
+			ext = url[last_dot:]
+		} else {
+			ext = ""
+		}
 	}
 
 	dl_path := fmt.tprintf("%s/%s-%s-source%s", CACHE_DIR, f.name, f.version, ext)
@@ -339,7 +627,19 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 	_ = os.make_directory_all(build_dir, os.perm(0o755))
 
 	fmt.printf("==> Extracting source to: %s\n", build_dir)
-	if ext == ".zip" {
+	if !is_archive {
+		filename := url
+		last_slash := strings.last_index_byte(url, '/')
+		if last_slash >= 0 {
+			filename = url[last_slash + 1:]
+		}
+		dest := fmt.tprintf("%s/%s", build_dir, filename)
+		cp_args := []string{"cp", dl_path, dest}
+		if !platform.exec_cmd("cp", cp_args) {
+			fmt.println("Error: Failed to copy single source file to build directory.")
+			return false
+		}
+	} else if ext == ".zip" {
 		cmd_ex := fmt.tprintf("unzip -q \"%s\" -d \"%s\"", dl_path, build_dir)
 		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
 		if libc.system(cmd_ex_cstr) != 0 {
@@ -461,13 +761,22 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 			keg_bin := fmt.tprintf("%s/bin", keg_dir)
 			_ = os.make_directory_all(keg_bin, os.perm(0o755))
 			for b in f.binaries {
+				if !is_safe_binary_name(b) {
+					fmt.eprintf("Warning: skipping binary %q (unsafe name)\n", b)
+					continue
+				}
 				// Pipeline: find the file (excluding bin/ itself) and mv it.
 				// `2>/dev/null` suppresses find errors; `|| true` keeps the
 				// pipeline non-fatal if the file isn't found.
 				mv_cmd := fmt.tprintf(
 					"FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"%s\" -not -path \"%s/*\" 2>/dev/null | head -1); " +
-					"if [ -n \"$FOUND\" ]; then mv \"$FOUND\" \"%s/%s\"; fi",
-					keg_dir, b, keg_bin, keg_bin, b,
+					"if [ -z \"$FOUND\" ]; then FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"%s*\" -not -path \"%s/*\" 2>/dev/null | head -1); fi; " +
+					"if [ -z \"$FOUND\" ]; then FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"*%s*\" -not -path \"%s/*\" 2>/dev/null | head -1); fi; " +
+					"if [ -n \"$FOUND\" ]; then mv \"$FOUND\" \"%s/%s\" && chmod +x \"%s/%s\"; fi",
+					keg_dir, b, keg_bin,
+					keg_dir, b, keg_bin,
+					keg_dir, b, keg_bin,
+					keg_bin, b, keg_bin, b,
 				)
 				mv_cstr := strings.clone_to_cstring(mv_cmd, context.temp_allocator)
 				_ = libc.system(mv_cstr)
@@ -492,7 +801,7 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 			infos, read_err := os.read_directory_by_path(bin_dir, -1, context.temp_allocator)
 			if read_err == nil {
 				for info in infos {
-					if info.type == .Regular {
+					if info.type == .Regular || info.type == .Symlink {
 						src_file := info.fullpath
 						dst_file := fmt.tprintf("%s/bin/%s", prefix, info.name)
 						os.remove(dst_file)
@@ -523,6 +832,36 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 		platform.exec_cmd("patchelf", patch_args)
 	}
 
+	relocate_keg_placeholders(keg_dir)
+
+	// Create opt symlink
+	opt_dir := fmt.tprintf("%s/opt", prefix)
+	_ = os.make_directory_all(opt_dir, os.perm(0o755))
+	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
+	_ = os.remove(opt_link)
+	opt_target := fmt.tprintf("../Cellar/%s/%s", f.name, f.version)
+	_ = os.symlink(opt_target, opt_link)
+
+	// Write install receipt so `autoremove` can distinguish requested
+	// installs from dep-only installs.
+	receipt := Install_Receipt{
+		name                = strings.clone(f.name, context.allocator),
+		version             = strings.clone(f.version, context.allocator),
+		installed_on_request = on_request,
+		poured_from_bottle   = false,
+		tap                  = strings.clone(f.tap, context.allocator),
+		runtime_dependencies = nil,
+	}
+	defer destroy_install_receipt(receipt)
+	if len(f.dependencies) > 0 {
+		deps := make([dynamic]string, context.allocator)
+		for d in f.dependencies {
+			append(&deps, strings.clone(d, context.allocator))
+		}
+		receipt.runtime_dependencies = deps[:]
+	}
+	_ = write_install_receipt(keg_dir, receipt)
+
 	fmt.printf("==> Successful installation of %s into %s!\n", f.name, keg_dir)
 	return true
 }
@@ -530,6 +869,84 @@ install_source :: proc(f: formula.Formula, prefix: string) -> bool {
 flatten_token :: proc(token: string) -> string {
     out, _ := strings.replace_all(token, "/", "-", context.temp_allocator)
     return out
+}
+
+cask_download_path :: proc(c: cask.Cask) -> string {
+	flat := flatten_token(c.token)
+	ver := c.version
+	if ver == "" {
+		ver = "latest"
+	}
+	ver_flat, _ := strings.replace_all(ver, "/", "-", context.temp_allocator)
+
+	is_font := false
+	is_wallpaper := false
+	if len(c.artifacts) > 0 {
+		for art in c.artifacts {
+			#partial switch _ in art {
+			case cask.Font_Artifact:
+				is_font = true
+			case cask.Wallpaper_Artifact:
+				is_wallpaper = true
+			}
+		}
+	}
+
+	is_appimage := strings.contains(strings.to_lower(c.url), "appimage")
+
+	if is_appimage {
+		return fmt.tprintf("%s/%s-%s.AppImage", CACHE_DIR, flat, ver_flat)
+	}
+
+	ext := ""
+	url := c.url
+
+	if is_font {
+		// Font defaults to .zip
+		ext = ".zip"
+		if strings.has_suffix(url, ".tar.gz") || strings.has_suffix(url, ".tgz") {
+			ext = ".tar.gz"
+		} else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
+			ext = ".tar.bz2"
+		} else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
+			ext = ".tar.xz"
+		} else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
+			ext = ".tar.zst"
+		} else if strings.has_suffix(url, ".ttf") {
+			ext = ".ttf"
+		} else if strings.has_suffix(url, ".otf") {
+			ext = ".otf"
+		} else if strings.has_suffix(url, ".ttc") {
+			ext = ".ttc"
+		}
+	} else if is_wallpaper {
+		// Wallpaper defaults to .tar.gz
+		ext = ".tar.gz"
+		if strings.has_suffix(url, ".zip") {
+			ext = ".zip"
+		} else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
+			ext = ".tar.bz2"
+		} else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
+			ext = ".tar.xz"
+		} else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
+			ext = ".tar.zst"
+		}
+	} else {
+		// Binary cask: no default extension if not matched
+		if strings.has_suffix(url, ".zip") {
+			ext = ".zip"
+		} else if strings.has_suffix(url, ".tar.gz") || strings.has_suffix(url, ".tgz") {
+			ext = ".tar.gz"
+		} else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
+			ext = ".tar.bz2"
+		} else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
+			ext = ".tar.xz"
+		} else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
+			ext = ".tar.zst"
+		}
+	}
+
+	return fmt.tprintf("%s/%s-%s%s", CACHE_DIR, flat, ver_flat, ext)
 }
 
 url_basename :: proc(url: string) -> string {
@@ -600,8 +1017,25 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 		}
 	}
 
+	if os.is_file(dl_path) && sha256_matches(dl_path, sha256) {
+		fmt.printf("==> Already downloaded: %s\n", dl_path)
+		if store.is_valid_sha256(sha256) {
+			_ = store.blob_ensure_dir()
+			buf: [512]u8
+			cached := store.blob_path(sha256, buf[:])
+			if !os.is_file(cached) {
+				cmd_cache := fmt.tprintf("cp '%s' '%s'", dl_path, cached)
+				cmd_cache_cstr := strings.clone_to_cstring(cmd_cache, context.temp_allocator)
+				if libc.system(cmd_cache_cstr) == 0 {
+					fmt.printf("==> Cached blob %s\n", sha256[:12])
+				}
+			}
+		}
+		return true
+	}
+
 	fmt.printf("==> Downloading: %s\n", url)
-	cmd_dl := fmt.tprintf("curl -sfSL \"%s\" -o \"%s\"", url, dl_path)
+	cmd_dl := fmt.tprintf("curl -sfL \"%s\" -o \"%s\"", url, dl_path)
 	cmd_dl_cstr := strings.clone_to_cstring(cmd_dl, context.temp_allocator)
 	if libc.system(cmd_dl_cstr) != 0 {
 		fmt.println("Error: Download failed.")
@@ -696,7 +1130,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		ext = ".tar.zst"
 	}
 
-	dl_path := ext == "" ? fmt.tprintf("%s/%s-%s", cache_dir, flat, ver_flat) : fmt.tprintf("%s/%s-%s%s", cache_dir, flat, ver_flat, ext)
+	dl_path := cask_download_path(c)
 	fmt.printf("==> Downloading binary cask: %s\n", c.token)
 
 	if !download_or_cache(c.url, c.sha256, dl_path) {
@@ -714,7 +1148,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		// Probe the downloaded file to detect archive type via file magic
 		probe_args := []string{"file", "--brief", dl_path}
 		probe_buf: [512]u8
-		probe_out := platform.exec_cmd_capture("file", probe_args, probe_buf[:])
+		probe_out, _ := platform.exec_cmd_capture("file", probe_args, probe_buf[:])
 		probe_lower := strings.to_lower(probe_out, context.temp_allocator)
 
 		if strings.contains(probe_lower, "gzip") {
@@ -988,7 +1422,7 @@ install_font_cask :: proc(c: cask.Cask) -> bool {
         ext = ".ttc"
     }
 
-	dl_path := fmt.tprintf("%s/%s-%s%s", cache_dir, flat, ver_flat, ext)
+	dl_path := cask_download_path(c)
 	fmt.printf("==> Downloading cask: %s\n", c.token)
 
 	if !download_or_cache(c.url, c.sha256, dl_path) {
@@ -1169,7 +1603,7 @@ install_wallpaper_cask :: proc(c: cask.Cask) -> bool {
         ext = ".tar.zst"
     }
 
-	dl_path := fmt.tprintf("%s/%s-%s%s", cache_dir, flat, ver_flat, ext)
+	dl_path := cask_download_path(c)
 	fmt.printf("==> Downloading wallpaper cask: %s\n", c.token)
 
 	if !download_or_cache(c.url, c.sha256, dl_path) {
@@ -1346,7 +1780,7 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 	ver_flat, _ := strings.replace_all(ver, "/", "-", context.temp_allocator)
 
 	appimage_url := c.url
-	dl_path := fmt.tprintf("%s/%s-%s.AppImage", cache_dir, flat, ver_flat)
+	dl_path := cask_download_path(c)
 	fmt.printf("==> Downloading AppImage cask: %s\n", c.token)
 
 	if !download_or_cache(appimage_url, c.sha256, dl_path) {
@@ -1618,4 +2052,170 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 
 	fmt.printf("==> Uninstalled cask: %s\n", c.token)
 	return true
+}
+
+// Install_Receipt records the intent and the resolved runtime dependencies at
+// the moment a formula was installed. It is written to
+// `<keg>/INSTALL_RECEIPT.json` and consumed by `autoremove` to distinguish
+// user-requested installs from dep-only installs.
+Install_Receipt :: struct {
+	name:                string,
+	version:             string,
+	installed_on_request: bool,
+	poured_from_bottle:   bool,
+	tap:                 string,
+	runtime_dependencies: []string,
+}
+
+destroy_install_receipt :: proc(r: Install_Receipt) {
+	delete(r.name)
+	delete(r.version)
+	delete(r.tap)
+	for d in r.runtime_dependencies {
+		delete(d)
+	}
+	delete(r.runtime_dependencies)
+}
+
+write_install_receipt :: proc(keg_dir: string, r: Install_Receipt) -> bool {
+	// Use the Odin core json marshaller. Field names in the struct match
+	// the desired JSON keys; `json.marshal` produces RFC8259-compliant
+	// output with proper string escaping (unlike `fmt.tprintf("%q", ...)`
+	// which emits Odin string-literal syntax).
+	payload, merr := json.marshal(r)
+	if merr != nil {
+		fmt.printf("Warning: failed to marshal install receipt for %s: %v\n", r.name, merr)
+		return false
+	}
+	defer delete(payload)
+	receipt_path := fmt.tprintf("%s/INSTALL_RECEIPT.json", keg_dir)
+	werr := os.write_entire_file(receipt_path, payload)
+	if werr != nil {
+		fmt.printf("Warning: failed to write install receipt to %s: %v\n", receipt_path, werr)
+		return false
+	}
+	return true
+}
+
+// read_install_receipt returns the receipt for the given keg directory.
+// ok=false if no receipt is on disk (legacy install). When a receipt is
+// missing, the caller should treat the formula as `installed_on_request=true`
+// to be safe (autoremove will skip it).
+read_install_receipt :: proc(keg_dir: string, allocator := context.allocator) -> (r: Install_Receipt, ok: bool) {
+	path := fmt.tprintf("%s/INSTALL_RECEIPT.json", keg_dir)
+	data, rerr := os.read_entire_file(path, allocator)
+	if rerr != nil {
+		return r, false
+	}
+	defer delete(data)
+	val, perr := json.parse(data)
+	if perr != nil {
+		return r, false
+	}
+	defer json.destroy_value(val)
+	root, is_obj := val.(json.Object)
+	if !is_obj {
+		return r, false
+	}
+	if name_val, present := root["name"]; present {
+		if s, is_str := name_val.(json.String); is_str {
+			r.name = strings.clone(s, allocator)
+		}
+	}
+	if ver_val, present := root["version"]; present {
+		if s, is_str := ver_val.(json.String); is_str {
+			r.version = strings.clone(s, allocator)
+		}
+	}
+	if ior_val, present := root["installed_on_request"]; present {
+		if b, is_bool := ior_val.(json.Boolean); is_bool {
+			r.installed_on_request = bool(b)
+		}
+	}
+	if pfb_val, present := root["poured_from_bottle"]; present {
+		if b, is_bool := pfb_val.(json.Boolean); is_bool {
+			r.poured_from_bottle = bool(b)
+		}
+	}
+	if tap_val, present := root["tap"]; present {
+		if s, is_str := tap_val.(json.String); is_str {
+			r.tap = strings.clone(s, allocator)
+		}
+	}
+	if deps_val, present := root["runtime_dependencies"]; present {
+		if arr, is_arr := deps_val.(json.Array); is_arr {
+			deps := make([dynamic]string, allocator)
+			for d in arr {
+				if s, is_str := d.(json.String); is_str {
+					append(&deps, strings.clone(s, allocator))
+				}
+			}
+			r.runtime_dependencies = deps[:]
+		}
+	}
+	return r, true
+}
+
+download_bottles_parallel :: proc(urls, paths: []string) -> bool {
+	if len(urls) == 0 do return true
+
+	// Create cache directory if needed
+	_ = os.make_directory_all(CACHE_DIR, os.perm(0o755))
+
+	if len(urls) == 1 {
+		fmt.printf("==> Downloading: %s\n", urls[0])
+		args := []string{"curl", "-#", "-L", "--compressed", "-H", "Authorization: Bearer QQ==", "-o", paths[0], urls[0]}
+		return platform.exec_cmd("curl", args)
+	}
+
+	args := make([dynamic]string, context.temp_allocator)
+	defer delete(args)
+	append(&args, "curl")
+	append(&args, "-sL")
+	append(&args, "--compressed")
+	append(&args, "--no-progress-meter")
+	append(&args, "--http2")
+	append(&args, "--parallel")
+	append(&args, "-H")
+	append(&args, "Authorization: Bearer QQ==")
+
+	for i in 0..<len(urls) {
+		append(&args, "-o")
+		append(&args, paths[i])
+		append(&args, urls[i])
+	}
+
+	fmt.printf("==> Downloading %d bottle(s) in parallel...\n", len(urls))
+	return platform.exec_cmd("curl", args[:])
+}
+
+download_casks_parallel :: proc(urls, paths: []string) -> bool {
+	if len(urls) == 0 do return true
+
+	// Create cache directory if needed
+	_ = os.make_directory_all(CACHE_DIR, os.perm(0o755))
+
+	if len(urls) == 1 {
+		fmt.printf("==> Downloading: %s\n", urls[0])
+		args := []string{"curl", "-#", "-L", "--compressed", "-o", paths[0], urls[0]}
+		return platform.exec_cmd("curl", args)
+	}
+
+	args := make([dynamic]string, context.temp_allocator)
+	defer delete(args)
+	append(&args, "curl")
+	append(&args, "-sL")
+	append(&args, "--compressed")
+	append(&args, "--no-progress-meter")
+	append(&args, "--http2")
+	append(&args, "--parallel")
+
+	for i in 0..<len(urls) {
+		append(&args, "-o")
+		append(&args, paths[i])
+		append(&args, urls[i])
+	}
+
+	fmt.printf("==> Downloading %d cask/source archive(s) in parallel...\n", len(urls))
+	return platform.exec_cmd("curl", args[:])
 }

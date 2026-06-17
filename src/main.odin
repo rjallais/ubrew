@@ -263,9 +263,8 @@ run_list :: proc(args: []string) {
 	}
 
 	if opt_json {
-		has_jq := command_exists("jq")
-		if !opt_versions || len(targets) > 0 || !has_jq {
-			fmt.eprintln("Error: --json requires --versions, no named arguments, and jq installed.")
+		if !opt_versions || len(targets) > 0 {
+			fmt.eprintln("Error: --json requires --versions and no named arguments.")
 			os.exit(1)
 		}
 	}
@@ -1915,7 +1914,7 @@ remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
 }
 
 remove_formula :: proc(name: string, missing_ok: bool) -> bool {
-    if !package_name_safe(name) || strings.contains(name, "/") {
+    if !package_name_safe(name) {
         fmt.printf("ubrew: refusing to remove unsafe formula name: %s\n", name)
         return false
     }
@@ -2022,9 +2021,6 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
     binary_path := fmt.tprintf("%s/bin/%s", installer.PREFIX, f.name)
     if os.is_file(binary_path) {
         fmt.printf("==> Verification: Staged binary found at %s\n", binary_path)
-        cmd2 := fmt.tprintf("%s --version 2>&1", binary_path)
-        cmd2_cstr := strings.clone_to_cstring(cmd2, context.temp_allocator)
-        libc.system(cmd2_cstr)
     }
 
     return true
@@ -2553,6 +2549,9 @@ run_install :: proc(args: []string) {
 	}
 
 	for job in cask_jobs {
+		if job.force {
+			_ = installer.remove_cask(job.c)
+		}
 		if !installer.install_cask(job.c) {
 			failed = true
 		}
@@ -2927,6 +2926,7 @@ run_cleanup :: proc(args: []string) {
                     has_prune_opt = true
                     if val == "all" {
                         prune_all = true
+                        i += 1
                     } else {
                         days, ok := strconv.parse_int(val)
                         if ok {
@@ -4134,18 +4134,19 @@ run_update :: proc(args: []string) {
 	fmt.println("==> Updating ubrew...")
 
 	skip_git := auto_update && !force
-	if !skip_git && os.is_dir(".git") {
+	ubrew_git_dir := installer.UBREW_ROOT
+	if !skip_git && os.is_dir(fmt.tprintf("%s/.git", ubrew_git_dir)) {
 		if verbose {
 			fmt.println("Checking directory: .git")
 			fmt.println("Performing git operations...")
 		}
-		branch_bytes, berr := os.read_entire_file(".git/HEAD", context.temp_allocator)
+		branch_bytes, berr := os.read_entire_file(fmt.tprintf("%s/.git/HEAD", ubrew_git_dir), context.temp_allocator)
 		has_upstream := false
 		if berr == nil {
 			s := strings.trim_space(string(branch_bytes))
 			if strings.has_prefix(s, "ref: refs/heads/") {
 				name := s[len("ref: refs/heads/"):]
-				prefixes := []string{".git/refs/remotes/origin/", ".git/refs/remotes/upstream/"}
+				prefixes := []string{fmt.tprintf("%s/.git/refs/remotes/origin/", ubrew_git_dir), fmt.tprintf("%s/.git/refs/remotes/upstream/", ubrew_git_dir)}
 				for prefix in prefixes {
 					if os.is_file(fmt.tprintf("%s%s", prefix, name)) {
 						has_upstream = true
@@ -4156,7 +4157,7 @@ run_update :: proc(args: []string) {
 		}
 		if has_upstream {
 			fmt.println("==> Updating git repository...")
-			cmd := []string{"git", "pull"}
+			cmd := []string{"git", "-C", ubrew_git_dir, "pull"}
 			_ = platform.exec_cmd("git", cmd)
 		}
 	}
@@ -4380,17 +4381,10 @@ run_update :: proc(args: []string) {
 				}
 			}
 			if !promoted && os.is_file(cache_path) && curl_ok {
-				for c_idx in 0..<len(candidates) {
-					for s_idx in 0..<2 {
-						tmp_path := fmt.tprintf("%s.tmp.%d.%d", cache_path, c_idx, s_idx)
-						fi, fi_err := os.stat(tmp_path, context.temp_allocator)
-						if fi_err != nil || fi.size == 0 {
-							promoted = true
-							break
-						}
-					}
-					if promoted do break
-				}
+				// The tap listing is already valid from a previous run and
+				// no better candidate was found this round. Keep the old
+				// cache and treat it as a success.
+				promoted = true
 			}
 			for c_idx in 0..<len(candidates) {
 				for s_idx in 0..<2 {
@@ -5175,8 +5169,8 @@ run_link :: proc(args: []string) {
             failed = true
             continue
         }
-        if !package_name_safe(name) || strings.contains(name, "/") {
-            fmt.printf("ubrew: refusing to link unsafe name: %s\n", name)
+		if !package_name_safe(name) {
+			fmt.printf("ubrew: refusing to link unsafe name: %s\n", name)
             failed = true
             continue
         }
@@ -5232,7 +5226,15 @@ run_link :: proc(args: []string) {
             }
             linked += 1
         }
-        fmt.printf("==> Linked %s %s (%d bin link(s))\n", name, latest, linked)
+		fmt.printf("==> Linked %s %s (%d bin link(s))\n", name, latest, linked)
+		// Recreate the opt/<name> symlink to point at the latest keg
+		opt_dst := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
+		opt_src := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, latest)
+		_ = os.remove(opt_dst)
+		if serr := os.symlink(opt_src, opt_dst); serr != nil {
+			fmt.printf("ubrew: failed linking %s -> %s: %v\n", opt_dst, opt_src, serr)
+			failed = true
+		}
     }
     if failed {
         os.exit(1)
@@ -5260,7 +5262,7 @@ run_unlink :: proc(args: []string) {
     }
     failed := false
     for name in names {
-        if !package_name_safe(name) || strings.contains(name, "/") {
+        if !package_name_safe(name) {
             fmt.printf("ubrew: refusing to unlink unsafe name: %s\n", name)
             failed = true
             continue

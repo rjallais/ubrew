@@ -27,11 +27,11 @@ get_registry_path :: proc(allocator := context.temp_allocator) -> string {
 			dir := exe_path[:idx]
 			rel_path := fmt.tprintf("%s/registry/upstream.json", dir)
 			if os.is_file(rel_path) {
-				return rel_path
+				return strings.clone(rel_path, allocator)
 			}
 			rel_path2 := fmt.tprintf("%s/../registry/upstream.json", dir)
 			if os.is_file(rel_path2) {
-				return rel_path2
+				return strings.clone(rel_path2, allocator)
 			}
 		}
 	}
@@ -711,7 +711,10 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     }
     defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return c, .EOF
+    }
 
     c.token = strings.clone(root_obj["token"].(json.String))
 
@@ -794,14 +797,20 @@ fetch_cask_registry :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
 	}
 	defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return c, .EOF
+    }
     records_arr, ok := json_array_or_nil(root_obj, "records")
     if !ok {
         return c, .EOF
     }
 
     for rec_item in records_arr {
-        rec_obj := rec_item.(json.Object)
+        rec_obj, rec_ok := rec_item.(json.Object)
+        if !rec_ok {
+            continue
+        }
         if json_string_or_empty(rec_obj, "kind") != "cask" {
             continue
         }
@@ -1304,7 +1313,10 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
     }
     defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return f, .EOF
+    }
 
     f.name = strings.clone(root_obj["name"].(json.String))
     f.desc = strings.clone(root_obj["desc"].(json.String))
@@ -1374,14 +1386,20 @@ fetch_formula_registry :: proc(name: string) -> (f: formula.Formula, err: json.E
 	}
 	defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return f, .EOF
+    }
     records_arr, ok := json_array_or_nil(root_obj, "records")
     if !ok {
         return f, .EOF
     }
 
     for rec_item in records_arr {
-        rec_obj := rec_item.(json.Object)
+        rec_obj, rec_ok := rec_item.(json.Object)
+        if !rec_ok {
+            continue
+        }
         if json_string_or_empty(rec_obj, "kind") != "formula" {
             continue
         }
@@ -1503,7 +1521,10 @@ append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, q
 	}
 	defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return
+    }
     records_arr, ok := json_array_or_nil(root_obj, "records")
     if !ok {
         return
@@ -1513,7 +1534,10 @@ append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, q
         if len(out^) >= limit {
             return
         }
-        rec_obj := rec_item.(json.Object)
+        rec_obj, rec_ok := rec_item.(json.Object)
+        if !rec_ok {
+            continue
+        }
         if json_string_or_empty(rec_obj, "kind") != "formula" {
             continue
         }
@@ -1548,7 +1572,10 @@ append_registry_cask_matches :: proc(out: ^[dynamic]Cask_Search_Result, query_lo
 	}
 	defer json.destroy_value(json_val)
 
-    root_obj := json_val.(json.Object)
+    root_obj, root_ok := json_val.(json.Object)
+    if !root_ok {
+        return
+    }
     records_arr, ok := json_array_or_nil(root_obj, "records")
     if !ok {
         return
@@ -1558,7 +1585,10 @@ append_registry_cask_matches :: proc(out: ^[dynamic]Cask_Search_Result, query_lo
         if len(out^) >= limit {
             return
         }
-        rec_obj := rec_item.(json.Object)
+        rec_obj, rec_ok := rec_item.(json.Object)
+        if !rec_ok {
+            continue
+        }
         if json_string_or_empty(rec_obj, "kind") != "cask" {
             continue
         }
@@ -1615,6 +1645,10 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 				if len(results) >= limit {
 					break
 				}
+			} else {
+				delete(r.name)
+				delete(r.desc)
+				delete(r.version)
 			}
 		}
 	} else {
@@ -1637,6 +1671,10 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 					if len(results) >= limit {
 						break
 					}
+				} else {
+					delete(r.name)
+					delete(r.desc)
+					delete(r.version)
 				}
 			}
 		} else {
@@ -1891,7 +1929,7 @@ fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
             api_url := fmt.tprintf("https://api.github.com/repos/%s%s?ref=%s", owner_repo, suffix, t.branch)
             curl_args := make([dynamic]string, context.temp_allocator)
             append(&curl_args, "curl")
-            append(&curl_args, "-sfSL")
+            append(&curl_args, "-sfL")
             append(&curl_args, "--no-progress-meter")
             append(&curl_args, "-H")
             append(&curl_args, "Accept: application/vnd.github+json")
@@ -1961,6 +1999,11 @@ search_casks :: proc(query: string, limit: int = 25) -> (out: []Cask_Search_Resu
                 if len(results) >= limit {
                     break
                 }
+            } else {
+                delete(r.token)
+                delete(r.name)
+                delete(r.desc)
+                delete(r.version)
             }
         }
     } else {
