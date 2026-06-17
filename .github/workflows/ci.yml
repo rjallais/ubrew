@@ -21,7 +21,7 @@ jobs:
         uses: jdx/mise-action@v2
 
       - name: Build ubrew
-        run: mise run build
+        run: odin build src -out:ubrew -o:speed
 
       - name: Verify binary
         run: |
