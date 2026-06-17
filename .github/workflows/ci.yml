@@ -29,5 +29,14 @@ jobs:
           file ubrew
           ls -lh ubrew
 
+      - name: Pre-test Setup
+        run: |
+          sudo ./ubrew tap trust ublue-os/tap
+          sudo ./ubrew tap trust justrach/nanobrew
+          sudo mkdir -p /opt
+          sudo ln -sfn /opt/ubrew /opt/nanobrew
+          echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
+          echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
+
       - name: Run smoke tests
         run: bash tests/smoke-test.sh ./ubrew
