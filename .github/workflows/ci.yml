@@ -34,8 +34,12 @@ jobs:
           sudo mkdir -p /opt/ubrew
           sudo chown -R $USER /opt/ubrew
           sudo mkdir -p /opt
-          sudo ln -sfn /opt/ubrew /opt/nanobrew
-          gdb -batch -ex "run" -ex "bt" --args ./ubrew tap trust ublue-os/tap
+          sudo ln (if [ "$RUNNER_OS" = "macOS" ]; then echo "-sfn"; else echo "-sfn"; fi) /opt/ubrew /opt/nanobrew
+          if command -v lldb >/dev/null 2>&1; then
+            lldb --batch -o "run" -o "bt" -- ./ubrew tap trust ublue-os/tap
+          else
+            ./ubrew tap trust ublue-os/tap
+          fi
           ./ubrew tap trust justrach/nanobrew
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
           echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
