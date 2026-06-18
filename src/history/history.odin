@@ -251,6 +251,9 @@ record_uninstall :: proc(names: ^[dynamic]string, entries_map: ^map[string][dyna
 destroy :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry) {
 	for _, entries in entries_map {
 		for e in entries {
+			delete(e.version)
+			delete(e.action)
+			delete(e.from_version)
 			delete(e.timestamp)
 		}
 		delete(entries)
