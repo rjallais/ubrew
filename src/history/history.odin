@@ -190,10 +190,10 @@ save :: proc(names: [dynamic]string, entries_map: map[string][dynamic]Entry) -> 
 			write_entry_json(&b, e)
 		}
 
-		strings.write_string(&b, "]}")
+		strings.write_rune(&b, ']')
 	}
 
-	strings.write_string(&b, "}\n")
+	strings.write_string(&b, "}}\n")
 
 	dir := "/opt/ubrew/db"
 	os.make_directory_all(dir, os.perm(0o755))
@@ -211,11 +211,12 @@ record :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
                name: string, version: string, action: Action,
                from_version: string = NO_FROM_VERSION, from_revision: int = NO_FROM_REVISION,
                allocator := context.allocator) {
+	ts := strings.clone(iso8601_now(), allocator)
 	entry := Entry{
 		version =       version,
 		revision =      0,
 		action =        action_string(action),
-		timestamp =     iso8601_now(),
+		timestamp =     ts,
 		from_version =  from_version,
 		from_revision = from_revision,
 	}
@@ -248,9 +249,12 @@ record_uninstall :: proc(names: ^[dynamic]string, entries_map: ^map[string][dyna
 }
 
 destroy :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry) {
-	for name, entries in entries_map {
+	for _, entries in entries_map {
+		for e in entries {
+			delete(e.timestamp)
+		}
 		delete(entries)
-		delete_key(entries_map, name)
 	}
-	delete(names[:])
+	delete(entries_map^)
+	delete(names^)
 }

@@ -34,6 +34,10 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 		return false
 	}
 
+	if len(name) == 0 || len(version) == 0 {
+		return false
+	}
+
 	if strings.contains(name, "/") || strings.contains(name, "\\") || name == "." || name == ".." || strings.has_prefix(name, "/") {
 		return false
 	}
@@ -58,6 +62,10 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 
 store_materialize_from_relocated :: proc(sha256: string, name: string, version: string) -> bool {
 	if !is_valid_sha256(sha256) {
+		return false
+	}
+
+	if len(name) == 0 || len(version) == 0 {
 		return false
 	}
 
