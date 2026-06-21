@@ -47,7 +47,7 @@ else
 fi
 
 echo ""
---- Test: install lua ---
+# --- Test: install lua ---
 "$NB" install readline >/dev/null 2>&1 || true
 "$NB" install lua >/dev/null 2>&1 || true
 if lua -v 2>&1 | grep -qi "lua"; then
@@ -319,7 +319,9 @@ fi
 
 echo ""
 echo "--- Test: install perl (exercises tar subprocess fallback #221) ---"
-"$NB" install gdbm >/dev/null 2>&1 || true
+if ! "$NB" install gdbm >/dev/null 2>&1; then
+  echo "    WARN: gdbm install failed (may already be installed or optional)"
+fi
 "$NB" install perl >/dev/null 2>&1 || true
 if perl -e 'print "ok"' 2>&1 | grep -q "^ok$"; then
   pass "perl installed and runs (#221 tar fallback works)"

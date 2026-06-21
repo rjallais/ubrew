@@ -213,11 +213,11 @@ record :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
                allocator := context.allocator) {
 	ts := strings.clone(iso8601_now(), allocator)
 	entry := Entry{
-		version =       version,
+		version =       strings.clone(version, allocator),
 		revision =      0,
-		action =        action_string(action),
+		action =        strings.clone(action_string(action), allocator),
 		timestamp =     ts,
-		from_version =  from_version,
+		from_version =  strings.clone(from_version, allocator),
 		from_revision = from_revision,
 	}
 
@@ -227,8 +227,9 @@ record :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
 	} else {
 		entries := make([dynamic]Entry, allocator)
 		append(&entries, entry)
-		entries_map^[name] = entries
-		append(names, strings.clone(name, allocator))
+		cloned_name := strings.clone(name, allocator)
+		entries_map[cloned_name] = entries
+		append(names, cloned_name)
 	}
 }
 
@@ -249,7 +250,8 @@ record_uninstall :: proc(names: ^[dynamic]string, entries_map: ^map[string][dyna
 }
 
 destroy :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry) {
-	for _, entries in entries_map {
+	for name, entries in entries_map {
+		delete(name)
 		for e in entries {
 			delete(e.version)
 			delete(e.action)
