@@ -18445,47 +18445,47 @@
       "artifacts": [
         {
           "type": "binary",
-          "path": "1password-8.12.21.x64/1password",
+          "path": "1password-8.12.21.{arch}/1password",
           "target": "1password"
         },
         {
           "type": "binary",
-          "path": "1password-8.12.21.x64/op-ssh-sign",
+          "path": "1password-8.12.21.{arch}/op-ssh-sign",
           "target": "op-ssh-sign"
         },
         {
           "type": "binary",
-          "path": "1password-8.12.21.x64/1Password-BrowserSupport",
+          "path": "1password-8.12.21.{arch}/1Password-BrowserSupport",
           "target": "1Password-BrowserSupport"
         },
         {
           "type": "binary",
-          "path": "1password-8.12.21.x64/1Password-Crash-Handler",
+          "path": "1password-8.12.21.{arch}/1Password-Crash-Handler",
           "target": "1Password-Crash-Handler"
         },
         {
           "type": "binary",
-          "path": "1password-8.12.21.x64/1Password-LastPass-Exporter",
+          "path": "1password-8.12.21.{arch}/1Password-LastPass-Exporter",
           "target": "1Password-LastPass-Exporter"
         },
         {
           "type": "artifact",
-          "source": "1password-8.12.21.x64/resources/1password.desktop",
+          "source": "1password-8.12.21.{arch}/resources/1password.desktop",
           "target": "~/.local/share/applications/1password.desktop"
         },
         {
           "type": "artifact",
-          "source": "1password-8.12.21.x64/resources/icons/hicolor/256x256/apps/1password.png",
+          "source": "1password-8.12.21.{arch}/resources/icons/hicolor/256x256/apps/1password.png",
           "target": "~/.local/share/icons/1password.png"
         },
         {
           "type": "artifact",
-          "source": "1password-8.12.21.x64/com.1password.1Password.policy.tpl",
+          "source": "1password-8.12.21.{arch}/com.1password.1Password.policy.tpl",
           "target": "/opt/ubrew/prefix/etc/polkit-1/actions/com.1password.1Password.policy"
         },
         {
           "type": "artifact",
-          "source": "1password-8.12.21.x64/resources/custom_allowed_browsers",
+          "source": "1password-8.12.21.{arch}/resources/custom_allowed_browsers",
           "target": "/opt/ubrew/prefix/etc/1password/custom_allowed_browsers"
         }
       ]
@@ -18523,7 +18523,7 @@
       "token": "ublue-os/tap/aurora-wallpapers",
       "name": "aurora-wallpapers",
       "desc": "Wallpapers for Aurora",
-      "homepage": "https://github.com/projectbluefin/artwork",
+      "homepage": "https://github.com/ublue-os/artwork",
       "resolved": {
         "version": "2026-04-23",
         "url": "https://github.com/ublue-os/artwork/releases/download/aurora-v2026-04-23/aurora-wallpapers.tar.zstd",
@@ -18589,7 +18589,7 @@
       "token": "ublue-os/tap/bluefin-wallpapers",
       "name": "bluefin-wallpapers",
       "desc": "Wallpapers for Bluefin",
-      "homepage": "https://github.com/projectbluefin/artwork",
+      "homepage": "https://github.com/ublue-os/artwork",
       "resolved": {
         "version": "2026-04-13",
         "assets": {
@@ -18755,22 +18755,22 @@
       "artifacts": [
         {
           "type": "binary",
-          "path": "VSCode-linux-x64/bin/code",
+          "path": "VSCode-linux-{arch}/bin/code",
           "target": "code"
         },
         {
           "type": "binary",
-          "path": "VSCode-linux-x64/bin/code-tunnel",
+          "path": "VSCode-linux-{arch}/bin/code-tunnel",
           "target": "code-tunnel"
         },
         {
           "type": "artifact",
-          "source": "VSCode-linux-x64/resources/completions/bash/code",
+          "source": "VSCode-linux-{arch}/resources/completions/bash/code",
           "target": "~/.local/share/bash-completion/completions/code"
         },
         {
           "type": "artifact",
-          "source": "VSCode-linux-x64/resources/completions/zsh/_code",
+          "source": "VSCode-linux-{arch}/resources/completions/zsh/_code",
           "target": "~/.local/share/zsh/site-functions/_code"
         }
       ]

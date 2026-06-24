@@ -107,7 +107,7 @@ exec_cmd :: proc(bin: string, args: []string) -> bool {
 	return false
 }
 
-exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> (output: string, truncated: bool) {
+exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8, suppress_stderr := true) -> (output: string, truncated: bool) {
 	argv := make([]cstring, len(args) + 1, context.temp_allocator)
 	for i in 0..<len(args) {
 		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
@@ -129,11 +129,13 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8) -> (output: str
 		posix.close(pipe_fds[1])
 
 		// Redirect stderr to /dev/null to suppress noisy warnings/errors from captured commands
-		null_handle, open_err := os.open("/dev/null", os.O_WRONLY)
-		if open_err == nil {
-			null_fd := posix.FD(os.fd(null_handle))
-			posix.dup2(null_fd, posix.FD(2))
-			posix.close(null_fd)
+		if suppress_stderr {
+			null_handle, open_err := os.open("/dev/null", os.O_WRONLY)
+			if open_err == nil {
+				null_fd := posix.FD(os.fd(null_handle))
+				posix.dup2(null_fd, posix.FD(2))
+				posix.close(null_fd)
+			}
 		}
 
 		posix.execvp(bin_cstr, &argv[0])

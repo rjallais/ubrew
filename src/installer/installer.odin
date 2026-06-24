@@ -306,7 +306,7 @@ relocate_single_file :: proc(path: string) {
 	if is_elf_file(path) {
 		rpath_buf: [2048]u8
 		rpath_args := []string{"patchelf", "--print-rpath", path}
-		rpath, rpath_truncated := platform.exec_cmd_capture("patchelf", rpath_args, rpath_buf[:])
+		rpath, rpath_truncated := platform.exec_cmd_capture("patchelf", rpath_args, rpath_buf[:], true)
 		rpath = strings.trim_space(rpath)
 		// Skip the rpath rewrite if the captured output was truncated —
 		// writing back a clipped rpath would corrupt the binary's RUNPATH.
@@ -871,6 +871,15 @@ flatten_token :: proc(token: string) -> string {
     return out
 }
 
+resolve_arch_placeholders :: proc(s: string, allocator := context.temp_allocator) -> string {
+	arch_str := "x64"
+	when ODIN_ARCH == .arm64 {
+		arch_str = "arm64"
+	}
+	out, _ := strings.replace_all(s, "{arch}", arch_str, allocator)
+	return out
+}
+
 cask_download_path :: proc(c: cask.Cask) -> string {
 	flat := flatten_token(c.token)
 	ver := c.version
@@ -1221,14 +1230,14 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	installed := 0
 	for art in c.artifacts {
 		if ba, ok := art.(cask.Binary_Artifact); ok {
-			src_rel := ba.source
+			src_rel := resolve_arch_placeholders(ba.source)
 			if src_rel == "" {
-				src_rel = ba.target
+				src_rel = resolve_arch_placeholders(ba.target)
 			}
 			if src_rel == "" {
 				src_rel = os.base(url)
 			}
-			target_name := ba.target
+			target_name := resolve_arch_placeholders(ba.target)
 			if target_name == "" {
 				target_name = os.base(src_rel)
 			}
@@ -1263,8 +1272,8 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	// Copy generic artifacts to target
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
-			src_rel := ga.source
-			target_path := ga.target
+			src_rel := resolve_arch_placeholders(ga.source)
+			target_path := resolve_arch_placeholders(ga.target)
 
 			resolved_target := expand_home(target_path, context.temp_allocator)
 
@@ -1833,10 +1842,10 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 	for art in c.artifacts {
 		#partial switch a in art {
 		case cask.AppImage_Artifact:
-			src_rel := a.source
-			target_name := a.target
+			src_rel := resolve_arch_placeholders(a.source)
+			target_name := resolve_arch_placeholders(a.target)
 			if target_name == "" {
-				target_name = os.base(a.source)
+				target_name = os.base(src_rel)
 			}
 
 			src := fmt.tprintf("%s/%s", squashfs_dir, src_rel)
@@ -1863,29 +1872,31 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 			}
 			installed += 1
 		case cask.App_Artifact:
-			if a.name == "" {
+			name_resolved := resolve_arch_placeholders(a.name)
+			if name_resolved == "" {
 				continue
 			}
-			src := fmt.tprintf("%s/%s", squashfs_dir, a.name)
+			src := fmt.tprintf("%s/%s", squashfs_dir, name_resolved)
 			if !os.is_file(src) {
 				continue
 			}
-			dst := fmt.tprintf("%s/.local/share/applications/%s", home_dir, os.base(a.name))
+			dst := fmt.tprintf("%s/.local/share/applications/%s", home_dir, os.base(name_resolved))
 			_ = os.make_directory_all(fmt.tprintf("%s/.local/share/applications", home_dir), os.perm(0o755))
 			if err := os.copy_file(dst, src); err != nil {
-				fmt.printf("==> Warning: failed copying desktop file %s\n", a.name)
+				fmt.printf("==> Warning: failed copying desktop file %s\n", name_resolved)
 			}
 		case cask.Binary_Artifact:
 			if a.source == "" {
 				continue
 			}
-			src := fmt.tprintf("%s/%s", squashfs_dir, a.source)
+			src_rel := resolve_arch_placeholders(a.source)
+			src := fmt.tprintf("%s/%s", squashfs_dir, src_rel)
 			if !os.is_file(src) {
 				continue
 			}
-			target_name := a.target
+			target_name := resolve_arch_placeholders(a.target)
 			if target_name == "" {
-				target_name = os.base(a.source)
+				target_name = os.base(src_rel)
 			}
 			dst := fmt.tprintf("%s/%s", appimage_dir, target_name)
 			_ = os.remove(dst)
@@ -1985,22 +1996,25 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		for art in c.artifacts {
 			#partial switch a in art {
 			case cask.AppImage_Artifact:
-				target_name := a.target
+				target_name := resolve_arch_placeholders(a.target)
+				src_rel := resolve_arch_placeholders(a.source)
 				if target_name == "" {
-					target_name = os.base(a.source)
+					target_name = os.base(src_rel)
 				}
 				dst := fmt.tprintf("%s/%s", appimage_dir, target_name)
 				_ = os.remove(dst)
 			case cask.Binary_Artifact:
-				target_name := a.target
+				target_name := resolve_arch_placeholders(a.target)
+				src_rel := resolve_arch_placeholders(a.source)
 				if target_name == "" {
-					target_name = os.base(a.source)
+					target_name = os.base(src_rel)
 				}
 				dst := fmt.tprintf("%s/%s", appimage_dir, target_name)
 				_ = os.remove(dst)
 			case cask.App_Artifact:
-				if a.name != "" {
-					dst := fmt.tprintf("%s/.local/share/applications/%s", home_dir, os.base(a.name))
+				name_resolved := resolve_arch_placeholders(a.name)
+				if name_resolved != "" {
+					dst := fmt.tprintf("%s/.local/share/applications/%s", home_dir, os.base(name_resolved))
 					_ = os.remove(dst)
 				}
 			}
@@ -2011,9 +2025,9 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		bin_dir := fmt.tprintf("%s/.local/bin", home_dir)
 		for art in c.artifacts {
 			if ba, ok := art.(cask.Binary_Artifact); ok {
-				target_name := ba.target
+				target_name := resolve_arch_placeholders(ba.target)
 				if target_name == "" {
-					src_rel := ba.source
+					src_rel := resolve_arch_placeholders(ba.source)
 					if src_rel == "" {
 						src_rel = os.base(c.url)
 					}
@@ -2028,7 +2042,8 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	// Clean up generic artifacts target paths
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
-			resolved_target := expand_home(ga.target, context.temp_allocator)
+			target_resolved := resolve_arch_placeholders(ga.target)
+			resolved_target := expand_home(target_resolved, context.temp_allocator)
 			if os.is_dir(resolved_target) {
 				_ = os.remove_all(resolved_target)
 			} else {

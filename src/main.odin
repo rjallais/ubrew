@@ -8,6 +8,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import "core:encoding/json"
+import "core:text/regex"
 import "core:c/libc"
 import "core:sys/posix"
 import "api"
@@ -1673,58 +1674,671 @@ run_migrate :: proc() {
 }
 
 run_deps :: proc(args: []string) {
-    // Parse args. Supported form: `ubrew deps --tree <formula>`.
-    tree := false
-    name := ""
+    flags := Deps_Flags{
+        skip_recommended = false,
+    }
+    pkg_names := make([dynamic]string, context.temp_allocator)
+
     i := 0
     for i < len(args) {
-        a := args[i]
-        if a == "--tree" || a == "--tree --installed" {
-            tree = true
-        } else if strings.has_prefix(a, "-") {
-            fmt.printf("ubrew: unknown deps flag '%s'\n", a)
+        arg := args[i]
+        if arg == "-h" || arg == "--help" {
+            fmt.println("Usage: ubrew deps [options] <formula|cask ...>")
+            fmt.println("")
+            fmt.println("Show dependencies for formula. When given multiple formula arguments,")
+            fmt.println("show the intersection of dependencies for each formula.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  -n, --topological      Sort dependencies in topological order.")
+            fmt.println("  -1, --direct           Show only the direct dependencies declared in the formula.")
+            fmt.println("  --union                Show the union of dependencies for multiple formula.")
+            fmt.println("  --full-name            List dependencies by their full name.")
+            fmt.println("  --include-implicit     Include implicit dependencies.")
+            fmt.println("  --include-build        Include :build dependencies.")
+            fmt.println("  --include-optional     Include :optional dependencies.")
+            fmt.println("  --include-test         Include :test dependencies.")
+            fmt.println("  --skip-recommended     Skip :recommended dependencies.")
+            fmt.println("  --include-requirements Include requirements in addition to dependencies.")
+            fmt.println("  --tree                 Show dependencies as a tree.")
+            fmt.println("  --prune                Prune parts of tree already seen.")
+            fmt.println("  --graph                Show dependencies as a directed graph.")
+            fmt.println("  --dot                  Show text-based graph description in DOT format.")
+            fmt.println("  --annotate             Mark dependency types in the output.")
+            fmt.println("  --installed            List dependencies for formulae that are currently installed.")
+            fmt.println("  --missing              Show only missing dependencies.")
+            fmt.println("  --for-each             List dependencies for each provided formula, one per line.")
+            fmt.println("  --HEAD                 Show dependencies for HEAD version.")
+            fmt.println("  --formula              Treat all named arguments as formulae.")
+            fmt.println("  --cask                 Treat all named arguments as casks.")
+            os.exit(0)
+        } else if arg == "-n" || arg == "--topological" {
+            flags.topological = true
+        } else if arg == "-1" || arg == "--direct" {
+            flags.direct = true
+        } else if arg == "--union" {
+            flags.union_mode = true
+        } else if arg == "--full-name" {
+            flags.full_name = true
+        } else if arg == "--include-implicit" {
+            flags.include_implicit = true
+        } else if arg == "--include-build" {
+            flags.include_build = true
+        } else if arg == "--include-optional" {
+            flags.include_optional = true
+        } else if arg == "--include-test" {
+            flags.include_test = true
+        } else if arg == "--skip-recommended" {
+            flags.skip_recommended = true
+        } else if arg == "--include-requirements" {
+            flags.include_requirements = true
+        } else if arg == "--tree" {
+            flags.tree_mode = true
+        } else if arg == "--prune" {
+            flags.prune_mode = true
+        } else if arg == "--graph" {
+            flags.graph_mode = true
+        } else if arg == "--dot" {
+            flags.dot_mode = true
+        } else if arg == "--annotate" {
+            flags.annotate = true
+        } else if arg == "--installed" {
+            flags.installed = true
+        } else if arg == "--missing" {
+            flags.missing = true
+        } else if arg == "--for-each" {
+            flags.for_each = true
+        } else if arg == "--HEAD" {
+            flags.head = true
+        } else if arg == "--os" {
+            if i + 1 < len(args) {
+                flags.os_str = args[i+1]
+                i += 1
+            }
+        } else if arg == "--arch" {
+            if i + 1 < len(args) {
+                flags.arch_str = args[i+1]
+                i += 1
+            }
+        } else if arg == "--formula" {
+            flags.formula_only = true
+        } else if arg == "--cask" {
+            flags.cask_only = true
+        } else if strings.has_prefix(arg, "-") {
+            fmt.printf("ubrew: unknown deps flag '%s'\n", arg)
             os.exit(1)
         } else {
-            name = a
-            break
+            append(&pkg_names, arg)
         }
         i += 1
     }
-    if name == "" {
-        fmt.println("Usage: ubrew deps [--tree] <formula>")
+
+    if flags.cask_only {
+        fmt.println("ubrew deps: cask dependency collection is not supported")
         os.exit(1)
     }
 
-    // Walk the dep graph. Visit each formula once. We always include the
-    // top-level formula in the output. Pass the visited-set by pointer
-    // so the recursive callee can mutate the same backing storage.
-    walk_deps :: proc(n: string, depth: int, tree: bool, visited: ^map[string]bool) {
-        if n in visited {
-            if tree {
-                indent := strings.repeat("  ", depth, context.temp_allocator)
-                fmt.printf("%s%s (already shown)\n", indent, n)
+    if len(pkg_names) == 0 && flags.installed {
+        installed_formulae := list_installed_formulae()
+        defer {
+            for f in installed_formulae {
+                delete(f.name)
+                delete(f.version)
             }
-            return
+            delete(installed_formulae)
         }
-        visited[n] = true
-        if tree {
-            indent := strings.repeat("  ", depth, context.temp_allocator)
-            fmt.printf("%s%s\n", indent, n)
-        } else {
-            fmt.println(n)
+        for f in installed_formulae {
+            append(&pkg_names, strings.clone(f.name, context.temp_allocator))
         }
-        f, err := api.fetch_formula(n)
-        if err != nil {
-            return
-        }
-        defer api.destroy_formula(f)
-        for d in f.dependencies {
-            walk_deps(d, depth + 1, tree, visited)
+
+        if len(pkg_names) == 0 {
+            // No packages are currently installed. Exit gracefully with 0.
+            os.exit(0)
         }
     }
-    visited := make(map[string]bool, context.allocator)
-    defer delete(visited)
-    walk_deps(name, 0, tree, &visited)
+
+    if len(pkg_names) == 0 {
+        fmt.println("Usage: ubrew deps [options] <formula|cask ...>")
+        os.exit(1)
+    }
+
+    // Define all nested helper types and procs inside run_deps
+    Dep_Type :: enum {
+        Required,
+        Recommended,
+        Build,
+        Optional,
+        Test,
+        Requirement,
+        Implicit,
+    }
+
+    Dep_Item :: struct {
+        name: string,
+        type: Dep_Type,
+    }
+
+    Deps_Flags :: struct {
+        topological:          bool,
+        direct:               bool,
+        union_mode:           bool,
+        full_name:            bool,
+        include_implicit:     bool,
+        include_build:        bool,
+        include_optional:     bool,
+        include_test:         bool,
+        skip_recommended:     bool,
+        include_requirements: bool,
+        tree_mode:            bool,
+        prune_mode:           bool,
+        graph_mode:           bool,
+        dot_mode:             bool,
+        annotate:             bool,
+        installed:            bool,
+        missing:              bool,
+        for_each:             bool,
+        head:                 bool,
+        os_str:               string,
+        arch_str:             string,
+        formula_only:         bool,
+        cask_only:            bool,
+    }
+
+    is_installed_pkg :: proc(name: string) -> bool {
+        cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        if os.is_dir(cellar_dir) {
+            return true
+        }
+        flat := installer.flatten_token(name)
+        caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat)
+        if os.is_dir(caskroom_dir) {
+            return true
+        }
+        return false
+    }
+
+    get_runtime_deps :: proc(name: string) -> ([]string, bool) {
+        cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        if !os.is_dir(cellar_dir) {
+            return nil, false
+        }
+        if v_infos, v_err := os.read_directory_by_path(cellar_dir, -1, context.temp_allocator); v_err == nil {
+            latest_keg := ""
+            for v_info in v_infos {
+                if v_info.type == .Directory {
+                    if latest_keg == "" || is_newer(v_info.name, latest_keg) {
+                        latest_keg = v_info.name
+                    }
+                }
+            }
+            if latest_keg != "" {
+                keg_dir := fmt.tprintf("%s/%s", cellar_dir, latest_keg)
+                if receipt, ok := installer.read_install_receipt(keg_dir, context.temp_allocator); ok {
+                    res := make([]string, len(receipt.runtime_dependencies), context.temp_allocator)
+                    for d, idx in receipt.runtime_dependencies {
+                        res[idx] = strings.clone(d, context.temp_allocator)
+                    }
+                    return res, true
+                }
+            }
+        }
+        return nil, false
+    }
+
+    get_direct_deps :: proc(f: formula.Formula, flags: Deps_Flags) -> []Dep_Item {
+        deps := make([dynamic]Dep_Item, context.temp_allocator)
+
+        for d in f.dependencies {
+            append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Required})
+        }
+
+        if !flags.skip_recommended {
+            for d in f.recommended_dependencies {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Recommended})
+            }
+        }
+
+        if flags.include_build {
+            for d in f.build_dependencies {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Build})
+            }
+        }
+
+        if flags.include_optional {
+            for d in f.optional_dependencies {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Optional})
+            }
+        }
+
+        if flags.include_test {
+            for d in f.test_dependencies {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Test})
+            }
+        }
+
+        if flags.include_requirements {
+            for d in f.requirements {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Requirement})
+            }
+        }
+
+        if flags.include_implicit {
+            for d in f.uses_from_macos {
+                append(&deps, Dep_Item{name = strings.clone(d, context.temp_allocator), type = .Implicit})
+            }
+        }
+
+        return deps[:]
+    }
+
+    append_unique_dep :: proc(arr: ^[dynamic]Dep_Item, item: Dep_Item) {
+        for existing in arr^ {
+            if existing.name == item.name {
+                return
+            }
+        }
+        append(arr, item)
+    }
+
+    collect_recursive_deps :: proc(name: string, flags: Deps_Flags, visited: ^map[string]bool, result: ^[dynamic]Dep_Item) {
+        if name in visited^ {
+            return
+        }
+        visited[name] = true
+
+        used_runtime := false
+        if !flags.topological && !flags.direct && !flags.tree_mode && !flags.graph_mode && !flags.dot_mode {
+            if rdeps, ok := get_runtime_deps(name); ok {
+                used_runtime = true
+                for d in rdeps {
+                    append_unique_dep(result, Dep_Item{name = d, type = .Required})
+                    collect_recursive_deps(d, flags, visited, result)
+                }
+            }
+        }
+
+        if !used_runtime {
+            if f, err := api.fetch_formula(name); err == nil {
+                defer api.destroy_formula(f)
+                direct := get_direct_deps(f, flags)
+                for d in direct {
+                    append_unique_dep(result, d)
+                    if d.type == .Test && !flags.tree_mode && !flags.graph_mode && !flags.dot_mode {
+                        continue
+                    }
+                    collect_recursive_deps(d.name, flags, visited, result)
+                }
+            }
+        }
+    }
+
+    topological_sort :: proc(start_nodes: []string, flags: Deps_Flags, sorted: ^[dynamic]string, visited, temp: ^map[string]bool) {
+        for node in start_nodes {
+            topological_visit(node, flags, sorted, visited, temp)
+        }
+    }
+
+    topological_visit :: proc(node: string, flags: Deps_Flags, sorted: ^[dynamic]string, visited, temp: ^map[string]bool) {
+        if node in temp^ {
+            return
+        }
+        if node in visited^ {
+            return
+        }
+        temp[node] = true
+
+        used_runtime := false
+        if !flags.direct && !flags.tree_mode && !flags.graph_mode && !flags.dot_mode {
+            if rdeps, ok := get_runtime_deps(node); ok {
+                used_runtime = true
+                for d in rdeps {
+                    topological_visit(d, flags, sorted, visited, temp)
+                }
+            }
+        }
+
+        if !used_runtime {
+            if f, err := api.fetch_formula(node); err == nil {
+                defer api.destroy_formula(f)
+                direct := get_direct_deps(f, flags)
+                for d in direct {
+                    topological_visit(d.name, flags, sorted, visited, temp)
+                }
+            }
+        }
+
+        delete_key(temp, node)
+        visited[node] = true
+        append(sorted, strings.clone(node, context.temp_allocator))
+    }
+
+    print_tree :: proc(name: string, type: Dep_Type, depth: int, flags: Deps_Flags, printed: ^map[string]bool) {
+        indent := strings.repeat("  ", depth, context.temp_allocator)
+
+        is_installed := is_installed_pkg(name)
+        if flags.installed && !is_installed {
+            return
+        }
+        if flags.missing && is_installed {
+            return
+        }
+
+        annotation := ""
+        if flags.annotate {
+            switch type {
+            case .Required: // none
+            case .Recommended: annotation = " [recommended]"
+            case .Build:       annotation = " [build]"
+            case .Optional:    annotation = " [optional]"
+            case .Test:        annotation = " [test]"
+            case .Requirement: annotation = " [requirement]"
+            case .Implicit:    annotation = " [implicit]"
+            }
+        }
+
+        if flags.prune_mode && name in printed^ {
+            fmt.printf("%s%s (already shown)%s\n", indent, name, annotation)
+            return
+        }
+        printed[name] = true
+
+        fmt.printf("%s%s%s\n", indent, name, annotation)
+
+        used_runtime := false
+        if !flags.topological {
+            if rdeps, ok := get_runtime_deps(name); ok {
+                used_runtime = true
+                for d in rdeps {
+                    print_tree(d, .Required, depth + 1, flags, printed)
+                }
+            }
+        }
+
+        if !used_runtime {
+            if f, err := api.fetch_formula(name); err == nil {
+                defer api.destroy_formula(f)
+                direct := get_direct_deps(f, flags)
+                for d in direct {
+                    if d.type == .Test && !flags.tree_mode && !flags.graph_mode && !flags.dot_mode {
+                        continue
+                    }
+                    print_tree(d.name, d.type, depth + 1, flags, printed)
+                }
+            }
+        }
+    }
+
+    Edge :: struct {
+        from: string,
+        to:   string,
+    }
+
+    collect_edges :: proc(name: string, flags: Deps_Flags, edges: ^[dynamic]Edge, visited: ^map[string]bool) {
+        if name in visited^ {
+            return
+        }
+        visited[name] = true
+
+        used_runtime := false
+        if !flags.topological && !flags.direct && !flags.tree_mode && !flags.graph_mode && !flags.dot_mode {
+            if rdeps, ok := get_runtime_deps(name); ok {
+                used_runtime = true
+                for d in rdeps {
+                    append_edge(edges, Edge{from = name, to = d})
+                    collect_edges(d, flags, edges, visited)
+                }
+            }
+        }
+
+        if !used_runtime {
+            if f, err := api.fetch_formula(name); err == nil {
+                defer api.destroy_formula(f)
+                direct := get_direct_deps(f, flags)
+                for d in direct {
+                    append_edge(edges, Edge{from = name, to = d.name})
+                    collect_edges(d.name, flags, edges, visited)
+                }
+            }
+        }
+    }
+
+    append_edge :: proc(edges: ^[dynamic]Edge, edge: Edge) {
+        for e in edges^ {
+            if e.from == edge.from && e.to == edge.to {
+                return
+            }
+        }
+        append(edges, edge)
+    }
+
+    // Now, handle the execution based on flags!
+    if flags.for_each {
+        for name in pkg_names {
+            dep_set := make([dynamic]Dep_Item, context.temp_allocator)
+            visited := make(map[string]bool, context.temp_allocator)
+
+            if flags.direct {
+                used_runtime := false
+                if !flags.topological {
+                    if rdeps, ok := get_runtime_deps(name); ok {
+                        used_runtime = true
+                        for d in rdeps {
+                            append_unique_dep(&dep_set, Dep_Item{name = d, type = .Required})
+                        }
+                    }
+                }
+                if !used_runtime {
+                    if f, err := api.fetch_formula(name); err == nil {
+                        defer api.destroy_formula(f)
+                        direct := get_direct_deps(f, flags)
+                        for d in direct {
+                            append_unique_dep(&dep_set, d)
+                        }
+                    }
+                }
+            } else {
+                collect_recursive_deps(name, flags, &visited, &dep_set)
+            }
+
+            slice.sort_by(dep_set[:], proc(i, j: Dep_Item) -> bool {
+                return i.name < j.name
+            })
+
+            if flags.topological {
+                topo_sorted := make([dynamic]string, context.temp_allocator)
+                visited_topo := make(map[string]bool, context.temp_allocator)
+                temp_topo := make(map[string]bool, context.temp_allocator)
+                pkg_arr := []string{name}
+                topological_sort(pkg_arr, flags, &topo_sorted, &visited_topo, &temp_topo)
+
+                topo_deps := make([dynamic]Dep_Item, context.temp_allocator)
+                for topo_name in topo_sorted {
+                    for item in dep_set {
+                        if item.name == topo_name {
+                            append(&topo_deps, item)
+                            break
+                        }
+                    }
+                }
+                dep_set = topo_deps
+            }
+
+            fmt.printf("%s:", name)
+            for item in dep_set {
+                is_installed := is_installed_pkg(item.name)
+                if flags.installed && !is_installed {
+                    continue
+                }
+                if flags.missing && is_installed {
+                    continue
+                }
+
+                annotation := ""
+                if flags.annotate {
+                    switch item.type {
+                    case .Required: // none
+                    case .Recommended: annotation = " [recommended]"
+                    case .Build:       annotation = " [build]"
+                    case .Optional:    annotation = " [optional]"
+                    case .Test:        annotation = " [test]"
+                    case .Requirement: annotation = " [requirement]"
+                    case .Implicit:    annotation = " [implicit]"
+                    }
+                }
+                fmt.printf(" %s%s", item.name, annotation)
+            }
+            fmt.println()
+        }
+        return
+    }
+
+    if flags.tree_mode {
+        for name in pkg_names {
+            printed := make(map[string]bool, context.temp_allocator)
+            print_tree(name, .Required, 0, flags, &printed)
+        }
+        return
+    }
+
+    if flags.graph_mode || flags.dot_mode {
+        edges := make([dynamic]Edge, context.temp_allocator)
+        for name in pkg_names {
+            visited := make(map[string]bool, context.temp_allocator)
+            collect_edges(name, flags, &edges, &visited)
+        }
+
+        fmt.println("digraph G {")
+        for edge in edges {
+            if flags.installed {
+                if !is_installed_pkg(edge.from) || !is_installed_pkg(edge.to) {
+                    continue
+                }
+            }
+            if flags.missing {
+                if is_installed_pkg(edge.to) {
+                    continue
+                }
+            }
+            fmt.printf("  \"%s\" -> \"%s\";\n", edge.from, edge.to)
+        }
+        fmt.println("}")
+        return
+    }
+
+    // Default list (intersection or union)
+    all_dep_sets := make([dynamic][dynamic]Dep_Item, context.temp_allocator)
+    for name in pkg_names {
+        dep_set := make([dynamic]Dep_Item, context.temp_allocator)
+        visited := make(map[string]bool, context.temp_allocator)
+
+        if flags.direct {
+            used_runtime := false
+            if !flags.topological {
+                if rdeps, ok := get_runtime_deps(name); ok {
+                    used_runtime = true
+                    for d in rdeps {
+                        append_unique_dep(&dep_set, Dep_Item{name = d, type = .Required})
+                    }
+                }
+            }
+            if !used_runtime {
+                if f, err := api.fetch_formula(name); err == nil {
+                    defer api.destroy_formula(f)
+                    direct := get_direct_deps(f, flags)
+                    for d in direct {
+                        append_unique_dep(&dep_set, d)
+                    }
+                }
+            }
+        } else {
+            collect_recursive_deps(name, flags, &visited, &dep_set)
+        }
+        append(&all_dep_sets, dep_set)
+    }
+
+    final_deps := make([dynamic]Dep_Item, context.temp_allocator)
+    if len(all_dep_sets) > 0 {
+        if flags.union_mode || len(all_dep_sets) == 1 {
+            for set in all_dep_sets {
+                for item in set {
+                    append_unique_dep(&final_deps, item)
+                }
+            }
+        } else {
+            first_set := all_dep_sets[0]
+            for item in first_set {
+                in_all := true
+                for other_idx in 1..<len(all_dep_sets) {
+                    other_set := all_dep_sets[other_idx]
+                    found := false
+                    for other_item in other_set {
+                        if other_item.name == item.name {
+                            found = true
+                            break
+                        }
+                    }
+                    if !found {
+                        in_all = false
+                        break
+                    }
+                }
+                if in_all {
+                    append_unique_dep(&final_deps, item)
+                }
+            }
+        }
+    }
+
+    slice.sort_by(final_deps[:], proc(i, j: Dep_Item) -> bool {
+        return i.name < j.name
+    })
+
+    if flags.topological {
+        topo_sorted := make([dynamic]string, context.temp_allocator)
+        visited := make(map[string]bool, context.temp_allocator)
+        temp := make(map[string]bool, context.temp_allocator)
+
+        topological_sort(pkg_names[:], flags, &topo_sorted, &visited, &temp)
+
+        topo_deps := make([dynamic]Dep_Item, context.temp_allocator)
+        for name in topo_sorted {
+            for item in final_deps {
+                if item.name == name {
+                    append(&topo_deps, item)
+                    break
+                }
+            }
+        }
+        final_deps = topo_deps
+    }
+
+    filtered_deps := make([dynamic]Dep_Item, context.temp_allocator)
+    for item in final_deps {
+        is_installed := is_installed_pkg(item.name)
+        if flags.installed && !is_installed {
+            continue
+        }
+        if flags.missing && is_installed {
+            continue
+        }
+        append(&filtered_deps, item)
+    }
+    final_deps = filtered_deps
+
+    for item in final_deps {
+        annotation := ""
+        if flags.annotate {
+            switch item.type {
+            case .Required: // none
+            case .Recommended: annotation = " [recommended]"
+            case .Build:       annotation = " [build]"
+            case .Optional:    annotation = " [optional]"
+            case .Test:        annotation = " [test]"
+            case .Requirement: annotation = " [requirement]"
+            case .Implicit:    annotation = " [implicit]"
+            }
+        }
+        fmt.printf("%s%s\n", item.name, annotation)
+    }
 }
 
 unlink_formula_bins :: proc(name: string) -> int {
@@ -2973,7 +3587,14 @@ run_cleanup :: proc(args: []string) {
     pins := read_pins()
     defer destroy_pins(pins)
 
+    get_filename :: proc(path: string) -> string {
+        idx := strings.last_index(path, "/")
+        if idx < 0 do return path
+        return path[idx+1:]
+    }
+
     preserved_shas := make(map[string]bool, context.temp_allocator)
+    preserved_filenames := make(map[string]bool, context.temp_allocator)
 
     installed_formulae := list_installed_formulae()
     defer {
@@ -2984,12 +3605,41 @@ run_cleanup :: proc(args: []string) {
         delete(installed_formulae)
     }
     for f in installed_formulae {
+        // Installed version filenames
+        // Bottle
+        bottle_name := fmt.tprintf("%s-%s.bottle.tar.gz", f.name, f.version)
+        preserved_filenames[strings.clone(get_filename(bottle_name), context.temp_allocator)] = true
+
+        // Source extensions
+        exts := []string{".tar.gz", ".zip", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tar.zstd"}
+        for ext in exts {
+            src_name := fmt.tprintf("%s-%s-source%s", f.name, f.version, ext)
+            preserved_filenames[strings.clone(get_filename(src_name), context.temp_allocator)] = true
+        }
+
         if form, err := api.fetch_formula(f.name); err == nil {
             if form.bottle_sha256 != "" {
                 preserved_shas[strings.clone(form.bottle_sha256, context.temp_allocator)] = true
+                
+                b_name := fmt.tprintf("%s-%s.bottle.tar.gz", form.name, form.version)
+                preserved_filenames[strings.clone(get_filename(b_name), context.temp_allocator)] = true
             }
             if form.source_sha256 != "" {
                 preserved_shas[strings.clone(form.source_sha256, context.temp_allocator)] = true
+
+                ext := ".tar.gz"
+                url := form.source_url
+                if strings.has_suffix(url, ".zip") {
+                    ext = ".zip"
+                } else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
+                    ext = ".tar.bz2"
+                } else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
+                    ext = ".tar.xz"
+                } else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
+                    ext = ".tar.zst"
+                }
+                s_name := fmt.tprintf("%s-%s-source%s", form.name, form.version, ext)
+                preserved_filenames[strings.clone(get_filename(s_name), context.temp_allocator)] = true
             }
             api.destroy_formula(form)
         }
@@ -3008,6 +3658,20 @@ run_cleanup :: proc(args: []string) {
             if csk.sha256 != "" {
                 preserved_shas[strings.clone(csk.sha256, context.temp_allocator)] = true
             }
+
+            // Latest version cask path
+            dl_path := installer.cask_download_path(csk)
+            dl_name := get_filename(dl_path)
+            preserved_filenames[strings.clone(dl_name, context.temp_allocator)] = true
+
+            // Installed version cask path
+            orig_version := csk.version
+            csk.version = c.version
+            inst_dl_path := installer.cask_download_path(csk)
+            inst_dl_name := get_filename(inst_dl_path)
+            preserved_filenames[strings.clone(inst_dl_name, context.temp_allocator)] = true
+            csk.version = orig_version
+
             api.destroy_cask(csk)
         }
     }
@@ -3052,7 +3716,7 @@ run_cleanup :: proc(args: []string) {
         removed^ += 1
     }
 
-    cleanup_cache_tree :: proc(root: string, dry_run, scrub, prune_all: bool, prune_days: int, preserved_shas, target_shas: map[string]bool, target_prefixes: []string, pkg_names: []string, removed, failed: ^int) {
+    cleanup_cache_tree :: proc(root: string, dry_run, scrub, prune_all: bool, prune_days: int, preserved_shas, preserved_filenames, target_shas: map[string]bool, target_prefixes: []string, pkg_names: []string, removed, failed: ^int) {
         if !os.is_dir(root) {
             return
         }
@@ -3083,7 +3747,7 @@ run_cleanup :: proc(args: []string) {
                     }
                 }
 
-                is_preserved := info.name in preserved_shas
+                is_preserved := !prune_all && ((info.name in preserved_shas) || (info.name in preserved_filenames))
                 if is_preserved {
                     continue
                 }
@@ -3123,9 +3787,7 @@ run_cleanup :: proc(args: []string) {
         }
     }
 
-    cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
-    cleanup_cache_tree(installer.UBREW_ROOT + "/cache/blobs", dry_run, scrub, prune_all, prune_days, preserved_shas, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
-    cleanup_cache_tree(installer.UBREW_ROOT + "/cache/tmp", dry_run, scrub, prune_all, prune_days, preserved_shas, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
+    cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
 
     cellar := installer.PREFIX + "/Cellar"
     if os.is_dir(cellar) {
@@ -5042,7 +5704,36 @@ is_pinned :: proc(pins: [dynamic]string, name: string) -> bool {
 }
 
 run_pin :: proc(args: []string) {
-    if len(args) == 0 {
+    flags := struct {
+        formula_only: bool,
+        cask_only:    bool,
+    }{}
+
+    pkg_names := make([dynamic]string, context.temp_allocator)
+
+    for arg in args {
+        if arg == "--formula" {
+            flags.formula_only = true
+        } else if arg == "--cask" {
+            flags.cask_only = true
+        } else if arg == "-h" || arg == "--help" {
+            fmt.println("Usage: ubrew pin [options] <installed_formula|installed_cask> [...]")
+            fmt.println("")
+            fmt.println("Pin the specified package, preventing it from being upgraded.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  --formula  Treat all named arguments as formulae.")
+            fmt.println("  --cask     Treat all named arguments as casks.")
+            os.exit(0)
+        } else if strings.has_prefix(arg, "-") {
+            fmt.printf("ubrew: unknown pin flag '%s'\n", arg)
+            os.exit(1)
+        } else {
+            append(&pkg_names, arg)
+        }
+    }
+
+    if len(pkg_names) == 0 {
         // List pins
         pins := read_pins()
         defer destroy_pins(pins)
@@ -5059,59 +5750,191 @@ run_pin :: proc(args: []string) {
     pins := read_pins()
     defer destroy_pins(pins)
     added := 0
-    for name in args {
+    failed := false
+
+    for name in pkg_names {
         if !package_name_safe(name) {
             fmt.printf("ubrew: refusing to pin unsafe name: %s\n", name)
+            failed = true
             continue
         }
-        if is_pinned(pins, name) {
-            fmt.printf("ubrew: '%s' is already pinned\n", name)
+
+        // Verify if package is installed based on flags
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name))
+        flat_name := installer.flatten_token(name)
+        is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
+
+        valid_install := false
+        if flags.formula_only {
+            valid_install = is_installed_formula
+        } else if flags.cask_only {
+            valid_install = is_installed_cask
+        } else {
+            valid_install = is_installed_formula || is_installed_cask
+        }
+
+        if !valid_install {
+            if flags.formula_only {
+                fmt.printf("ubrew: formula '%s' is not installed\n", name)
+            } else if flags.cask_only {
+                fmt.printf("ubrew: cask '%s' is not installed\n", name)
+            } else {
+                fmt.printf("ubrew: '%s' is not installed\n", name)
+            }
+            failed = true
             continue
         }
-        append(&pins, strings.clone(name, context.allocator))
+
+        target_name := name
+        if is_installed_cask && !is_installed_formula {
+            target_name = flat_name
+        } else if flags.cask_only {
+            target_name = flat_name
+        }
+
+        if is_pinned(pins, target_name) {
+            fmt.printf("ubrew: '%s' is already pinned\n", target_name)
+            continue
+        }
+
+        append(&pins, strings.clone(target_name, context.allocator))
         added += 1
-        fmt.printf("Pinned %s\n", name)
+        fmt.printf("Pinned %s\n", target_name)
     }
+
     if added > 0 {
         if !write_pins(pins[:]) {
             fmt.println("ubrew: failed to write pins file")
             os.exit(1)
         }
     }
+
+    if failed {
+        os.exit(1)
+    }
 }
 
 run_unpin :: proc(args: []string) {
-    if len(args) == 0 {
-        fmt.println("Usage: ubrew unpin <formula> [<formula> ...]")
+    flags := struct {
+        formula_only: bool,
+        cask_only:    bool,
+    }{}
+
+    pkg_names := make([dynamic]string, context.temp_allocator)
+
+    for arg in args {
+        if arg == "--formula" {
+            flags.formula_only = true
+        } else if arg == "--cask" {
+            flags.cask_only = true
+        } else if arg == "-h" || arg == "--help" {
+            fmt.println("Usage: ubrew unpin [options] <installed_formula|installed_cask> [...]")
+            fmt.println("")
+            fmt.println("Unpin the specified package, allowing it to be upgraded.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  --formula  Treat all named arguments as formulae.")
+            fmt.println("  --cask     Treat all named arguments as casks.")
+            os.exit(0)
+        } else if strings.has_prefix(arg, "-") {
+            fmt.printf("ubrew: unknown unpin flag '%s'\n", arg)
+            os.exit(1)
+        } else {
+            append(&pkg_names, arg)
+        }
+    }
+
+    if len(pkg_names) == 0 {
+        fmt.println("Usage: ubrew unpin [options] <installed_formula|installed_cask> [...]")
         os.exit(1)
     }
+
     pins := read_pins()
     defer destroy_pins(pins)
+
     kept := make([dynamic]string, context.temp_allocator)
     removed := 0
+    failed := false
+    unpinned_names := make(map[string]bool, context.temp_allocator)
+
+    // Verify all specified packages are installed and valid
+    valid_names := make([dynamic]string, context.temp_allocator)
+    for name in pkg_names {
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name))
+        flat_name := installer.flatten_token(name)
+        is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
+
+        valid_install := false
+        if flags.formula_only {
+            valid_install = is_installed_formula
+        } else if flags.cask_only {
+            valid_install = is_installed_cask
+        } else {
+            valid_install = is_installed_formula || is_installed_cask
+        }
+
+        if !valid_install {
+            if flags.formula_only {
+                fmt.printf("ubrew: formula '%s' is not installed\n", name)
+            } else if flags.cask_only {
+                fmt.printf("ubrew: cask '%s' is not installed\n", name)
+            } else {
+                fmt.printf("ubrew: '%s' is not installed\n", name)
+            }
+            failed = true
+        } else {
+            append(&valid_names, name)
+        }
+    }
+
     for p in pins {
         drop := false
-        for name in args {
-            if p == name {
-                drop = true
-                removed += 1
-                fmt.printf("Unpinned %s\n", p)
-                break
+        for name in valid_names {
+            flat_name := installer.flatten_token(name)
+            if p == name || p == flat_name {
+                is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, p))
+                is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, p))
+
+                valid_unpin := false
+                if flags.formula_only {
+                    valid_unpin = is_installed_formula
+                } else if flags.cask_only {
+                    valid_unpin = is_installed_cask
+                } else {
+                    valid_unpin = true
+                }
+
+                if valid_unpin {
+                    drop = true
+                    removed += 1
+                    unpinned_names[name] = true
+                    fmt.printf("Unpinned %s\n", p)
+                    break
+                }
             }
         }
         if !drop {
             append(&kept, p)
         }
     }
+
     if removed > 0 {
         if !write_pins(kept[:]) {
             fmt.println("ubrew: failed to write pins file")
             os.exit(1)
         }
-    } else {
-        for name in args {
+    }
+
+    // Print error for target packages that were not found in pins
+    for name in valid_names {
+        if !(name in unpinned_names) {
             fmt.printf("ubrew: '%s' is not pinned\n", name)
+            failed = true
         }
+    }
+
+    if failed {
+        os.exit(1)
     }
 }
 
@@ -5179,84 +6002,251 @@ run_leaves :: proc() {
 // ── link / unlink / home / desc / formulae / casks / commands ──
 
 run_link :: proc(args: []string) {
-    if len(args) < 1 {
-        fmt.println("Usage: ubrew link <installed_formula> [...]")
+    Link_Flags :: struct {
+        overwrite: bool,
+        dry_run:   bool,
+        force:     bool,
+        head:      bool,
+    }
+
+    flags := Link_Flags{}
+    pkg_names := make([dynamic]string, context.temp_allocator)
+
+    for arg in args {
+        if arg == "--overwrite" {
+            flags.overwrite = true
+        } else if arg == "-n" || arg == "--dry-run" {
+            flags.dry_run = true
+        } else if arg == "-f" || arg == "--force" {
+            flags.force = true
+        } else if arg == "--HEAD" {
+            flags.head = true
+        } else if arg == "-h" || arg == "--help" {
+            fmt.println("Usage: ubrew link [options] <installed_formula> [...]")
+            fmt.println("")
+            fmt.println("Symlink all of formula’s installed files into Homebrew’s prefix.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  --overwrite  Delete files that already exist in the prefix while linking.")
+            fmt.println("  -n, --dry-run  List files which would be linked or deleted without actually doing it.")
+            fmt.println("  -f, --force  Allow keg-only formulae to be linked.")
+            fmt.println("  --HEAD       Link the HEAD version of the formula if it is installed.")
+            os.exit(0)
+        } else if strings.has_prefix(arg, "-") {
+            fmt.printf("ubrew: unknown link flag '%s'\n", arg)
+            os.exit(1)
+        } else {
+            append(&pkg_names, arg)
+        }
+    }
+
+    if len(pkg_names) == 0 {
+        fmt.println("Usage: ubrew link [options] <installed_formula> [...]")
         os.exit(1)
     }
+
+    link_dir_contents :: proc(src_dir, dst_dir: string, flags: Link_Flags, linked, deleted, failed: ^int) {
+        if !os.is_dir(src_dir) {
+            return
+        }
+        infos, err := os.read_directory_by_path(src_dir, -1, context.temp_allocator)
+        if err != nil {
+            return
+        }
+
+        for info in infos {
+            src_path := info.fullpath
+            dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
+
+            if info.type == .Directory {
+                if !flags.dry_run {
+                    _ = os.make_directory_all(dst_path, os.perm(0o755))
+                }
+                link_dir_contents(src_path, dst_path, flags, linked, deleted, failed)
+            } else {
+                exists := false
+                is_symlink_to_correct_place := false
+                if os.exists(dst_path) {
+                    exists = true
+                    if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+                        if target == src_path {
+                            is_symlink_to_correct_place = true
+                        }
+                    }
+                } else {
+                    if _, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+                        exists = true
+                    }
+                }
+
+                if exists {
+                    if is_symlink_to_correct_place {
+                        continue
+                    }
+
+                    if flags.overwrite {
+                        if flags.dry_run {
+                            fmt.printf("Would delete: %s\n", dst_path)
+                            deleted^ += 1
+                        } else {
+                            if err := os.remove(dst_path); err != nil {
+                                fmt.printf("ubrew: failed to remove existing file %s: %v\n", dst_path, err)
+                                failed^ += 1
+                                continue
+                            }
+                            deleted^ += 1
+                        }
+                    } else {
+                        fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
+                        failed^ += 1
+                        continue
+                    }
+                }
+
+                if flags.dry_run {
+                    fmt.printf("Would link: %s -> %s\n", dst_path, src_path)
+                    linked^ += 1
+                } else {
+                    if serr := os.symlink(src_path, dst_path); serr != nil {
+                        fmt.printf("ubrew: failed to symlink %s -> %s: %v\n", dst_path, src_path, serr)
+                        failed^ += 1
+                    } else {
+                        linked^ += 1
+                    }
+                }
+            }
+        }
+    }
+
     failed := false
-    for name in args {
-        if strings.has_prefix(name, "-") {
-            fmt.printf("ubrew: unknown link flag '%s'\n", name)
+    for name in pkg_names {
+        if !package_name_safe(name) {
+            fmt.printf("ubrew: refusing to link unsafe name: %s\n", name)
             failed = true
             continue
         }
-		if !package_name_safe(name) {
-			fmt.printf("ubrew: refusing to link unsafe name: %s\n", name)
-            failed = true
-            continue
+        
+        // Fetch formula to check if it's keg-only
+        if f, err := api.fetch_formula(name); err == nil {
+            is_keg_only := f.keg_only
+            api.destroy_formula(f)
+            
+            if is_keg_only && !flags.force {
+                fmt.printf("ubrew: '%s' is keg-only; use --force to link it\n", name)
+                failed = true
+                continue
+            }
         }
+
         rack := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
         if !os.is_dir(rack) {
             fmt.printf("ubrew: '%s' is not installed\n", name)
             failed = true
             continue
         }
-        // Pick the newest keg version in the rack.
+
         infos, err := os.read_directory_by_path(rack, -1, context.temp_allocator)
         if err != nil || len(infos) == 0 {
             fmt.printf("ubrew: '%s' has no kegs\n", name)
             failed = true
             continue
         }
-        latest := ""
-        for info in infos {
-            if info.type == .Directory {
-                if latest == "" || is_newer(info.name, latest) {
-                    latest = info.name
+
+        version_to_link := ""
+        if flags.head {
+            for info in infos {
+                if info.type == .Directory {
+                    if strings.contains(strings.to_lower(info.name, context.temp_allocator), "head") {
+                        version_to_link = info.name
+                        break
+                    }
+                }
+            }
+            if version_to_link == "" {
+                fmt.printf("ubrew: HEAD version of '%s' is not installed\n", name)
+                failed = true
+                continue
+            }
+        } else {
+            // Prefer stable versions
+            for info in infos {
+                if info.type == .Directory {
+                    is_head := strings.contains(strings.to_lower(info.name, context.temp_allocator), "head")
+                    if !is_head {
+                        if version_to_link == "" || is_newer(info.name, version_to_link) {
+                            version_to_link = info.name
+                        }
+                    }
+                }
+            }
+            // Fall back to any version if no stable version was found
+            if version_to_link == "" {
+                for info in infos {
+                    if info.type == .Directory {
+                        if version_to_link == "" || is_newer(info.name, version_to_link) {
+                            version_to_link = info.name
+                        }
+                    }
                 }
             }
         }
-        if latest == "" {
+
+        if version_to_link == "" {
             fmt.printf("ubrew: '%s' has no kegs\n", name)
             failed = true
             continue
         }
-        keg_bin := fmt.tprintf("%s/Cellar/%s/%s/bin", installer.PREFIX, name, latest)
-        if !os.is_dir(keg_bin) {
-            fmt.printf("==> %s %s has no bin/ directory; nothing to link\n", name, latest)
-            continue
-        }
-        bin_infos, bin_err := os.read_directory_by_path(keg_bin, -1, context.temp_allocator)
-        if bin_err != nil {
-            fmt.printf("ubrew: cannot read %s: %v\n", keg_bin, bin_err)
+
+        keg_root := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, version_to_link)
+        keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator)
+        if keg_err != nil {
+            fmt.printf("ubrew: cannot read %s: %v\n", keg_root, keg_err)
             failed = true
             continue
         }
+
         linked := 0
-        for bi in bin_infos {
-            if bi.type != .Regular && bi.type != .Symlink {
-                continue
+        deleted := 0
+        local_failed := 0
+
+        // Subdirectories to link recursively (skip metadata like INSTALL_RECEIPT.json or .brew)
+        for ki in keg_infos {
+            if ki.type == .Directory {
+                if ki.name == ".brew" || ki.name == "metadata" {
+                    continue
+                }
+                src_dir := ki.fullpath
+                dst_dir := fmt.tprintf("%s/%s", installer.PREFIX, ki.name)
+                
+                if !flags.dry_run {
+                    _ = os.make_directory_all(dst_dir, os.perm(0o755))
+                }
+                
+                link_dir_contents(src_dir, dst_dir, flags, &linked, &deleted, &local_failed)
             }
-            src := bi.fullpath
-            dst := fmt.tprintf("%s/bin/%s", installer.PREFIX, bi.name)
-            _ = os.remove(dst)
-            if serr := os.symlink(src, dst); serr != nil {
-                fmt.printf("ubrew: failed linking %s -> %s: %v\n", dst, src, serr)
-                failed = true
-                continue
-            }
-            linked += 1
         }
-		fmt.printf("==> Linked %s %s (%d bin link(s))\n", name, latest, linked)
-		// Recreate the opt/<name> symlink to point at the latest keg
-		opt_dst := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
-		opt_src := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, latest)
-		_ = os.remove(opt_dst)
-		if serr := os.symlink(opt_src, opt_dst); serr != nil {
-			fmt.printf("ubrew: failed linking %s -> %s: %v\n", opt_dst, opt_src, serr)
-			failed = true
-		}
+
+        if local_failed > 0 {
+            failed = true
+            continue
+        }
+
+        if flags.dry_run {
+            fmt.printf("==> Dry run: Would link %s %s (%d file(s) linked, %d file(s) deleted)\n", name, version_to_link, linked, deleted)
+        } else {
+            fmt.printf("==> Linked %s %s (%d file(s) linked)\n", name, version_to_link, linked)
+
+            // Recreate the opt/<name> symlink to point at the latest/linked keg
+            opt_dst := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
+            opt_src := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, version_to_link)
+            _ = os.remove(opt_dst)
+            if serr := os.symlink(opt_src, opt_dst); serr != nil {
+                fmt.printf("ubrew: failed linking %s -> %s: %v\n", opt_dst, opt_src, serr)
+                failed = true
+            }
+        }
     }
+
     if failed {
         os.exit(1)
     }
@@ -5264,7 +6254,7 @@ run_link :: proc(args: []string) {
 
 run_unlink :: proc(args: []string) {
     if len(args) < 1 {
-        fmt.println("Usage: ubrew unlink <installed_formula> [...]")
+        fmt.println("Usage: ubrew unlink [options] <installed_formula> [...]")
         os.exit(1)
     }
     dry_run := false
@@ -5273,6 +6263,14 @@ run_unlink :: proc(args: []string) {
         switch a {
         case "--dry-run", "-n":
             dry_run = true
+        case "-h", "--help":
+            fmt.println("Usage: ubrew unlink [options] <installed_formula> [...]")
+            fmt.println("")
+            fmt.println("Remove symlinks for formula’s installed files from the prefix.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  -n, --dry-run  Show what would be unlinked without actually doing it.")
+            os.exit(0)
         case:
             if strings.has_prefix(a, "-") {
                 fmt.printf("ubrew: unknown unlink flag '%s'\n", a)
@@ -5281,6 +6279,42 @@ run_unlink :: proc(args: []string) {
             append(&names, a)
         }
     }
+
+    unlink_dir_contents :: proc(dst_dir, name: string, dry_run: bool, unlinked, failed: ^int) {
+        if !os.is_dir(dst_dir) {
+            return
+        }
+        infos, err := os.read_directory_by_path(dst_dir, -1, context.temp_allocator)
+        if err != nil {
+            return
+        }
+
+        for info in infos {
+            dst_path := info.fullpath
+
+            if info.type == .Directory {
+                unlink_dir_contents(dst_path, name, dry_run, unlinked, failed)
+            } else {
+                if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+                    prefix := fmt.tprintf("/Cellar/%s/", name)
+                    if strings.contains(target, prefix) {
+                        if dry_run {
+                            fmt.printf("Would unlink: %s\n", dst_path)
+                            unlinked^ += 1
+                        } else {
+                            if err := os.remove(dst_path); err != nil {
+                                fmt.printf("ubrew: failed to remove link %s: %v\n", dst_path, err)
+                                failed^ += 1
+                            } else {
+                                unlinked^ += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     failed := false
     for name in names {
         if !package_name_safe(name) {
@@ -5288,33 +6322,50 @@ run_unlink :: proc(args: []string) {
             failed = true
             continue
         }
-        if dry_run {
-            // Count what would be removed.
-            bin_dir := installer.PREFIX + "/bin"
-            formula_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
-            infos, err := os.read_directory_by_path(bin_dir, -1, context.temp_allocator)
-            if err != nil {
-                continue
-            }
-            n := 0
-            for info in infos {
-                path := fmt.tprintf("%s/%s", bin_dir, info.name)
-                target, lerr := os.read_link(path, context.temp_allocator)
-                if lerr != nil { continue }
-                prefix := fmt.tprintf("%s/", formula_dir)
-                if strings.has_prefix(target, prefix) {
-                    fmt.printf("Would unlink %s\n", path)
-                    n += 1
-                }
-            }
-            fmt.printf("==> Would unlink %d bin link(s) for %s\n", n, name)
+
+        unlinked_count := 0
+        local_failed := 0
+
+        rack := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        if !os.is_dir(rack) {
+            fmt.printf("ubrew: '%s' is not installed\n", name)
+            failed = true
             continue
         }
-        removed := unlink_formula_bins(name)
-        opt_link := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
-        _ = os.remove(opt_link)
-        fmt.printf("==> Unlinked %s (%d bin link(s))\n", name, removed)
+
+        if v_infos, v_err := os.read_directory_by_path(rack, -1, context.temp_allocator); v_err == nil {
+            for v_info in v_infos {
+                if v_info.type == .Directory {
+                    keg_root := v_info.fullpath
+                    if keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator); keg_err == nil {
+                        for ki in keg_infos {
+                            if ki.type == .Directory {
+                                if ki.name == ".brew" || ki.name == "metadata" {
+                                    continue
+                                }
+                                dst_dir := fmt.tprintf("%s/%s", installer.PREFIX, ki.name)
+                                unlink_dir_contents(dst_dir, name, dry_run, &unlinked_count, &local_failed)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if local_failed > 0 {
+            failed = true
+            continue
+        }
+
+        if dry_run {
+            fmt.printf("==> Dry run: Would unlink %s (%d link(s))\n", name, unlinked_count)
+        } else {
+            opt_link := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
+            _ = os.remove(opt_link)
+            fmt.printf("==> Unlinked %s (%d link(s))\n", name, unlinked_count)
+        }
     }
+
     if failed {
         os.exit(1)
     }
@@ -6723,12 +7774,22 @@ run_completions :: proc(args: []string) {
 }
 
 main :: proc() {
-    if len(os.args) < 2 || os.args[1] == "help" || os.args[1] == "--help" || os.args[1] == "-h" {
+    if len(os.args) < 2 || os.args[1] == "--help" || os.args[1] == "-h" {
         print_usage()
         os.exit(0)
     }
 
     cmd := os.args[1]
+    args_slice := os.args[2:]
+
+    if cmd == "help" {
+        if len(os.args) < 3 {
+            print_usage()
+            os.exit(0)
+        }
+        cmd = os.args[2]
+        args_slice = []string{"--help"}
+    }
 
     if cmd == "version" || cmd == "--version" || cmd == "-v" {
         fmt.println("ubrew 0.1.0")
@@ -6741,7 +7802,7 @@ main :: proc() {
     }
 
     if cmd == "list" || cmd == "ls" {
-        run_list(os.args[2:])
+        run_list(args_slice)
         return
     }
 
@@ -6751,42 +7812,42 @@ main :: proc() {
     }
 
     if cmd == "remove" || cmd == "uninstall" || cmd == "rm" || cmd == "ui" {
-        run_remove(os.args[2:])
+        run_remove(args_slice)
         return
     }
 
     if cmd == "reinstall" {
-        run_reinstall(os.args[2:])
+        run_reinstall(args_slice)
         return
     }
 
     if cmd == "tap" {
-        run_tap(os.args[2:])
+        run_tap(args_slice)
         return
     }
 
     if cmd == "untap" {
-        run_untap(os.args[2:])
+        run_untap(args_slice)
         return
     }
 
     if cmd == "where" || cmd == "wh" {
-        run_where(os.args[2:])
+        run_where(args_slice)
         return
     }
 
     if cmd == "doctor" || cmd == "dr" {
-        run_doctor(os.args[2:])
+        run_doctor(args_slice)
         return
     }
 
     if cmd == "bundle" {
-        run_bundle(os.args[2:])
+        run_bundle(args_slice)
         return
     }
 
     if cmd == "deps" {
-        run_deps(os.args[2:])
+        run_deps(args_slice)
         return
     }
 
@@ -6796,87 +7857,87 @@ main :: proc() {
     }
 
     if cmd == "mirror" {
-        run_mirror(os.args[2:])
+        run_mirror(args_slice)
         return
     }
 
     if cmd == "trust" {
-        run_trust(os.args[2:])
+        run_trust(args_slice)
         return
     }
 
     if cmd == "untrust" {
-        run_untrust(os.args[2:])
+        run_untrust(args_slice)
         return
     }
 
     if cmd == "update" || cmd == "up" {
-        run_update(os.args[2:])
+        run_update(args_slice)
         return
     }
 
     if cmd == "upgrade" {
-        run_upgrade(os.args[2:])
+        run_upgrade(args_slice)
         return
     }
 
     if cmd == "outdated" {
-        run_outdated(os.args[2:])
+        run_outdated(args_slice)
         return
     }
 
     if cmd == "cleanup" || cmd == "clean" {
-        run_cleanup(os.args[2:])
+        run_cleanup(args_slice)
         return
     }
 
     if cmd == "pin" {
-        run_pin(os.args[2:])
+        run_pin(args_slice)
         return
     }
 
     if cmd == "unpin" {
-        run_unpin(os.args[2:])
+        run_unpin(args_slice)
         return
     }
 
     if cmd == "link" || cmd == "ln" {
-        run_link(os.args[2:])
+        run_link(args_slice)
         return
     }
 
     if cmd == "unlink" {
-        run_unlink(os.args[2:])
+        run_unlink(args_slice)
         return
     }
 
     if cmd == "home" || cmd == "homepage" {
-        run_home(os.args[2:])
+        run_home(args_slice)
         return
     }
 
     if cmd == "desc" {
-        run_desc(os.args[2:])
+        run_desc(args_slice)
         return
     }
 
     if cmd == "autoremove" {
-        run_autoremove(os.args[2:])
+        run_autoremove(args_slice)
         return
     }
 
     if cmd == "gc" {
-        run_gc(os.args[2:])
+        run_gc(args_slice)
         return
     }
 
     if cmd == "history" {
-        run_history(os.args[2:])
+        run_history(args_slice)
         return
     }
 
     if cmd == "formulae" {
-        run_formulae(os.args[2:])
+        run_formulae(args_slice)
         return
     }
 
@@ -6886,12 +7947,12 @@ main :: proc() {
     }
 
     if cmd == "commands" {
-        run_commands(os.args[2:])
+        run_commands(args_slice)
         return
     }
 
     if cmd == "command" {
-        run_command(os.args[2:])
+        run_command(args_slice)
         return
     }
 
@@ -6901,93 +7962,512 @@ main :: proc() {
     }
 
     if cmd == "which-formula" {
-        run_which_formula(os.args[2:])
+        run_which_formula(args_slice)
         return
     }
 
     if cmd == "developer" {
-        run_developer(os.args[2:])
+        run_developer(args_slice)
         return
     }
 
     if cmd == "exec" || cmd == "x" {
-        run_exec(os.args[2:])
+        run_exec(args_slice)
         return
     }
 
     if cmd == "--prefix" || cmd == "--cellar" || cmd == "--caskroom" ||
        cmd == "--cache" || cmd == "--repo" || cmd == "--repository" {
-        run_path_query(cmd, os.args[2:])
+        run_path_query(cmd, args_slice)
         return
     }
 
     if cmd == "shellenv" {
-        run_shellenv(os.args[2:])
+        run_shellenv(args_slice)
         return
     }
 
     if cmd == "completions" {
-        run_completions(os.args[2:])
+        run_completions(args_slice)
         return
     }
 
-    if cmd == "search" || cmd == "s" {
-        if len(os.args) < 3 {
-            fmt.println("Usage: ubrew search <query>")
-            os.exit(1)
-        }
-        query := os.args[2]
-        fmt.printf("==> Searching for: %s\n", query)
-
-        if formulae, err := api.search_formulae(query, 20); err == nil {
-            defer api.destroy_formula_search_results(formulae)
-            if len(formulae) > 0 {
-                fmt.println("\nFormulae:")
-                for r in formulae {
-                    if r.version != "" {
-                        fmt.printf("  %s (%s)\n    %s\n", r.name, r.version, r.desc)
-                    } else {
-                        fmt.printf("  %s\n    %s\n", r.name, r.desc)
-                    }
-                }
-            }
-        }
-
-        if casks, err := api.search_casks(query, 20); err == nil {
-            defer api.destroy_cask_search_results(casks)
-            if len(casks) > 0 {
-                fmt.println("\nCasks:")
-                for r in casks {
-                    if r.version != "" {
-                        fmt.printf("  %s (%s)\n    %s\n", r.token, r.version, r.desc)
-                    } else {
-                        fmt.printf("  %s\n    %s\n", r.token, r.desc)
-                    }
-                }
-            }
-        }
-
+    if cmd == "search" || cmd == "s" || cmd == "-S" {
+        run_search(args_slice)
         return
     }
 
     if cmd == "info" || cmd == "abv" {
-        run_info(os.args[2:])
+        run_info(args_slice)
         return
     }
 
     if cmd == "install" {
-        run_install(os.args[2:])
+        run_install(args_slice)
         return
     }
 
     if cmd == "nuke" {
-        run_nuke(os.args[2:])
+        run_nuke(args_slice)
         return
     }
 
     fmt.printf("ubrew: unknown command '%s'\n\n", cmd)
     print_usage()
     os.exit(1)
+}
+
+run_search :: proc(args_slice: []string) {
+    flags := struct {
+        formula_only: bool,
+        cask_only:    bool,
+        desc:         bool,
+        pull_request: bool,
+        open:         bool,
+        closed:       bool,
+        alpine:       bool,
+        repology:     bool,
+        macports:     bool,
+        fink:         bool,
+        opensuse:     bool,
+        fedora:       bool,
+        archlinux:    bool,
+        debian:       bool,
+        ubuntu:       bool,
+    }{}
+
+    pkg_names := make([dynamic]string, context.temp_allocator)
+
+    for arg in args_slice {
+        if arg == "--formula" {
+            flags.formula_only = true
+        } else if arg == "--cask" {
+            flags.cask_only = true
+        } else if arg == "--desc" {
+            flags.desc = true
+        } else if arg == "--pull-request" {
+            flags.pull_request = true
+        } else if arg == "--open" {
+            flags.open = true
+        } else if arg == "--closed" {
+            flags.closed = true
+        } else if arg == "--alpine" {
+            flags.alpine = true
+        } else if arg == "--repology" {
+            flags.repology = true
+        } else if arg == "--macports" {
+            flags.macports = true
+        } else if arg == "--fink" {
+            flags.fink = true
+        } else if arg == "--opensuse" {
+            flags.opensuse = true
+        } else if arg == "--fedora" {
+            flags.fedora = true
+        } else if arg == "--archlinux" {
+            flags.archlinux = true
+        } else if arg == "--debian" {
+            flags.debian = true
+        } else if arg == "--ubuntu" {
+            flags.ubuntu = true
+        } else if arg == "-h" || arg == "--help" {
+            fmt.println("Usage: ubrew search [options] <text|/regex/> [...]")
+            fmt.println("")
+            fmt.println("Perform a substring or regular expression search of casks and formulae.")
+            fmt.println("")
+            fmt.println("Options:")
+            fmt.println("  --formula       Search for formulae.")
+            fmt.println("  --cask          Search for casks.")
+            fmt.println("  --desc          Search names and descriptions.")
+            fmt.println("  --pull-request  Search for GitHub pull requests.")
+            fmt.println("  --open          Search only open pull requests.")
+            fmt.println("  --closed        Search only closed pull requests.")
+            fmt.println("  --alpine        Search Alpine Linux packages.")
+            fmt.println("  --repology      Search Repology projects.")
+            fmt.println("  --macports      Search MacPorts ports.")
+            fmt.println("  --fink          Search Fink packages.")
+            fmt.println("  --opensuse      Search OpenSUSE packages.")
+            fmt.println("  --fedora        Search Fedora packages.")
+            fmt.println("  --archlinux     Search Arch Linux packages.")
+            fmt.println("  --debian        Search Debian packages.")
+            fmt.println("  --ubuntu        Search Ubuntu packages.")
+            os.exit(0)
+        } else if strings.has_prefix(arg, "-") {
+            fmt.printf("ubrew: unknown search flag '%s'\n", arg)
+            os.exit(1)
+        } else {
+            append(&pkg_names, arg)
+        }
+    }
+
+    if len(pkg_names) == 0 {
+        fmt.println("Usage: ubrew search [options] <text|/regex/> [...]")
+        os.exit(1)
+    }
+
+    // PR Search
+    if flags.pull_request || flags.open || flags.closed {
+        gh_args := make([dynamic]string, context.temp_allocator)
+        append(&gh_args, "gh")
+        append(&gh_args, "pr")
+        append(&gh_args, "list")
+
+        q_b := strings.builder_make(context.temp_allocator)
+        for name, idx in pkg_names {
+            if idx > 0 do strings.write_string(&q_b, " ")
+            strings.write_string(&q_b, name)
+        }
+        query := strings.to_string(q_b)
+
+        append(&gh_args, "--search")
+        append(&gh_args, query)
+
+        if flags.open {
+            append(&gh_args, "--state")
+            append(&gh_args, "open")
+        } else if flags.closed {
+            append(&gh_args, "--state")
+            append(&gh_args, "closed")
+        }
+
+        platform.exec_cmd("gh", gh_args[:])
+        return
+    }
+
+    // Database searches
+    if flags.alpine {
+        for name in pkg_names {
+            fmt.printf("Alpine Linux package search for '%s': https://pkgs.alpinelinux.org/packages?name=%s\n", name, name)
+        }
+        return
+    }
+    if flags.repology {
+        for name in pkg_names {
+            fmt.printf("Repology project search for '%s': https://repology.org/project/%s\n", name, name)
+        }
+        return
+    }
+    if flags.macports {
+        for name in pkg_names {
+            fmt.printf("MacPorts port search for '%s': https://ports.macports.org/search/?q=%s\n", name, name)
+        }
+        return
+    }
+    if flags.fink {
+        for name in pkg_names {
+            fmt.printf("Fink package search for '%s': https://pdb.finkproject.org/pdb/browse.php?summary=%s\n", name, name)
+        }
+        return
+    }
+    if flags.opensuse {
+        for name in pkg_names {
+            fmt.printf("OpenSUSE package search for '%s': https://software.opensuse.org/search?q=%s\n", name, name)
+        }
+        return
+    }
+    if flags.fedora {
+        for name in pkg_names {
+            fmt.printf("Fedora package search for '%s': https://packages.fedoraproject.org/search?query=%s\n", name, name)
+        }
+        return
+    }
+    if flags.archlinux {
+        for name in pkg_names {
+            fmt.printf("Arch Linux package search for '%s': https://archlinux.org/packages/?q=%s\n", name, name)
+        }
+        return
+    }
+    if flags.debian {
+        for name in pkg_names {
+            fmt.printf("Debian package search for '%s': https://packages.debian.org/search?keywords=%s\n", name, name)
+        }
+        return
+    }
+    if flags.ubuntu {
+        for name in pkg_names {
+            fmt.printf("Ubuntu package search for '%s': https://packages.ubuntu.com/search?keywords=%s\n", name, name)
+        }
+        return
+    }
+
+    match_query :: proc(text, pattern: string, is_regex: bool) -> bool {
+        if len(pattern) == 0 {
+            return true
+        }
+        if is_regex {
+            pat := pattern
+            if len(pat) >= 2 && pat[0] == '/' && pat[len(pat)-1] == '/' {
+                pat = pat[1:len(pat)-1]
+            }
+            re, err := regex.create(pat, { .Case_Insensitive }, context.temp_allocator, context.temp_allocator)
+            if err == nil {
+                defer regex.destroy_regex(re, context.temp_allocator)
+                capture, success := regex.match(re, text, context.temp_allocator, context.temp_allocator)
+                if success {
+                    regex.destroy_capture(capture, context.temp_allocator)
+                    return true
+                }
+            }
+            return false
+        } else {
+            return strings.contains(strings.to_lower(text, context.temp_allocator), strings.to_lower(pattern, context.temp_allocator))
+        }
+    }
+
+    scan_tsv_index :: proc(path: string, is_cask: bool, pkg_names: []string, flags_desc: bool, matched_formulae: ^[dynamic]api.Formula_Search_Result, matched_casks: ^[dynamic]api.Cask_Search_Result) {
+        if !os.is_file(path) {
+            return
+        }
+        data, err := os.read_entire_file(path, context.temp_allocator)
+        if err != nil {
+            return
+        }
+        text := string(data)
+        
+        start := 0
+        for start < len(text) {
+            end := start
+            for end < len(text) && text[end] != '\n' {
+                end += 1
+            }
+            if end > start {
+                line := text[start:end]
+                tab1 := strings.index_byte(line, '\t')
+                if tab1 > 0 {
+                    name := line[:tab1]
+                    rest := line[tab1+1:]
+                    tab2 := strings.index_byte(rest, '\t')
+                    desc, version: string
+                    if tab2 >= 0 {
+                        desc = rest[:tab2]
+                        rest2 := rest[tab2+1:]
+                        tab3 := strings.index_byte(rest2, '\t')
+                        if tab3 >= 0 {
+                            version = rest2[:tab3]
+                        } else {
+                            version = rest2
+                        }
+                    } else {
+                        desc = rest
+                    }
+
+                    for query in pkg_names {
+                        is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
+                        
+                        match := false
+                        if flags_desc {
+                            match = match_query(name, query, is_regex) || match_query(desc, query, is_regex)
+                        } else {
+                            match = match_query(name, query, is_regex)
+                        }
+
+                        if match {
+                            if is_cask {
+                                append(matched_casks, api.Cask_Search_Result{
+                                    token = strings.clone(name, context.temp_allocator),
+                                    name = strings.clone(name, context.temp_allocator),
+                                    desc = strings.clone(desc, context.temp_allocator),
+                                    version = strings.clone(version, context.temp_allocator),
+                                })
+                            } else {
+                                append(matched_formulae, api.Formula_Search_Result{
+                                    name = strings.clone(name, context.temp_allocator),
+                                    desc = strings.clone(desc, context.temp_allocator),
+                                    version = strings.clone(version, context.temp_allocator),
+                                })
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+            start = end + 1
+        }
+    }
+
+    scan_registry_json :: proc(matched_formulae: ^[dynamic]api.Formula_Search_Result, matched_casks: ^[dynamic]api.Cask_Search_Result, pkg_names: []string, flags_desc, formula_only, cask_only: bool) {
+        reg_path := api.get_registry_path()
+        if !os.is_file(reg_path) {
+            return
+        }
+        data, err := os.read_entire_file(reg_path, context.temp_allocator)
+        if err != nil {
+            return
+        }
+        
+        json_val, parse_err := json.parse(data, allocator = context.temp_allocator)
+        if parse_err != nil {
+            return
+        }
+
+        root_obj, ok := json_val.(json.Object)
+        if !ok {
+            return
+        }
+
+        records_val, ok2 := root_obj["records"]
+        if !ok2 {
+            return
+        }
+        records_arr, ok3 := records_val.(json.Array)
+        if !ok3 {
+            return
+        }
+
+        for rec_item in records_arr {
+            rec_obj, ok4 := rec_item.(json.Object)
+            if !ok4 {
+                continue
+            }
+
+            kind := ""
+            if kind_val, ok5 := rec_obj["kind"]; ok5 {
+                if ks, ok6 := kind_val.(json.String); ok6 {
+                    kind = string(ks)
+                }
+            }
+
+            is_cask := (kind == "cask")
+            if is_cask && formula_only do continue
+            if !is_cask && cask_only do continue
+
+            token := ""
+            if tok_val, ok5 := rec_obj["token"]; ok5 {
+                if ts, ok6 := tok_val.(json.String); ok6 {
+                    token = string(ts)
+                }
+            }
+            name := ""
+            if name_val, ok5 := rec_obj["name"]; ok5 {
+                if ns, ok6 := name_val.(json.String); ok6 {
+                    name = string(ns)
+                }
+            }
+            if token == "" && name != "" {
+                token = name
+            }
+
+            desc := ""
+            if desc_val, ok5 := rec_obj["desc"]; ok5 {
+                if ds, ok6 := desc_val.(json.String); ok6 {
+                    desc = string(ds)
+                }
+            }
+
+            version := ""
+            if res_val, ok5 := rec_obj["resolved"]; ok5 {
+                if res_obj, ok6 := res_val.(json.Object); ok6 {
+                    if ver_val, ok7 := res_obj["version"]; ok7 {
+                        if vs, ok8 := ver_val.(json.String); ok8 {
+                            version = string(vs)
+                        }
+                    }
+                }
+            }
+
+            for query in pkg_names {
+                is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
+                
+                match := false
+                if flags_desc {
+                    match = match_query(token, query, is_regex) || match_query(name, query, is_regex) || match_query(desc, query, is_regex)
+                } else {
+                    match = match_query(token, query, is_regex) || match_query(name, query, is_regex)
+                }
+
+                if match {
+                    if is_cask {
+                        exists := false
+                        for c in matched_casks^ {
+                            if c.token == token {
+                                exists = true
+                                break
+                            }
+                        }
+                        if !exists {
+                            append(matched_casks, api.Cask_Search_Result{
+                                token = strings.clone(token, context.temp_allocator),
+                                name = strings.clone(name, context.temp_allocator),
+                                desc = strings.clone(desc, context.temp_allocator),
+                                version = strings.clone(version, context.temp_allocator),
+                            })
+                        }
+                    } else {
+                        exists := false
+                        for f in matched_formulae^ {
+                            if f.name == token {
+                                exists = true
+                                break
+                            }
+                        }
+                        if !exists {
+                            append(matched_formulae, api.Formula_Search_Result{
+                                name = strings.clone(token, context.temp_allocator),
+                                desc = strings.clone(desc, context.temp_allocator),
+                                version = strings.clone(version, context.temp_allocator),
+                            })
+                        }
+                    }
+                    break
+                }
+            }
+        }
+    }
+
+    // Ensure index files exist
+    if !os.is_file(api.FORMULA_SEARCH_INDEX) {
+        api.build_formula_search_index()
+    }
+    if !os.is_file(api.CASK_SEARCH_INDEX) {
+        api.build_cask_search_index()
+    }
+
+    matched_formulae := make([dynamic]api.Formula_Search_Result, context.temp_allocator)
+    matched_casks := make([dynamic]api.Cask_Search_Result, context.temp_allocator)
+
+    if !flags.cask_only {
+        scan_tsv_index(api.FORMULA_SEARCH_INDEX, false, pkg_names[:], flags.desc, &matched_formulae, &matched_casks)
+    }
+    if !flags.formula_only {
+        scan_tsv_index(api.CASK_SEARCH_INDEX, true, pkg_names[:], flags.desc, &matched_formulae, &matched_casks)
+    }
+
+    scan_registry_json(&matched_formulae, &matched_casks, pkg_names[:], flags.desc, flags.formula_only, flags.cask_only)
+
+    if !flags.cask_only {
+        for query in pkg_names {
+            query_lower := strings.to_lower(query, context.temp_allocator)
+            // Strip slashes if it's flanked for regex, otherwise just search normally
+            if strings.has_prefix(query_lower, "/") && strings.has_suffix(query_lower, "/") && len(query_lower) >= 2 {
+                query_lower = query_lower[1:len(query_lower)-1]
+            }
+            api.append_tap_formulae_matches(&matched_formulae, query_lower, 100)
+        }
+    }
+
+    if len(matched_formulae) > 0 {
+        fmt.println("Formulae:")
+        for r in matched_formulae {
+            if r.version != "" {
+                fmt.printf("  %s (%s)\n    %s\n", r.name, r.version, r.desc)
+            } else {
+                fmt.printf("  %s\n    %s\n", r.name, r.desc)
+            }
+        }
+    }
+
+    if len(matched_casks) > 0 {
+        if len(matched_formulae) > 0 {
+            fmt.println()
+        }
+        fmt.println("Casks:")
+        for r in matched_casks {
+            if r.version != "" {
+                fmt.printf("  %s (%s)\n    %s\n", r.token, r.version, r.desc)
+            } else {
+                fmt.printf("  %s\n    %s\n", r.token, r.desc)
+            }
+        }
+    }
 }
 
 run_gc :: proc(args: []string) {

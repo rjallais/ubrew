@@ -1,22 +1,29 @@
 package formula
 
 Formula :: struct {
-    name:          string,
-    desc:          string,
-    homepage:      string,
-    version:       string,
-    bottle_url:    string,
-    bottle_sha256: string,
-    source_url:    string,
-    source_sha256: string,
-    dependencies:  []string,
+    name:                     string,
+    desc:                     string,
+    homepage:                 string,
+    version:                  string,
+    bottle_url:               string,
+    bottle_sha256:            string,
+    source_url:               string,
+    source_sha256:            string,
+    dependencies:             []string,
+    build_dependencies:       []string,
+    test_dependencies:        []string,
+    optional_dependencies:    []string,
+    recommended_dependencies: []string,
+    requirements:             []string,
+    uses_from_macos:          []string,
     // binaries are the names that `bin.install "..."` would create in
     // the keg's bin/ directory. Used by 3rd-party tap formulae that
     // build from source.
-    binaries:      []string,
+    binaries:                 []string,
     // tap is the user/repo of the tap this formula came from, or "" for
     // the canonical Homebrew formula registry. Used for cache invalidation
     // and dependency display.
-    tap:           string,
-    aliases:       []string,
+    tap:                      string,
+    aliases:                  []string,
+    keg_only:                 bool,
 }

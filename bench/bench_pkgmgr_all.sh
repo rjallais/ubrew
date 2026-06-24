@@ -120,6 +120,9 @@ case "$SCENARIO" in
   install-cold)
     echo "=== install-cold: each run wipes store + Cellar (no API cache reset) ==="
     warmup
+    # Note: This outer loop controls the visual rounds/grouping of the benchmark execution
+    # to show run-to-run variation. The $RUNS variable controls the sample count used by
+    # the bench function internally to compute each tool's median latency.
     for i in 1 2 3; do
       echo "--- run $i ---"
       reset_ubrew ; bench "ubrew" "$UBREW" install "$PKG"
@@ -133,6 +136,9 @@ case "$SCENARIO" in
   install-warm)
     echo "=== install-warm: store + Cellar cache hit ==="
     warmup
+    # Note: This outer loop controls the visual rounds/grouping of the benchmark execution
+    # to show run-to-run variation. The $RUNS variable controls the sample count used by
+    # the bench function internally to compute each tool's median latency.
     for i in 1 2 3; do
       echo "--- run $i ---"
       reset_ubrew ; bench "ubrew" "$UBREW" install "$PKG"

@@ -1267,6 +1267,25 @@ contains_string_in_json_array :: proc(obj, key, target_lower: string) -> bool {
     return false
 }
 
+extract_string_array :: proc(obj: json.Object, key: string) -> []string {
+    if val, ok := obj[key]; ok {
+        if arr, ok2 := val.(json.Array); ok2 {
+            res := make([dynamic]string, context.allocator)
+            for item in arr {
+                if item_str, ok3 := item.(json.String); ok3 {
+                    append(&res, strings.clone(item_str))
+                } else if item_obj, ok4 := item.(json.Object); ok4 {
+                    for k in item_obj {
+                        append(&res, strings.clone(k))
+                    }
+                }
+            }
+            return res[:]
+        }
+    }
+    return nil
+}
+
 fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
 
@@ -1376,6 +1395,34 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
         }
     }
 
+    f.build_dependencies = extract_string_array(root_obj, "build_dependencies")
+    f.test_dependencies = extract_string_array(root_obj, "test_dependencies")
+    f.optional_dependencies = extract_string_array(root_obj, "optional_dependencies")
+    f.recommended_dependencies = extract_string_array(root_obj, "recommended_dependencies")
+    f.uses_from_macos = extract_string_array(root_obj, "uses_from_macos")
+
+    if reqs_val, ok := root_obj["requirements"]; ok {
+        if reqs_arr, ok2 := reqs_val.(json.Array); ok2 {
+            reqs := make([dynamic]string, context.allocator)
+            for req in reqs_arr {
+                if req_obj, ok3 := req.(json.Object); ok3 {
+                    if name_val, ok4 := req_obj["name"]; ok4 {
+                        if name_str, ok5 := name_val.(json.String); ok5 {
+                            append(&reqs, strings.clone(name_str))
+                        }
+                    }
+                }
+            }
+            f.requirements = reqs[:]
+        }
+    }
+
+    if keg_val, ok := root_obj["keg_only"]; ok {
+        if kb, ok2 := keg_val.(json.Boolean); ok2 {
+            f.keg_only = bool(kb)
+        }
+    }
+
     return f, nil
 }
 
@@ -1457,6 +1504,30 @@ destroy_formula :: proc(f: formula.Formula) {
         delete(dep)
     }
     delete(f.dependencies)
+    for dep in f.build_dependencies {
+        delete(dep)
+    }
+    delete(f.build_dependencies)
+    for dep in f.test_dependencies {
+        delete(dep)
+    }
+    delete(f.test_dependencies)
+    for dep in f.optional_dependencies {
+        delete(dep)
+    }
+    delete(f.optional_dependencies)
+    for dep in f.recommended_dependencies {
+        delete(dep)
+    }
+    delete(f.recommended_dependencies)
+    for dep in f.requirements {
+        delete(dep)
+    }
+    delete(f.requirements)
+    for dep in f.uses_from_macos {
+        delete(dep)
+    }
+    delete(f.uses_from_macos)
     for b in f.binaries {
         delete(b)
     }

@@ -16,10 +16,12 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Set up mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@508c7e3aa0e95fb224d0bc7901041930d47fc7e2 # v2
 
       - name: Build ubrew
         run: odin build src -out:ubrew -o:speed
@@ -36,8 +38,8 @@ jobs:
           sudo chown -R $USER /opt/ubrew
           sudo mkdir -p /opt
           sudo ln -sfn /opt/ubrew /opt/nanobrew
-          ./ubrew tap trust ublue-os/tap
-          ./ubrew tap trust justrach/nanobrew
+          ./ubrew tap trust ublue-os/tap || exit 1
+          ./ubrew tap trust justrach/nanobrew || exit 1
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
           echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
 
