@@ -21,7 +21,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up mise
-        uses: jdx/mise-action@508c7e3aa0e95fb224d0bc7901041930d47fc7e2 # v2
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Build ubrew
         run: odin build src -out:ubrew -o:speed
