@@ -324,7 +324,8 @@ PIN_LIST1=$("$NB" pin 2>&1) || true
 if grep -q "tree" <<<"$PIN_LIST1"; then
   pass "pin tree works (tree is listed as pinned)"
 else
-  fail "pin tree failed or tree not listed in pins. pin tree output: $PIN_OUT1, pin list: $PIN_LIST1"
+  CELLAR_CONTENTS=$(ls -la /opt/ubrew/prefix/Cellar 2>&1) || true
+  fail "pin tree failed or tree not listed in pins. pin tree output: $PIN_OUT1, pin list: $PIN_LIST1, Cellar: $CELLAR_CONTENTS"
 fi
 
 UNPIN_OUT=$("$NB" unpin --formula tree 2>&1) || true
