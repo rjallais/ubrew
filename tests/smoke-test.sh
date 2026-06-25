@@ -31,10 +31,11 @@ sudo -n "$NB" tap add justrach/nanobrew https://github.com/justrach/nanobrew 2>/
 
 echo "--- Test: install tree ---"
 "$NB" install tree >/dev/null 2>&1 || true
-if tree --version 2>&1 | grep -qi "tree"; then
+TREE_OUT=$(tree --version 2>&1) || true
+if grep -qi "tree" <<<"$TREE_OUT"; then
   pass "tree --version works"
 else
-  fail "tree --version did not produce expected output"
+  fail "tree --version did not produce expected output. Output was: $TREE_OUT"
 fi
 
 echo ""
@@ -50,10 +51,11 @@ echo ""
 # --- Test: install lua ---
 "$NB" install readline >/dev/null 2>&1 || true
 "$NB" install lua >/dev/null 2>&1 || true
-if lua -v 2>&1 | grep -qi "lua"; then
+LUA_OUT=$(lua -v 2>&1) || true
+if grep -qi "lua" <<<"$LUA_OUT"; then
   pass "lua -v works"
 else
-  fail "lua -v did not produce expected output"
+  fail "lua -v did not produce expected output. Output was: $LUA_OUT"
 fi
 
 # ===================================================================
