@@ -2899,6 +2899,14 @@ run_install :: proc(args: []string) {
 					append(&next_pending, dep)
 				}
 			}
+			when ODIN_OS == .Linux {
+				for dep in stored_f.uses_from_macos {
+					if !visited[dep] {
+						visited[dep] = true
+						append(&next_pending, dep)
+					}
+				}
+			}
 		}
 		delete(pending)
 		pending = next_pending
@@ -2936,6 +2944,11 @@ run_install :: proc(args: []string) {
 		if f, ok := resolved_formulae[canonical]; ok {
 			for dep in f.dependencies {
 				visit(dep, resolved_formulae, temp_visited, perm_visited, install_order)
+			}
+			when ODIN_OS == .Linux {
+				for dep in f.uses_from_macos {
+					visit(dep, resolved_formulae, temp_visited, perm_visited, install_order)
+				}
 			}
 		}
 		temp_visited[name] = false

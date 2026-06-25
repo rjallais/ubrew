@@ -151,6 +151,32 @@ is_elf_file :: proc(path: string) -> bool {
 	return buf[0] == 0x7f && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F'
 }
 
+is_macho_file :: proc(path: string) -> bool {
+	f, err := os.open(path, os.O_RDONLY)
+	if err != nil {
+		return false
+	}
+	defer os.close(f)
+
+	buf: [4]u8
+	n, read_err := os.read(f, buf[:])
+	if read_err != nil || n != 4 {
+		return false
+	}
+
+	magic := (u32(buf[0]) << 24) | (u32(buf[1]) << 16) | (u32(buf[2]) << 8) | u32(buf[3])
+	magic_le := (u32(buf[3]) << 24) | (u32(buf[2]) << 16) | (u32(buf[1]) << 8) | u32(buf[0])
+
+	// 0xFEEDFACE, 0xFEEDFACF, 0xCAFEBABE
+	if magic == 0xFEEDFACE || magic == 0xFEEDFACF || magic == 0xCAFEBABE {
+		return true
+	}
+	if magic_le == 0xFEEDFACE || magic_le == 0xFEEDFACF || magic_le == 0xCAFEBABE {
+		return true
+	}
+	return false
+}
+
 // ELF constant for program header type "interpreter request".
 PT_INTERP :: 3
 
@@ -322,6 +348,8 @@ relocate_single_file :: proc(path: string) {
 		} else if rpath_truncated {
 			fmt.eprintf("Warning: rpath for %s exceeded buffer; skipping rpath rewrite\n", path)
 		}
+	} else if is_macho_file(path) {
+		// Skip Mach-O files to avoid byte shifting / binary corruption
 	} else {
 		data, read_err := os.read_entire_file(path, context.temp_allocator)
 		if read_err == nil && len(data) > 0 {
