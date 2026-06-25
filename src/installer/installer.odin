@@ -24,15 +24,36 @@ when ODIN_ARCH == .amd64 {
 
 // is_safe_binary_name returns true if the name contains only characters
 // that are safe to interpolate into a shell command (alphanumeric, '-',
-// '_', '.', '/').
+// '_', '.'). Rejects path components and separators.
 is_safe_binary_name :: proc(name: string) -> bool {
+	if len(name) == 0 || strings.contains(name, "/") || strings.contains(name, "\\") || name == "." || name == ".." {
+		return false
+	}
 	for c in name {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			 (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/') {
+			 (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
 			return false
 		}
 	}
-	return len(name) > 0
+	return true
+}
+
+is_safe_to_remove_dir :: proc(path: string) -> bool {
+	home := os.get_env("HOME", context.temp_allocator)
+	if path == "/" || path == "/opt" || path == "/usr" || path == "/usr/local" || path == "/home" || path == home {
+		return false
+	}
+	if home != "" {
+		if path == fmt.tprintf("%s/Desktop", home) ||
+		   path == fmt.tprintf("%s/Downloads", home) ||
+		   path == fmt.tprintf("%s/Documents", home) ||
+		   path == fmt.tprintf("%s/.config", home) ||
+		   path == fmt.tprintf("%s/.local", home) ||
+		   path == fmt.tprintf("%s/.local/share", home) {
+			return false
+		}
+	}
+	return true
 }
 
 UBREW_ROOT :: "/opt/ubrew"
@@ -388,98 +409,102 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
-
-	if store.store_has_relocated_entry(sha) {
-		fmt.printf("==> Found cached store entry for %s, materializing via COW...\n", sha[:12])
-		_ = store.store_ensure_dir()
-		if store.store_materialize_from_relocated(sha, f.name, f.version) {
-			fmt.printf("==> Materialized %s from store via COW\n", f.name)
-			return true
-		}
-		fmt.println("==> COW materialization failed, falling back to full install")
-	}
-
 	if !ensure_dir(CACHE_DIR) || !ensure_dir(PREFIX + "/Cellar") || !ensure_dir(PREFIX + "/bin") {
 		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew is writable by your user.")
 		return false
 	}
 
-	dl_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", CACHE_DIR, f.name, f.version)
-	already_downloaded := os.is_file(dl_path) && sha256_matches(dl_path, f.bottle_sha256)
-
-	if !already_downloaded {
-		fmt.printf("==> Downloading: %s\n", f.bottle_url)
-
-		if !strings.has_prefix(f.bottle_url, "http://") && !strings.has_prefix(f.bottle_url, "https://") {
-			fmt.println("Error: Invalid bottle URL scheme.")
-			return false
-		}
-
-		dl_args := []string{"curl", "-#", "-H", "Authorization: Bearer QQ==", "-L", f.bottle_url, "-o", dl_path}
-		if !platform.exec_cmd("curl", dl_args) {
-			fmt.println("Error: Download failed.")
-			return false
-		}
-	} else {
-		fmt.printf("==> Already downloaded: %s\n", dl_path)
-	}
-	defer os.remove(dl_path)
-
-	if !sha256_matches(dl_path, f.bottle_sha256) {
-		fmt.println("Error: SHA256 verification failed for bottle.")
-		return false
-	}
-
-	if !os.is_dir(prefix) {
-		fmt.printf("==> Creating prefix: %s\n", prefix)
-	}
-	if !ensure_dir(prefix) {
-		return false
-	}
-
+	sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
 	cellar_dir := PREFIX + "/Cellar"
 	keg_dir := fmt.tprintf("%s/%s/%s", cellar_dir, f.name, f.version)
-	formula_cellar_dir := fmt.tprintf("%s/%s", cellar_dir, f.name)
-	_ = os.remove_all(formula_cellar_dir)
 
-	fmt.printf("==> Unpacking to: %s\n", cellar_dir)
-	ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
-	if platform.exec_cmd("tar", ex_args) {
-		if fd, fd_err := os.open(formula_cellar_dir); fd_err == nil {
-			defer os.close(fd)
-			if infos, read_err := os.read_directory_by_path(formula_cellar_dir, -1, context.temp_allocator); read_err == nil {
-				for info in infos {
-					if info.type == .Directory {
-						if info.name != f.version {
-							src_path := info.fullpath
-							dst_path := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
-							if rename_err := os.rename(src_path, dst_path); rename_err != nil {
-								fmt.printf("Warning: Failed to rename unpacked directory from %s to %s: %v\n", info.name, f.version, rename_err)
+	materialized := false
+	if store.store_has_relocated_entry(sha) {
+		fmt.printf("==> Found cached store entry for %s, materializing via COW...\n", sha[:12])
+		_ = store.store_ensure_dir()
+		if store.store_materialize_from_relocated(sha, f.name, f.version) {
+			fmt.printf("==> Materialized %s from store via COW\n", f.name)
+			materialized = true
+		} else {
+			fmt.println("==> COW materialization failed, falling back to full install")
+		}
+	}
+
+	if !materialized {
+		dl_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", CACHE_DIR, f.name, f.version)
+		already_downloaded := os.is_file(dl_path) && sha256_matches(dl_path, f.bottle_sha256)
+
+		if !already_downloaded {
+			fmt.printf("==> Downloading: %s\n", f.bottle_url)
+
+			if !strings.has_prefix(f.bottle_url, "http://") && !strings.has_prefix(f.bottle_url, "https://") {
+				fmt.println("Error: Invalid bottle URL scheme.")
+				return false
+			}
+
+			dl_args := []string{"curl", "-#", "-H", "Authorization: Bearer QQ==", "-L", f.bottle_url, "-o", dl_path}
+			if !platform.exec_cmd("curl", dl_args) {
+				fmt.println("Error: Download failed.")
+				return false
+			}
+		} else {
+			fmt.printf("==> Already downloaded: %s\n", dl_path)
+		}
+		defer os.remove(dl_path)
+
+		if !sha256_matches(dl_path, f.bottle_sha256) {
+			fmt.println("Error: SHA256 verification failed for bottle.")
+			return false
+		}
+
+		if !os.is_dir(prefix) {
+			fmt.printf("==> Creating prefix: %s\n", prefix)
+		}
+		if !ensure_dir(prefix) {
+			return false
+		}
+
+		formula_cellar_dir := fmt.tprintf("%s/%s", cellar_dir, f.name)
+		_ = os.remove_all(formula_cellar_dir)
+
+		fmt.printf("==> Unpacking to: %s\n", cellar_dir)
+		ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
+		if platform.exec_cmd("tar", ex_args) {
+			if fd, fd_err := os.open(formula_cellar_dir); fd_err == nil {
+				defer os.close(fd)
+				if infos, read_err := os.read_directory_by_path(formula_cellar_dir, -1, context.temp_allocator); read_err == nil {
+					for info in infos {
+						if info.type == .Directory {
+							if info.name != f.version {
+								src_path := info.fullpath
+								dst_path := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
+								if rename_err := os.rename(src_path, dst_path); rename_err != nil {
+									fmt.printf("Warning: Failed to rename unpacked directory from %s to %s: %v\n", info.name, f.version, rename_err)
+								}
 							}
+							break
 						}
-						break
 					}
 				}
 			}
+		} else {
+			if !ensure_dir(keg_dir) {
+				return false
+			}
+			ex_fallback_args := []string{"tar", "-xzf", dl_path, "--strip-components=2", "-C", keg_dir}
+			if !platform.exec_cmd("tar", ex_fallback_args) {
+				fmt.println("Error: Extraction failed.")
+				return false
+			}
 		}
-	} else {
-		if !ensure_dir(keg_dir) {
-			return false
-		}
-		ex_fallback_args := []string{"tar", "-xzf", dl_path, "--strip-components=2", "-C", keg_dir}
-		if !platform.exec_cmd("tar", ex_fallback_args) {
-			fmt.println("Error: Extraction failed.")
-			return false
-		}
-	}
 
-	relocated_bin_count := 0
-	relocate_keg_binaries(keg_dir, &relocated_bin_count)
-	if relocated_bin_count > 0 {
-		fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
+		relocated_bin_count := 0
+		relocate_keg_binaries(keg_dir, &relocated_bin_count)
+		if relocated_bin_count > 0 {
+			fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
+		}
+		relocate_keg_placeholders(keg_dir)
 	}
-	relocate_keg_placeholders(keg_dir)
 
 	bin_dir := fmt.tprintf("%s/bin", keg_dir)
 	if os.is_dir(bin_dir) {
@@ -510,13 +535,6 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		}
 	}
 
-	if store.is_valid_sha256(sha) {
-		_ = store.store_ensure_dir()
-		if store.store_save_relocated_entry(sha, f.name, f.version) {
-			fmt.printf("==> Saved store entry %s via COW\n", sha[:12])
-		}
-	}
-
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)
 	_ = os.make_directory_all(opt_dir, os.perm(0o755))
@@ -544,6 +562,13 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		receipt.runtime_dependencies = deps[:]
 	}
 	_ = write_install_receipt(keg_dir, receipt)
+
+	if !materialized && store.is_valid_sha256(sha) {
+		_ = store.store_ensure_dir()
+		if store.store_save_relocated_entry(sha, f.name, f.version) {
+			fmt.printf("==> Saved store entry %s via COW\n", sha[:12])
+		}
+	}
 
 	fmt.printf("==> Successful installation of %s into %s!\n", f.name, keg_dir)
 	return true
@@ -852,7 +877,7 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	// Relocate patched binary if patchelf exists
 	binary_path := fmt.tprintf("%s/bin/%s", keg_dir, f.name)
-	if os.is_file(binary_path) {
+	if os.is_file(binary_path) && elf_has_interp(binary_path) {
 		chmod_args := []string{"chmod", "+w", binary_path}
 		platform.exec_cmd("chmod", chmod_args)
 
@@ -1045,9 +1070,8 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 		buf: [512]u8
 		cached := store.blob_path(sha256, buf[:])
 		if os.is_file(cached) {
-			cmd_cp := fmt.tprintf("cp '%s' '%s'", cached, dl_path)
-			cmd_cp_cstr := strings.clone_to_cstring(cmd_cp, context.temp_allocator)
-			if libc.system(cmd_cp_cstr) == 0 {
+			cp_args := []string{"cp", cached, dl_path}
+			if platform.exec_cmd("cp", cp_args) {
 				fmt.printf("==> Using cached blob for %s\n", sha256[:12])
 				return true
 			}
@@ -1061,9 +1085,8 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 			buf: [512]u8
 			cached := store.blob_path(sha256, buf[:])
 			if !os.is_file(cached) {
-				cmd_cache := fmt.tprintf("cp '%s' '%s'", dl_path, cached)
-				cmd_cache_cstr := strings.clone_to_cstring(cmd_cache, context.temp_allocator)
-				if libc.system(cmd_cache_cstr) == 0 {
+				cp_args := []string{"cp", dl_path, cached}
+				if platform.exec_cmd("cp", cp_args) {
 					fmt.printf("==> Cached blob %s\n", sha256[:12])
 				}
 			}
@@ -1072,9 +1095,8 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 	}
 
 	fmt.printf("==> Downloading: %s\n", url)
-	cmd_dl := fmt.tprintf("curl -sfL \"%s\" -o \"%s\"", url, dl_path)
-	cmd_dl_cstr := strings.clone_to_cstring(cmd_dl, context.temp_allocator)
-	if libc.system(cmd_dl_cstr) != 0 {
+	dl_args := []string{"curl", "-sfL", url, "-o", dl_path}
+	if !platform.exec_cmd("curl", dl_args) {
 		fmt.println("Error: Download failed.")
 		return false
 	}
@@ -1088,9 +1110,8 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 		_ = store.blob_ensure_dir()
 		buf: [512]u8
 		cached := store.blob_path(sha256, buf[:])
-		cmd_cache := fmt.tprintf("cp '%s' '%s'", dl_path, cached)
-		cmd_cache_cstr := strings.clone_to_cstring(cmd_cache, context.temp_allocator)
-		if libc.system(cmd_cache_cstr) == 0 {
+		cp_args := []string{"cp", dl_path, cached}
+		if platform.exec_cmd("cp", cp_args) {
 			fmt.printf("==> Cached blob %s\n", sha256[:12])
 		}
 	}
@@ -2073,7 +2094,9 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 			target_resolved := resolve_arch_placeholders(ga.target)
 			resolved_target := expand_home(target_resolved, context.temp_allocator)
 			if os.is_dir(resolved_target) {
-				_ = os.remove_all(resolved_target)
+				if is_safe_to_remove_dir(resolved_target) {
+					_ = os.remove_all(resolved_target)
+				}
 			} else {
 				_ = os.remove(resolved_target)
 			}

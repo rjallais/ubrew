@@ -2,7 +2,8 @@
 set -euo pipefail
 
 RUNS=${RUNS:-3}
-PKG=${PKG:-tree}
+scenario=${1:-install}
+PKG=${2:-${PKG:-tree}}
 
 ms() { echo $(( ($2 - $1) / 1000000 )); }
 median() { echo "$@" | tr ' ' '\n' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
@@ -53,8 +54,6 @@ bench() {
   done
   echo "$(median "${t[@]}")"
 }
-
-scenario=${1:-install}
 
 printf "%-12s %-10s %-10s %-10s\n" "scenario" "ubrew" "nb" "brew"
 printf "%-12s %-10s %-10s %-10s\n" "--------" "-----" "--" "----"

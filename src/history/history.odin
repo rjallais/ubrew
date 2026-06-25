@@ -129,7 +129,7 @@ load :: proc(allocator := context.allocator) -> (names: [dynamic]string, entries
 		for item in pkg_arr {
 			item_obj, is_obj3 := item.(json.Object)
 			if !is_obj3 { continue }
-			e := Entry{}
+			e := Entry{from_revision = NO_FROM_REVISION}
 			if v, ok := item_obj["version"]; ok {
 				if s, ok2 := v.(json.String); ok2 { e.version = strings.clone(string(s), allocator) }
 			}
@@ -228,7 +228,7 @@ record :: proc(names: ^[dynamic]string, entries_map: ^map[string][dynamic]Entry,
 		entries := make([dynamic]Entry, allocator)
 		append(&entries, entry)
 		cloned_name := strings.clone(name, allocator)
-		entries_map[cloned_name] = entries
+		entries_map^[cloned_name] = entries
 		append(names, cloned_name)
 	}
 }

@@ -1,5 +1,8 @@
 # ignore compiled ubrew binaries
 ubrew
+ubrew_portable
+ubrew_prod
+ubrew_dbg
 /tmp/
 
 # local-only SSH keys (never commit)

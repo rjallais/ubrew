@@ -86,9 +86,19 @@ store_materialize_from_relocated :: proc(sha256: string, name: string, version: 
 	parent_result := fmt.bprintf(parent_buf[:], "%s/%s", CELLAR_DIR, name)
 	os.make_directory_all(parent_result, os.perm(0o755))
 
+	tmp_buf: [512]u8
+	tmp_result := fmt.bprintf(tmp_buf[:], "%s/.%s.tmp", CELLAR_DIR, sha256)
+	_ = os.remove_all(tmp_result)
+	if !platform.cow_copy(src_result, tmp_result) {
+		_ = os.remove_all(tmp_result)
+		return false
+	}
 	if os.is_dir(dst_result) {
 		os.remove_all(dst_result)
 	}
-
-	return platform.cow_copy(src_result, dst_result)
+	if os.rename(tmp_result, dst_result) != nil {
+		_ = os.remove_all(tmp_result)
+		return false
+	}
+	return true
 }
