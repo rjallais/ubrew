@@ -63,6 +63,7 @@ when ODIN_OS == .Linux {
 		dst_fd := c.int(os.fd(dst_f))
 		result := ioctl(dst_fd, FICLONE, src_fd)
 		if result == 0 {
+			posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
 			return true
 		}
 
@@ -166,6 +167,9 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8, suppress_stderr
 
 		status: c.int
 		posix.waitpid(pid, &status, nil)
+		if status != 0 {
+			return "", false
+		}
 
 		return strings.trim_space(string(buf[:total])), truncated
 	}
