@@ -54,7 +54,7 @@ depends = ["build"]
 
 [tasks.clean]
 description = "Clean up compiler build artifacts"
-run = "rm -f ubrew ubrew_portable ubrew_dbg"
+run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg"
 
 [tasks.check]
 description = "Type check all Odin source files"
