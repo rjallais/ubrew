@@ -35,6 +35,16 @@ bench() {
 
   local t=()
   for i in $(seq 1 "$RUNS"); do
+    if [ "$scenario" = "install" ]; then
+      if [ "$label" = "ubrew" ]; then
+        rm -rf /opt/ubrew/prefix/Cellar/"$PKG" 2>/dev/null || true
+      elif [ "$label" = "nb" ]; then
+        rm -rf /opt/nanobrew/prefix/Cellar/"$PKG" 2>/dev/null || true
+      elif [ "$label" = "brew" ] && [ -n "$BREW_BIN" ]; then
+        rm -rf "$("$BREW_BIN" --prefix)"/Cellar/"$PKG" 2>/dev/null || true
+      fi
+    fi
+
     local t1 t2
     t1=$(date +%s%N)
     "${cmd[@]}" >/dev/null 2>&1
@@ -51,14 +61,6 @@ printf "%-12s %-10s %-10s %-10s\n" "--------" "-----" "--" "----"
 
 case "$scenario" in
   install)
-    # Best-effort cleanup to make installs comparable.
-    # (We do not assume sudo or that a given tool is installed.)
-    rm -rf /opt/ubrew/prefix/Cellar/"$PKG" 2>/dev/null || true
-    rm -rf /opt/nanobrew/prefix/Cellar/"$PKG" 2>/dev/null || true
-    if [ -n "$BREW_BIN" ]; then
-      rm -rf "$("$BREW_BIN" --prefix)"/Cellar/"$PKG" 2>/dev/null || true
-    fi
-
     u_ms=$(bench ubrew "$UBREW_BIN" install "$PKG")
     nb_ms="-"
     brew_ms="-"
