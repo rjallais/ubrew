@@ -313,6 +313,26 @@ else
   fail "doctor output missing 'Checking ubrew installation'"
   echo "      output: $(echo "$DOCTOR_OUT" | head -3)"
 fi
+
+# ===================================================================
+# Pin / Unpin Subcommands
+# ===================================================================
+echo ""
+echo "--- Test: pin and unpin ---"
+"$NB" pin tree >/dev/null 2>&1 || true
+if "$NB" pin 2>&1 | grep -q "tree"; then
+  pass "pin tree works (tree is listed as pinned)"
+else
+  fail "pin tree failed or tree not listed in pins"
+fi
+
+"$NB" unpin --formula tree >/dev/null 2>&1 || true
+if ! "$NB" pin 2>&1 | grep -q "tree"; then
+  pass "unpin tree works (tree is no longer listed as pinned)"
+else
+  fail "unpin tree failed or tree still listed in pins"
+fi
+
 # ===================================================================
 # Regression: tar subprocess fallback for unsupported headers (#221)
 # perl's bottle uses GNU long-name / pax-extended headers that Zig's

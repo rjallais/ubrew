@@ -5773,8 +5773,13 @@ run_pin :: proc(args: []string) {
         }
 
         // Verify if package is installed based on flags
-        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name))
+        short_name := name
+        if idx := strings.last_index(name, "/"); idx >= 0 {
+            short_name = name[idx+1:]
+        }
         flat_name := installer.flatten_token(name)
+
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short_name))
         is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
 
         valid_install := false
@@ -5798,7 +5803,7 @@ run_pin :: proc(args: []string) {
             continue
         }
 
-        target_name := name
+        target_name := short_name
         if is_installed_cask && !is_installed_formula {
             target_name = flat_name
         } else if flags.cask_only {
@@ -5873,8 +5878,13 @@ run_unpin :: proc(args: []string) {
     // Verify all specified packages are installed and valid
     valid_names := make([dynamic]string, context.temp_allocator)
     for name in pkg_names {
-        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name))
+        short_name := name
+        if idx := strings.last_index(name, "/"); idx >= 0 {
+            short_name = name[idx+1:]
+        }
         flat_name := installer.flatten_token(name)
+
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short_name))
         is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
 
         valid_install := false
@@ -5903,8 +5913,12 @@ run_unpin :: proc(args: []string) {
     for p in pins {
         drop := false
         for name in valid_names {
+            short_name := name
+            if idx := strings.last_index(name, "/"); idx >= 0 {
+                short_name = name[idx+1:]
+            }
             flat_name := installer.flatten_token(name)
-            if p == name || p == flat_name {
+            if p == name || p == short_name || p == flat_name {
                 is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, p))
                 is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, p))
 
