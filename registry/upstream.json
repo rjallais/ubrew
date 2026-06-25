@@ -18375,6 +18375,860 @@
       "verification": {
         "sha256": "required"
       }
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/1password-gui-linux",
+      "name": "1Password",
+      "desc": "Password manager that keeps all passwords secure behind one password",
+      "homepage": "https://1password.com/",
+      "resolved": {
+        "version": "8.12.21",
+        "assets": {
+          "linux-x86_64": {
+            "url": "https://downloads.1password.com/linux/tar/stable/x86_64/1password-8.12.21.x64.tar.gz",
+            "sha256": "27088c8b68a8ccfea3592214b605e56bce9a48086e5286fbb27aad51b7973e92"
+          },
+          "linux-arm64": {
+            "url": "https://downloads.1password.com/linux/tar/stable/aarch64/1password-8.12.21.arm64.tar.gz",
+            "sha256": "58f154a8a29f75a77317b06d47d8149b44a562ae19377e9e2027c6b0fc62ac7d",
+            "artifacts": [
+              {
+                "type": "binary",
+                "path": "1password-8.12.21.arm64/1password",
+                "target": "1password"
+              },
+              {
+                "type": "binary",
+                "path": "1password-8.12.21.arm64/op-ssh-sign",
+                "target": "op-ssh-sign"
+              },
+              {
+                "type": "binary",
+                "path": "1password-8.12.21.arm64/1Password-BrowserSupport",
+                "target": "1Password-BrowserSupport"
+              },
+              {
+                "type": "binary",
+                "path": "1password-8.12.21.arm64/1Password-Crash-Handler",
+                "target": "1Password-Crash-Handler"
+              },
+              {
+                "type": "binary",
+                "path": "1password-8.12.21.arm64/1Password-LastPass-Exporter",
+                "target": "1Password-LastPass-Exporter"
+              },
+              {
+                "type": "artifact",
+                "source": "1password-8.12.21.arm64/resources/1password.desktop",
+                "target": "~/.local/share/applications/1password.desktop"
+              },
+              {
+                "type": "artifact",
+                "source": "1password-8.12.21.arm64/resources/icons/hicolor/256x256/apps/1password.png",
+                "target": "~/.local/share/icons/1password.png"
+              },
+              {
+                "type": "artifact",
+                "source": "1password-8.12.21.arm64/com.1password.1Password.policy.tpl",
+                "target": "/opt/ubrew/prefix/etc/polkit-1/actions/com.1password.1Password.policy"
+              },
+              {
+                "type": "artifact",
+                "source": "1password-8.12.21.arm64/resources/custom_allowed_browsers",
+                "target": "/opt/ubrew/prefix/etc/1password/custom_allowed_browsers"
+              }
+            ]
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "binary",
+          "path": "1password-8.12.21.{arch}/1password",
+          "target": "1password"
+        },
+        {
+          "type": "binary",
+          "path": "1password-8.12.21.{arch}/op-ssh-sign",
+          "target": "op-ssh-sign"
+        },
+        {
+          "type": "binary",
+          "path": "1password-8.12.21.{arch}/1Password-BrowserSupport",
+          "target": "1Password-BrowserSupport"
+        },
+        {
+          "type": "binary",
+          "path": "1password-8.12.21.{arch}/1Password-Crash-Handler",
+          "target": "1Password-Crash-Handler"
+        },
+        {
+          "type": "binary",
+          "path": "1password-8.12.21.{arch}/1Password-LastPass-Exporter",
+          "target": "1Password-LastPass-Exporter"
+        },
+        {
+          "type": "artifact",
+          "source": "1password-8.12.21.{arch}/resources/1password.desktop",
+          "target": "~/.local/share/applications/1password.desktop"
+        },
+        {
+          "type": "artifact",
+          "source": "1password-8.12.21.{arch}/resources/icons/hicolor/256x256/apps/1password.png",
+          "target": "~/.local/share/icons/1password.png"
+        },
+        {
+          "type": "artifact",
+          "source": "1password-8.12.21.{arch}/com.1password.1Password.policy.tpl",
+          "target": "/opt/ubrew/prefix/etc/polkit-1/actions/com.1password.1Password.policy"
+        },
+        {
+          "type": "artifact",
+          "source": "1password-8.12.21.{arch}/resources/custom_allowed_browsers",
+          "target": "/opt/ubrew/prefix/etc/1password/custom_allowed_browsers"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-cli-linux",
+      "name": "Google Antigravity CLI",
+      "desc": "Terminal interface for Antigravity agents",
+      "homepage": "https://antigravity.google/product/antigravity-cli"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-ide-linux",
+      "name": "Google Antigravity IDE",
+      "desc": "AI Coding Agent IDE",
+      "homepage": "https://antigravity.google/product/antigravity-ide"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/antigravity-linux",
+      "name": "Google Antigravity",
+      "desc": "Agent orchestration platform",
+      "homepage": "https://antigravity.google/product/antigravity-2"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/asusctl-linux",
+      "name": "asusctl",
+      "desc": "ASUS laptop control CLI and immutable-friendly system daemon payload",
+      "homepage": "https://gitlab.com/asus-linux/asusctl"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/aurora-wallpapers",
+      "name": "aurora-wallpapers",
+      "desc": "Wallpapers for Aurora",
+      "homepage": "https://github.com/ublue-os/artwork",
+      "resolved": {
+        "version": "2026-04-23",
+        "url": "https://github.com/ublue-os/artwork/releases/download/aurora-v2026-04-23/aurora-wallpapers.tar.zstd",
+        "sha256": "fd029232de0bc45f327c394ecd00023fe52d30b376fe19046660c82f6f8bdcd7"
+      },
+      "artifacts": [
+        {
+          "type": "wallpaper",
+          "glob": "*"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bazzite-wallpapers",
+      "name": "bazzite-wallpapers",
+      "desc": "Wallpapers for Bazzite",
+      "homepage": "https://bazzite.gg/",
+      "resolved": {
+        "version": "2025-12-14",
+        "url": "https://github.com/ublue-os/artwork/releases/download/bazzite-v2025-12-14/bazzite-wallpapers.tar.zstd",
+        "sha256": "21bfa43889d68e4fcbe67b17a2626d5f752138bf751dd67f0c90f4bf820f1374"
+      },
+      "artifacts": [
+        {
+          "type": "wallpaper",
+          "glob": "*"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bluefin-wallpapers-extra",
+      "name": "bluefin-wallpapers-extra",
+      "desc": "Extra Wallpapers for Bluefin",
+      "homepage": "https://github.com/ublue-os/artwork",
+      "resolved": {
+        "version": "2026-05-09",
+        "assets": {
+          "linux-kde": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-extra-v2026-05-09/bluefin-wallpapers-extra-kde.tar.zstd",
+            "sha256": "0f690073b3d681da24eb9a349ea33669863d4220733c1997577f705aaa43ee70"
+          },
+          "linux-gnome": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-extra-v2026-05-09/bluefin-wallpapers-extra-gnome.tar.zstd",
+            "sha256": "73a5e034577a665e56be0e8fe0d54f9fdbd7f61096bf4fa638cede41c07aa2e4"
+          },
+          "linux-png": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-extra-v2026-05-09/bluefin-wallpapers-extra-png.tar.zstd",
+            "sha256": "dafdb5e47d0a967b7bcfaeabe4afda0d75575fd7ef28b8120c924fc19c53f02c"
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "wallpaper",
+          "glob": "*"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/bluefin-wallpapers",
+      "name": "bluefin-wallpapers",
+      "desc": "Wallpapers for Bluefin",
+      "homepage": "https://github.com/ublue-os/artwork",
+      "resolved": {
+        "version": "2026-04-13",
+        "assets": {
+          "linux-kde": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-v2026-04-13/bluefin-wallpapers-kde.tar.zstd",
+            "sha256": "efbeeae6b04043a086088f71ec1dad0e63ba1c56fae440d69a9b459b03b5ffc1"
+          },
+          "linux-gnome": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-v2026-04-13/bluefin-wallpapers-gnome.tar.zstd",
+            "sha256": "87fdc6505da615e5df902df408371d5ab34efef6199144925324a564e6801e00"
+          },
+          "linux-png": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/bluefin-v2026-04-13/bluefin-wallpapers-png.tar.zstd",
+            "sha256": "15ea697d0cf97aabe5d9aaac5585104ff0dfea8690c10b37e8f888b771019065"
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "wallpaper",
+          "glob": "*"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/framework-tool",
+      "name": "Framework System Tool",
+      "desc": "System tool for Framework laptop hardware management",
+      "homepage": "https://github.com/FrameworkComputer/framework-system",
+      "resolved": {
+        "version": "0.6.3",
+        "assets": {
+          "linux-x86_64": {
+            "url": "https://github.com/FrameworkComputer/framework-system/releases/download/v0.6.3/framework_tool",
+            "sha256": "cb8bc4c798baaf5ab32040424621efb02e0d2ef348bde71d0b3a51d693676b3d"
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "binary",
+          "path": "framework_tool",
+          "target": "framework_tool"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/framework-wallpapers",
+      "name": "framework-wallpapers",
+      "desc": "Wallpapers for Framework laptops",
+      "homepage": "https://github.com/projectbluefin/artwork",
+      "resolved": {
+        "version": "2025-12-14",
+        "assets": {
+          "linux-kde": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/framework-v2025-12-14/framework-wallpapers-kde.tar.zstd",
+            "sha256": "2616c84b94bb3e83bf0576bbb260f2a5f98c06674b69e14db335e79d7e3b03a1"
+          },
+          "linux-gnome": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/framework-v2025-12-14/framework-wallpapers-gnome.tar.zstd",
+            "sha256": "8affb9c512d39fc0c665608939815e1eab7062bf1a01c3deab23de367216efc9"
+          },
+          "linux-png": {
+            "url": "https://github.com/ublue-os/artwork/releases/download/framework-v2025-12-14/framework-wallpapers-png.tar.zstd",
+            "sha256": "2da39f34cb2131861da2adca1d03a6b25b0714b2e7d2686b4d14f7ed8c60e8eb"
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "wallpaper",
+          "glob": "*"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/goose-linux",
+      "name": "Goose",
+      "desc": "Open source, extensible AI agent that goes beyond code suggestions",
+      "homepage": "https://block.github.io/goose/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/jetbrains-toolbox-linux",
+      "name": "JetBrains Toolbox",
+      "desc": "JetBrains tools manager",
+      "homepage": "https://www.jetbrains.com/toolbox-app/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/lm-studio-linux",
+      "name": "LM Studio",
+      "desc": "Discover, download, and run local LLMs",
+      "homepage": "https://lmstudio.ai/",
+      "resolved": {
+        "version": "0.4.15-2",
+        "assets": {
+          "linux-x86_64": {
+            "url": "https://installers.lmstudio.ai/linux/x64/0.4.15-2/LM-Studio-0.4.15-2-x64.AppImage",
+            "sha256": "33b768156544cb3703245e0cfa1e16291f90e39ca7dc565cdaf65bce361604f1"
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "appimage",
+          "path": "AppRun",
+          "target": "lm-studio"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/rog-control-center-linux",
+      "name": "ROG Control Center",
+      "desc": "ASUS ROG Control Center GUI and user daemon with XDG-first installation",
+      "homepage": "https://gitlab.com/asus-linux/asusctl"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/visual-studio-code-linux",
+      "name": "Microsoft Visual Studio Code",
+      "desc": "Open-source code editor",
+      "homepage": "https://code.visualstudio.com/",
+      "resolved": {
+        "version": "1.121.0",
+        "assets": {
+          "linux-x86_64": {
+            "url": "https://update.code.visualstudio.com/1.121.0/linux-x64/stable",
+            "sha256": "8cf24cc41441453e11e8fe1ae9e58d32970e23dced399835c4b0904263d66820"
+          },
+          "linux-arm64": {
+            "url": "https://update.code.visualstudio.com/1.121.0/linux-arm64/stable",
+            "sha256": "c4bc2db051759a4a7229b68b7126ba3a797f87d3ea922373a307059102c61b85",
+            "artifacts": [
+              {
+                "type": "binary",
+                "path": "VSCode-linux-arm64/bin/code",
+                "target": "code"
+              },
+              {
+                "type": "binary",
+                "path": "VSCode-linux-arm64/bin/code-tunnel",
+                "target": "code-tunnel"
+              },
+              {
+                "type": "artifact",
+                "source": "VSCode-linux-arm64/resources/completions/bash/code",
+                "target": "~/.local/share/bash-completion/completions/code"
+              },
+              {
+                "type": "artifact",
+                "source": "VSCode-linux-arm64/resources/completions/zsh/_code",
+                "target": "~/.local/share/zsh/site-functions/_code"
+              }
+            ]
+          }
+        }
+      },
+      "artifacts": [
+        {
+          "type": "binary",
+          "path": "VSCode-linux-{arch}/bin/code",
+          "target": "code"
+        },
+        {
+          "type": "binary",
+          "path": "VSCode-linux-{arch}/bin/code-tunnel",
+          "target": "code-tunnel"
+        },
+        {
+          "type": "artifact",
+          "source": "VSCode-linux-{arch}/resources/completions/bash/code",
+          "target": "~/.local/share/bash-completion/completions/code"
+        },
+        {
+          "type": "artifact",
+          "source": "VSCode-linux-{arch}/resources/completions/zsh/_code",
+          "target": "~/.local/share/zsh/site-functions/_code"
+        }
+      ]
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/visual-studio-code-linux@insiders",
+      "name": "Microsoft Visual Studio Code Insiders",
+      "desc": "Open-source code editor (Insiders build)",
+      "homepage": "https://code.visualstudio.com/insiders/"
+    },
+    {
+      "kind": "cask",
+      "token": "ublue-os/tap/vscodium-linux",
+      "name": "VSCodium",
+      "desc": "Open-source code editor",
+      "homepage": "https://vscodium.com/"
+    },
+    {
+      "token": "homebrew/cask-fonts/font-jetbrains-mono-nerd-font",
+      "name": "JetBrainsMono Nerd Font families (JetBrains Mono)",
+      "kind": "cask",
+      "homepage": "https://github.com/ryanoasis/nerd-fonts",
+      "desc": "JetBrains Mono Nerd Font family",
+      "upstream": {
+        "type": "github_release",
+        "repo": "ryanoasis/nerd-fonts",
+        "verified": true
+      },
+      "analytics": {
+        "cask_install_30d_rank": 26,
+        "cask_install_30d_count": "17,334"
+      },
+      "assets": {
+        "macos-arm64": {
+          "pattern": "JetBrainsMono.zip"
+        },
+        "macos-x86_64": {
+          "pattern": "JetBrainsMono.zip"
+        },
+        "linux-arm64": {
+          "pattern": "JetBrainsMono.zip"
+        },
+        "linux-x86_64": {
+          "pattern": "JetBrainsMono.zip"
+        }
+      },
+      "artifacts": [
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontMono-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFontPropo-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFont-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontMono-ThinItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Bold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-BoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraLight.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-ExtraLightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Italic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Light.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-LightItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Medium.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-MediumItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Regular.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-SemiBold.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-SemiBoldItalic.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNerdFontPropo-Thin.ttf"
+        },
+        {
+          "type": "font",
+          "path": "JetBrainsMonoNLNerdFont-Bold.ttf"
+        }
+      ],
+      "resolved": {
+        "tag": "v3.4.0",
+        "version": "3.4.0",
+        "assets": {
+          "macos-arm64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          },
+          "macos-x86_64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          },
+          "linux-arm64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          },
+          "linux-x86_64": {
+            "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip",
+            "sha256": "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c"
+          }
+        }
+      },
+      "verification": {
+        "sha256": "required"
+      }
     }
   ]
 }

@@ -16,8 +16,14 @@ echo "    Binary: $NB"
 echo ""
 
 # Ensure nanobrew is initialised
-sudo "$NB" init >/dev/null 2>&1 || true
+sudo -n "$NB" init >/dev/null 2>&1 || true
 export PATH="/opt/nanobrew/prefix/bin:$PATH"
+
+# Ensure required 3rd-party taps are registered (idempotent).
+# `ublue-os/tap` provides casks used by tests below.
+# `justrach/nanobrew` exercises the new GitHub formula-fetch path.
+sudo -n "$NB" tap add ublue-os/tap https://github.com/ublue-os/homebrew-tap 2>/dev/null || true
+sudo -n "$NB" tap add justrach/nanobrew https://github.com/justrach/nanobrew 2>/dev/null || true
 
 # ===================================================================
 # Basic install + binary verification
@@ -25,10 +31,11 @@ export PATH="/opt/nanobrew/prefix/bin:$PATH"
 
 echo "--- Test: install tree ---"
 "$NB" install tree >/dev/null 2>&1 || true
-if tree --version 2>&1 | grep -qi "tree"; then
+TREE_OUT=$(tree --version 2>&1) || true
+if grep -qi "tree" <<<"$TREE_OUT"; then
   pass "tree --version works"
 else
-  fail "tree --version did not produce expected output"
+  fail "tree --version did not produce expected output. Output was: $TREE_OUT"
 fi
 
 echo ""
@@ -41,12 +48,14 @@ else
 fi
 
 echo ""
-echo "--- Test: install lua ---"
+# --- Test: install lua ---
+"$NB" install readline >/dev/null 2>&1 || true
 "$NB" install lua >/dev/null 2>&1 || true
-if lua -v 2>&1 | grep -qi "lua"; then
+LUA_OUT=$(lua -v 2>&1) || true
+if grep -qi "lua" <<<"$LUA_OUT"; then
   pass "lua -v works"
 else
-  fail "lua -v did not produce expected output"
+  fail "lua -v did not produce expected output. Output was: $LUA_OUT"
 fi
 
 # ===================================================================
@@ -126,6 +135,29 @@ else
   fail "Cellar directory not found at $CELLAR_DIR"
 fi
 
+echo ""
+echo "--- Test: installed binaries have correct dynamic linker (not @@HOMEBREW_PREFIX@@) ---"
+UBREW_CELLAR="/opt/ubrew/prefix/Cellar"
+if [ -d "$UBREW_CELLAR" ]; then
+  # Check the PT_INTERP segment specifically via patchelf --print-interpreter,
+  # since the binary may legitimately contain @-strings as RPATH or constant data.
+  BAD_INTERP=""
+  for bin in $(find "$UBREW_CELLAR" -type f -executable 2>/dev/null); do
+    interp=$(patchelf --print-interpreter "$bin" 2>/dev/null || true)
+    if [[ "$interp" == *"@@HOMEBREW_PREFIX@@"* ]]; then
+      BAD_INTERP="$BAD_INTERP $bin"
+    fi
+  done
+  if [ -z "$BAD_INTERP" ]; then
+    pass "no installed binaries have @@HOMEBREW_PREFIX@@ as interpreter"
+  else
+    fail "installed binaries still have @@HOMEBREW_PREFIX@@ interpreter"
+    echo "$BAD_INTERP" | sed 's/^/      /'
+  fi
+else
+  fail "ubrew Cellar directory not found at $UBREW_CELLAR"
+fi
+
 # ===================================================================
 # Search
 # ===================================================================
@@ -138,6 +170,75 @@ if grep -q "ripgrep" <<<"$SEARCH_OUT"; then
 else
   fail "search ripgrep output missing 'ripgrep'"
   echo "      output: $(echo "$SEARCH_OUT" | head -3)"
+fi
+
+echo ""
+echo "--- Test: search ublue-os (3rd-party tap formulae + casks) ---"
+SEARCH_UBLUE=$("$NB" search ublue-os 2>&1) || true
+if grep -q "ublue-os/tap" <<<"$SEARCH_UBLUE"; then
+  pass "search ublue-os contains 3rd-party tap results"
+else
+  fail "search ublue-os output missing 3rd-party tap results"
+  echo "      output: $(echo "$SEARCH_UBLUE" | head -5)"
+fi
+
+echo ""
+echo "--- Test: info --cask ublue-os/tap/visual-studio-code-linux (3rd-party tap cask) ---"
+CASK_UBLUE=$("$NB" info --cask ublue-os/tap/visual-studio-code-linux 2>&1) || true
+if grep -q "Visual Studio Code" <<<"$CASK_UBLUE"; then
+  pass "info --cask ublue-os/tap/visual-studio-code-linux works"
+else
+  fail "info --cask ublue-os/tap/visual-studio-code-linux failed"
+  echo "      output: $(echo "$CASK_UBLUE" | head -5)"
+fi
+
+if [ "$(uname -s)" = "Linux" ]; then
+  echo ""
+  echo "--- Test: info --cask ublue-os/tap/bluefin-wallpapers (wallpaper cask, DE-aware) ---"
+  WALLPAPER_OUT=$("$NB" info --cask ublue-os/tap/bluefin-wallpapers 2>&1) || true
+  if grep -q "bluefin-wallpapers" <<<"$WALLPAPER_OUT" && grep -q "Wallpaper" <<<"$WALLPAPER_OUT"; then
+    pass "info --cask wallpaper cask works (DE-aware asset selection)"
+  else
+    fail "info --cask ublue-os/tap/bluefin-wallpapers failed"
+    echo "      output: $(echo "$WALLPAPER_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: info --cask ublue-os/tap/lm-studio-linux (AppImage cask) ---"
+  APPIMAGE_OUT=$("$NB" info --cask ublue-os/tap/lm-studio-linux 2>&1) || true
+  if grep -q "LM Studio" <<<"$APPIMAGE_OUT" && grep -q "AppImage" <<<"$APPIMAGE_OUT"; then
+    pass "info --cask ublue-os/tap/lm-studio-linux works (AppImage)"
+  else
+    fail "info --cask ublue-os/tap/lm-studio-linux failed"
+    echo "      output: $(echo "$APPIMAGE_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: tap -> search -> info flow for 3rd-party formula ---"
+  TAP_SEARCH_OUT=$("$NB" search nanobrew 2>&1) || true
+  if grep -q "justrach/nanobrew/nanobrew" <<<"$TAP_SEARCH_OUT"; then
+    pass "search nanobrew returns tapped formula from GitHub"
+  else
+    fail "search nanobrew did not return tapped formula"
+    echo "      output: $(echo "$TAP_SEARCH_OUT" | head -5)"
+  fi
+  TAP_INFO_OUT=$("$NB" info justrach/nanobrew/nanobrew 2>&1) || true
+  if grep -q "macOS-only" <<<"$TAP_INFO_OUT"; then
+    pass "info justrach/nanobrew/nanobrew detects macOS-only formula"
+  else
+    fail "info justrach/nanobrew/nanobrew did not detect macOS-only"
+    echo "      output: $(echo "$TAP_INFO_OUT" | head -5)"
+  fi
+
+  echo ""
+  echo "--- Test: info dash resolves via oldname/alias to dash-shell ---"
+  DASH_OUT=$("$NB" info dash 2>&1) || true
+  if grep -q "dash-shell" <<<"$DASH_OUT"; then
+    pass "info dash resolves to dash-shell via oldname alias"
+  else
+    fail "info dash did not resolve to dash-shell"
+    echo "      output: $(echo "$DASH_OUT" | head -5)"
+  fi
 fi
 
 # ===================================================================
@@ -159,7 +260,7 @@ fi
 
 echo ""
 echo "--- Test: bundle dump ---"
-BUNDLE_OUT=$("$NB" bundle dump 2>&1) || true
+BUNDLE_OUT=$("$NB" bundle dump --force 2>&1) || true
 if grep -q 'brew "' <<<"$BUNDLE_OUT"; then
   pass "bundle dump contains brew format lines"
 elif [ -z "$BUNDLE_OUT" ]; then
@@ -206,12 +307,57 @@ fi
 echo ""
 echo "--- Test: doctor ---"
 DOCTOR_OUT=$("$NB" doctor 2>&1) || true
-if grep -qi "Checking nanobrew installation" <<<"$DOCTOR_OUT"; then
+if grep -qi "Checking ubrew installation" <<<"$DOCTOR_OUT"; then
   pass "doctor prints installation check banner"
 else
-  fail "doctor output missing 'Checking nanobrew installation'"
+  fail "doctor output missing 'Checking ubrew installation'"
   echo "      output: $(echo "$DOCTOR_OUT" | head -3)"
 fi
+
+# ===================================================================
+# Pin / Unpin Subcommands
+# ===================================================================
+echo ""
+echo "--- Test: pin and unpin ---"
+mkdir -p /opt/ubrew/prefix/Cellar/wget
+mkdir -p /opt/ubrew/prefix/Caskroom/firefox
+
+# Test formula pin
+PIN_OUT1=$("$NB" pin wget 2>&1) || true
+PIN_LIST1=$("$NB" pin 2>&1) || true
+if grep -q "wget" <<<"$PIN_LIST1"; then
+  pass "pin wget works (wget is listed as pinned)"
+else
+  fail "pin wget failed. output: $PIN_OUT1, pin list: $PIN_LIST1"
+fi
+
+# Test cask pin
+PIN_OUT2=$("$NB" pin --cask firefox 2>&1) || true
+PIN_LIST2=$("$NB" pin 2>&1) || true
+if grep -q "firefox" <<<"$PIN_LIST2"; then
+  pass "pin --cask firefox works (firefox is listed as pinned)"
+else
+  fail "pin --cask firefox failed. output: $PIN_OUT2, pin list: $PIN_LIST2"
+fi
+
+# Test unpin formula
+UNPIN_OUT1=$("$NB" unpin --formula wget 2>&1) || true
+PIN_LIST3=$("$NB" pin 2>&1) || true
+if ! grep -q "wget" <<<"$PIN_LIST3"; then
+  pass "unpin --formula wget works (wget is no longer listed as pinned)"
+else
+  fail "unpin --formula wget failed. output: $UNPIN_OUT1, pin list after: $PIN_LIST3"
+fi
+
+# Test unpin cask
+UNPIN_OUT2=$("$NB" unpin --cask firefox 2>&1) || true
+PIN_LIST4=$("$NB" pin 2>&1) || true
+if ! grep -q "firefox" <<<"$PIN_LIST4"; then
+  pass "unpin --cask firefox works (firefox is no longer listed as pinned)"
+else
+  fail "unpin --cask firefox failed. output: $UNPIN_OUT2, pin list after: $PIN_LIST4"
+fi
+
 # ===================================================================
 # Regression: tar subprocess fallback for unsupported headers (#221)
 # perl's bottle uses GNU long-name / pax-extended headers that Zig's
@@ -220,6 +366,9 @@ fi
 
 echo ""
 echo "--- Test: install perl (exercises tar subprocess fallback #221) ---"
+if ! "$NB" install gdbm >/dev/null 2>&1; then
+  echo "    WARN: gdbm install failed (may already be installed or optional)"
+fi
 "$NB" install perl >/dev/null 2>&1 || true
 if perl -e 'print "ok"' 2>&1 | grep -q "^ok$"; then
   pass "perl installed and runs (#221 tar fallback works)"

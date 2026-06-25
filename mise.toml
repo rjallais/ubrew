@@ -1,0 +1,65 @@
+[tools]
+odin = "dev-2026-06"
+
+[env]
+UBREW_TELEMETRY = "0" # Disable telemetry in development environments
+
+[tasks.build]
+description = "Build ubrew with aggressive optimizations for the native CPU (fastest dev build, no LTO)"
+run = "odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native"
+sources = ["src/**/*.odin"]
+outputs = ["ubrew"]
+
+[tasks.build-portable]
+description = "Build ubrew without CPU-specific optimizations (more portable binary)"
+run = "odin build src -out:ubrew_portable -o:speed -no-bounds-check"
+sources = ["src/**/*.odin"]
+outputs = ["ubrew_portable"]
+
+[tasks.build-prod]
+description = "Build ubrew for production: aggressive opts + LTO + release linker (requires lld+lto:thin; slowest build, fastest binary)"
+run = "odin build src -out:ubrew_prod -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module -no-rpath"
+sources = ["src/**/*.odin"]
+outputs = ["ubrew_prod"]
+
+[tasks.run]
+description = "Run ubrew with arguments"
+run = "./ubrew"
+depends = ["build"]
+
+[tasks.test]
+description = "Run integration smoke tests"
+run = "./tests/smoke-test.sh ./ubrew"
+depends = ["build"]
+
+[tasks.bench-install]
+description = "Benchmark installs vs nb/brew (if present)"
+run = "./bench/bench_pkgmgr.sh install tree"
+depends = ["build"]
+
+[tasks.bench-update]
+description = "Benchmark update vs nb/brew (if present)"
+run = "./bench/bench_pkgmgr.sh update"
+depends = ["build"]
+
+[tasks.bench-upgrade]
+description = "Benchmark upgrade vs nb/brew (if present)"
+run = "./bench/bench_pkgmgr.sh upgrade"
+depends = ["build"]
+
+[tasks.bench-all]
+description = "Run the full benchmark suite (install + update + upgrade)"
+run = "mise run bench-install && mise run bench-update && mise run bench-upgrade"
+depends = ["build"]
+
+[tasks.clean]
+description = "Clean up compiler build artifacts"
+run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg"
+
+[tasks.check]
+description = "Type check all Odin source files"
+run = "odin check src"
+
+[tasks.profile-build]
+description = "Show compile-time stage timings for the current build configuration"
+run = "odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -show-timings"

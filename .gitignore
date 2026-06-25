@@ -1,11 +1,9 @@
-.zig-cache/
-zig-out/
-posts/
-*.blog.md
-.claude/worktrees/
-posts/twitter-thread*.md
-tweet*.md
-.DS_Store
-registry/upstream-release-db.json
-.wrangler/
-nb-linux-fresh
+# ignore compiled ubrew binaries
+ubrew
+ubrew_portable
+ubrew_prod
+ubrew_dbg
+/tmp/
+
+# local-only SSH keys (never commit)
+data/.ssh/
