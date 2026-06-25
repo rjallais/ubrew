@@ -319,18 +319,20 @@ fi
 # ===================================================================
 echo ""
 echo "--- Test: pin and unpin ---"
-"$NB" pin tree >/dev/null 2>&1 || true
-if "$NB" pin 2>&1 | grep -q "tree"; then
+PIN_OUT1=$("$NB" pin tree 2>&1) || true
+PIN_LIST1=$("$NB" pin 2>&1) || true
+if grep -q "tree" <<<"$PIN_LIST1"; then
   pass "pin tree works (tree is listed as pinned)"
 else
-  fail "pin tree failed or tree not listed in pins"
+  fail "pin tree failed or tree not listed in pins. pin tree output: $PIN_OUT1, pin list: $PIN_LIST1"
 fi
 
-"$NB" unpin --formula tree >/dev/null 2>&1 || true
-if ! "$NB" pin 2>&1 | grep -q "tree"; then
+UNPIN_OUT=$("$NB" unpin --formula tree 2>&1) || true
+PIN_LIST2=$("$NB" pin 2>&1) || true
+if ! grep -q "tree" <<<"$PIN_LIST2"; then
   pass "unpin tree works (tree is no longer listed as pinned)"
 else
-  fail "unpin tree failed or tree still listed in pins"
+  fail "unpin tree failed or tree still listed in pins. unpin output: $UNPIN_OUT, pin list after unpin: $PIN_LIST2"
 fi
 
 # ===================================================================
