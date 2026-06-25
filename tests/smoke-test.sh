@@ -319,20 +319,43 @@ fi
 # ===================================================================
 echo ""
 echo "--- Test: pin and unpin ---"
+mkdir -p /opt/ubrew/prefix/Cellar/wget
+mkdir -p /opt/ubrew/prefix/Caskroom/firefox
+
+# Test formula pin
 PIN_OUT1=$("$NB" pin wget 2>&1) || true
 PIN_LIST1=$("$NB" pin 2>&1) || true
 if grep -q "wget" <<<"$PIN_LIST1"; then
   pass "pin wget works (wget is listed as pinned)"
 else
-  fail "pin wget failed or wget not listed in pins. pin output: $PIN_OUT1, pin list: $PIN_LIST1"
+  fail "pin wget failed. output: $PIN_OUT1, pin list: $PIN_LIST1"
 fi
 
-UNPIN_OUT=$("$NB" unpin --formula wget 2>&1) || true
+# Test cask pin
+PIN_OUT2=$("$NB" pin --cask firefox 2>&1) || true
 PIN_LIST2=$("$NB" pin 2>&1) || true
-if ! grep -q "wget" <<<"$PIN_LIST2"; then
-  pass "unpin wget works (wget is no longer listed as pinned)"
+if grep -q "firefox" <<<"$PIN_LIST2"; then
+  pass "pin --cask firefox works (firefox is listed as pinned)"
 else
-  fail "unpin wget failed or wget still listed in pins. unpin output: $UNPIN_OUT, pin list after unpin: $PIN_LIST2"
+  fail "pin --cask firefox failed. output: $PIN_OUT2, pin list: $PIN_LIST2"
+fi
+
+# Test unpin formula
+UNPIN_OUT1=$("$NB" unpin --formula wget 2>&1) || true
+PIN_LIST3=$("$NB" pin 2>&1) || true
+if ! grep -q "wget" <<<"$PIN_LIST3"; then
+  pass "unpin --formula wget works (wget is no longer listed as pinned)"
+else
+  fail "unpin --formula wget failed. output: $UNPIN_OUT1, pin list after: $PIN_LIST3"
+fi
+
+# Test unpin cask
+UNPIN_OUT2=$("$NB" unpin --cask firefox 2>&1) || true
+PIN_LIST4=$("$NB" pin 2>&1) || true
+if ! grep -q "firefox" <<<"$PIN_LIST4"; then
+  pass "unpin --cask firefox works (firefox is no longer listed as pinned)"
+else
+  fail "unpin --cask firefox failed. output: $UNPIN_OUT2, pin list after: $PIN_LIST4"
 fi
 
 # ===================================================================
