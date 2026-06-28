@@ -1,10 +1,11 @@
 # Changelog
 
-All notable changes to nanobrew are documented here.
+All notable changes to ubrew are documented here.
 
 ## Unreleased
 
-_No unreleased changes yet._
+### Changed
+- **Migration: nanobrew → ubrew** — project fully renamed and rebranded. Zig source replaced by Odin rewrite. Binary renamed from `nb` to `ubrew`. Install path changed from `/opt/nanobrew` to `/opt/ubrew`. Formula moved from `Formula/nanobrew.rb` to `Formula/ubrew.rb`. Cloudflare worker and legacy install script removed. CI/CD workflows updated to use Odin/mise.
 
 ## [0.1.193] - 2026-05-11
 

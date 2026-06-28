@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test: comprehensive smoke integration tests for nanobrew on macOS
+# Test: comprehensive smoke integration tests for ubrew on macOS
 # Usage: bash tests/smoke-test.sh <path-to-nb-binary>
 set -euo pipefail
 
@@ -15,9 +15,9 @@ echo "==> Smoke integration tests (macOS)"
 echo "    Binary: $NB"
 echo ""
 
-# Ensure nanobrew is initialised
+# Ensure ubrew is initialised
 sudo -n "$NB" init >/dev/null 2>&1 || true
-export PATH="/opt/nanobrew/prefix/bin:$PATH"
+export PATH="/opt/ubrew/prefix/bin:$PATH"
 
 # Ensure required 3rd-party taps are registered (idempotent).
 # `ublue-os/tap` provides casks used by tests below.
@@ -95,15 +95,15 @@ if grep -q "aws-cli" <<<"$AWS_VERSION_OUT"; then
 else
   fail "aws --version failed (possible @@HOMEBREW_CELLAR@@ bug)"
   echo "      which aws: $(command -v aws || echo 'not found')"
-  if [ -e /opt/nanobrew/prefix/bin/aws ]; then
-    echo "      prefix/bin/aws: $(ls -l /opt/nanobrew/prefix/bin/aws)"
-    echo "      prefix/bin/aws shebang: $(head -n 1 /opt/nanobrew/prefix/bin/aws 2>/dev/null || echo 'unreadable')"
+  if [ -e /opt/ubrew/prefix/bin/aws ]; then
+    echo "      prefix/bin/aws: $(ls -l /opt/ubrew/prefix/bin/aws)"
+    echo "      prefix/bin/aws shebang: $(head -n 1 /opt/ubrew/prefix/bin/aws 2>/dev/null || echo 'unreadable')"
   else
     echo "      prefix/bin/aws: missing"
   fi
-  if [ -e /opt/nanobrew/prefix/Cellar/awscli ]; then
-    AWS_LIBEXEC=$(find /opt/nanobrew/prefix/Cellar/awscli -path '*/libexec/bin/aws' | head -n 1)
-    AWS_PY=$(find /opt/nanobrew/prefix/Cellar/awscli -path '*/libexec/bin/python' | head -n 1)
+  if [ -e /opt/ubrew/prefix/Cellar/awscli ]; then
+    AWS_LIBEXEC=$(find /opt/ubrew/prefix/Cellar/awscli -path '*/libexec/bin/aws' | head -n 1)
+    AWS_PY=$(find /opt/ubrew/prefix/Cellar/awscli -path '*/libexec/bin/python' | head -n 1)
     if [ -n "$AWS_LIBEXEC" ]; then
       echo "      libexec aws: $(ls -l "$AWS_LIBEXEC")"
       echo "      libexec aws shebang: $(head -n 1 "$AWS_LIBEXEC" 2>/dev/null || echo 'unreadable')"
@@ -122,7 +122,7 @@ fi
 
 echo ""
 echo "--- Test: no @@HOMEBREW_CELLAR@@ or @@HOMEBREW_PREFIX@@ placeholders in Cellar ---"
-CELLAR_DIR="/opt/nanobrew/prefix/Cellar"
+CELLAR_DIR="/opt/ubrew/prefix/Cellar"
 if [ -d "$CELLAR_DIR" ]; then
   PLACEHOLDER_HITS=$(grep -rl '@@HOMEBREW_CELLAR@@\|@@HOMEBREW_PREFIX@@' "$CELLAR_DIR" 2>/dev/null | head -5) || true
   if [ -z "$PLACEHOLDER_HITS" ]; then
@@ -375,7 +375,7 @@ if perl -e 'print "ok"' 2>&1 | grep -q "^ok$"; then
 else
   fail "perl install or execution failed — tar fallback may have regressed"
   echo "      which perl: $(command -v perl || echo 'not found')"
-  if [ -e /opt/nanobrew/prefix/Cellar/perl ]; then
+  if [ -e /opt/ubrew/prefix/Cellar/perl ]; then
     echo "      Cellar/perl present"
   else
     echo "      Cellar/perl missing — extract likely failed"
@@ -391,7 +391,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "x86_64" ]; then
   echo ""
   echo "--- Test: git binary arch is x86_64 on Intel Mac (#226/#227) ---"
   "$NB" install git >/dev/null 2>&1 || true
-  GIT_BIN="/opt/nanobrew/prefix/bin/git"
+  GIT_BIN="/opt/ubrew/prefix/bin/git"
   if [ -x "$GIT_BIN" ]; then
     GIT_ARCH=$(file "$GIT_BIN" 2>/dev/null || true)
     if echo "$GIT_ARCH" | grep -q "x86_64"; then

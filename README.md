@@ -1,60 +1,60 @@
 <p align="center">
-  <img src="assets/logo.png" alt="nanobrew logo" width="200">
+  <img src="assets/logo.png" alt="ubrew logo" width="200">
 </p>
 
 <p align="center">
-  <a href="https://trendshift.io/repositories/25937" target="_blank"><img src="https://trendshift.io/api/badge/repositories/25937" alt="justrach%2Fnanobrew | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+  <a href="https://github.com/rjallais/ubrew" target="_blank">github.com/rjallais/ubrew</a>
 </p>
 
-# nanobrew
+# ubrew
 
-A fast package manager for macOS and Linux. Written in Zig. Native install pipeline for the top 100 Homebrew formulae and top 100 casks (no `brew`, no Ruby), with verified Homebrew fallback for everything else and native `.deb` support for Linux/Docker.
+A fast package manager for macOS and Linux. Written in Odin. Native install pipeline for the top 100 Homebrew formulae and top 100 casks (no `brew`, no Ruby), with verified Homebrew fallback for everything else and native `.deb` support for Linux/Docker.
 
-## Why nanobrew?
+## Why ubrew?
 
 - **Fast warm installs** — already-installed no-ops return in milliseconds (5.8ms on the v0.1.192 sandboxed `yt-dlp` benchmark)
 - **Parallel downloads** — all dependencies download and extract at the same time
 - **No Ruby runtime** — single static binary, instant startup
-- **No auto-update** — `nb install` just installs; self-update is explicit via `nb update`
+- **No auto-update** — `ubrew install` just installs; self-update is explicit via `ubrew update`
 - **No quarantine** — cask installs skip `com.apple.quarantine`, so apps open without Gatekeeper prompts
 - **Native installs** — top 100 formulae and top 100 casks install without Homebrew, Ruby, or `brew` subprocess (v0.1.192)
-- **Third-party taps** — `nb install user/tap/formula` just works. The only fast Homebrew client with tap support
+- **Third-party taps** — `ubrew install user/tap/formula` just works. The only fast Homebrew client with tap support
 - **Drop-in Homebrew replacement** — same formulas, same bottles, same casks
 - **Linux + Docker** — native .deb support, **up to 13x faster** than apt-get on warm installs
 
-## nanobrew vs Homebrew
+## ubrew vs Homebrew
 
-Homebrew is great software and powers millions of dev machines. nanobrew makes different tradeoffs:
+Homebrew is great software and powers millions of dev machines. ubrew makes different tradeoffs:
 
-| | Homebrew | nanobrew |
+| | Homebrew | ubrew |
 |---|---------|----------|
-| **Auto-update** | `brew install` runs `brew update` first (can take minutes) | `nb install` just installs. Self-update is explicit via `nb update`. |
+| **Auto-update** | `brew install` runs `brew update` first (can take minutes) | `ubrew install` just installs. Self-update is explicit via `ubrew update`. |
 | **Gatekeeper quarantine** | Casks get `com.apple.quarantine` — triggers "Are you sure?" dialog | No quarantine flag — apps open immediately |
 | **Parallel downloads** | Sequential by default; set `HOMEBREW_DOWNLOAD_CONCURRENCY` to change | All dependencies download simultaneously out of the box |
 | **Runtime** | Ruby (~57 MB) | Single 1.2 MB static binary. Instant startup, no bootstrapping. |
-| **Brewfile no-ops** | `brew bundle` rechecks everything (~10s even when satisfied) | `nb bundle install` returns instantly when nothing to do |
+| **Brewfile no-ops** | `brew bundle` rechecks everything (~10s even when satisfied) | `ubrew bundle install` returns instantly when nothing to do |
 
-If you rely on `post_install` hooks, build-from-source options, or Mac App Store integration, Homebrew is still the right choice. nanobrew covers the fast path: bottles, casks, and bundles.
+If you rely on `post_install` hooks, build-from-source options, or Mac App Store integration, Homebrew is still the right choice. ubrew covers the fast path: bottles, casks, and bundles.
 
-| Package | Homebrew | zerobrew (cold) | zerobrew (warm) | nanobrew (cold) | nanobrew (warm) |
-|---------|----------|-----------------|-----------------|-----------------|-----------------|
+| Package | Homebrew | zerobrew (cold) | zerobrew (warm) | ubrew (cold) | ubrew (warm) |
+|---------|----------|-----------------|-----------------|--------------+--------------|
 | **tree** (0 deps) | 3.554s | 2.260s | 0.311s | **1.288s** | **0.003s** |
 | **ffmpeg** (11 deps) | 8.007s | 5.335s | 2.860s | **1.751s** | **0.014s** |
 | **wget** (6 deps) | 3.958s | 6.425s | 0.841s | **3.876s** | **0.010s** | 3.935s | 5.502s | 0.587s | **3.211s** | **0.027s** |
 
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-06-22. Auto-updated weekly.
 
-| | nanobrew | zerobrew | Homebrew |
+| | ubrew | zerobrew | Homebrew |
 |---|---------|----------|----------|
 | **Binary size** | **1.2 MB** | 7.9 MB | 57 MB (Ruby runtime) |
 
-> nanobrew is **6.8x smaller** than zerobrew and **47x smaller** than Homebrew. See how these are measured in the [benchmark workflow](.github/workflows/benchmark.yml).
+> ubrew is **6.8x smaller** than zerobrew and **47x smaller** than Homebrew. See how these are measured in the [benchmark workflow](.github/workflows/benchmark.yml).
 
-### Linux / Docker — nanobrew vs apt-get
+### Linux / Docker — ubrew vs apt-get
 
-nanobrew's `--deb` mode is a full apt-get replacement: fetches APT package indices, resolves dependencies, downloads and extracts `.deb` files — all in pure Zig with no subprocess calls.
+ubrew's `--deb` mode is a full apt-get replacement: fetches APT package indices, resolves dependencies, downloads and extracts `.deb` files — all in pure Odin with no subprocess calls.
 
-| Package set | Deps | apt-get | nanobrew (warm) | Speedup |
+| Package set | Deps | apt-get | ubrew (warm) | Speedup |
 |-------------|------|---------|-----------------|---------|
 | **curl wget** | 35 | 3,426ms | **448ms** | **7.6x** |
 | **curl wget tree jq htop tmux** | 53 | 3,584ms | **521ms** | **6.9x** |
@@ -72,93 +72,76 @@ nanobrew's `--deb` mode is a full apt-get replacement: fetches APT package indic
 ## Install
 
 ```bash
-# One-liner
-curl -fsSL https://nanobrew.trilok.ai/install | bash
-
 # Or via Homebrew
-brew tap justrach/nanobrew https://github.com/justrach/nanobrew
-brew install nanobrew
+brew tap rjallais/ubrew https://github.com/rjallais/ubrew
+brew install ubrew
 
-# Or build from source (needs Zig 0.16.0+)
-git clone https://github.com/justrach/nanobrew.git
-cd nanobrew && ./install.sh
+# Or build from source (needs Odin + mise)
+git clone https://github.com/rjallais/ubrew.git
+cd ubrew && mise run build
 ```
 
 ### Upgrading
 
 ```bash
-# v0.1.193 and later: self-update works in one call
-nb update
+ubrew update
 ```
-
-If you're on **v0.1.192 or older** and `nb update` errors with
-`could not download SHA256 checksum`, the self-updater on your installed
-binary can't reach past a redirect-chain bug in its native HTTP client
-(fixed in v0.1.193). Re-run the installer once to get unstuck, then
-`nb update` will work for all future releases:
-
-```bash
-curl -fsSL https://nanobrew.trilok.ai/install | bash
-```
-
-The same bug also affected exactly v0.1.190 via a different code path
-(file-naming bug in the extract step); the same one-liner unsticks it.
 
 ## Usage
 
 ### Basics
 
 ```bash
-nb install tree               # install a package
-nb install ffmpeg wget curl   # install multiple at once
-nb install --shims yt-dlp     # expose yt-dlp, keep dependency tools private
-nb remove tree                # uninstall
-nb list                       # see what's installed
-nb info jq                    # show package details
-nb search ripgrep             # search formulas and casks
+ubrew install tree               # install a package
+ubrew install ffmpeg wget curl   # install multiple at once
+ubrew install --shims yt-dlp     # expose yt-dlp, keep dependency tools private
+ubrew remove tree                # uninstall
+ubrew list                       # see what's installed
+ubrew info jq                    # show package details
+ubrew search ripgrep             # search formulas and casks
 ```
 
 ### Shimmed Installs
 
 ```bash
-nb install --shims yt-dlp
+ubrew install --shims yt-dlp
 ```
 
-Shimmed installs are an experimental link mode for packages whose dependencies ship command-line tools you do not want exposed globally. The requested formula gets wrapper shims in `/opt/nanobrew/prefix/bin`; dependency executables are kept out of `prefix/bin` and are only added to that wrapper's private `PATH`. This keeps commands like `deno` or `python` available to the requested tool without making those dependency executables first-class shell commands. You can also enable this mode for formula installs with `NANOBREW_SHIMS=1`.
+Shimmed installs are an experimental link mode for packages whose dependencies ship command-line tools you do not want exposed globally. The requested formula gets wrapper shims in `/opt/ubrew/prefix/bin`; dependency executables are kept out of `prefix/bin` and are only added to that wrapper's private `PATH`. This keeps commands like `deno` or `python` available to the requested tool without making those dependency executables first-class shell commands. You can also enable this mode for formula installs with `UBREW_SHIMS=1`.
 
 ### Third-Party Taps
 
 ```bash
-nb install steipete/tap/sag   # install from a third-party tap
-nb install indirect/tap/bpb   # taps with bottles work too
+ubrew install steipete/tap/sag   # install from a third-party tap
+ubrew install indirect/tap/bpb   # taps with bottles work too
 ```
 
-nanobrew fetches the Ruby formula directly from GitHub, parses it, and installs — no `brew tap` step needed. Supports bottles, source builds, and pre-built binaries.
+ubrew fetches the Ruby formula directly from GitHub, parses it, and installs — no `brew tap` step needed. Supports bottles, source builds, and pre-built binaries.
 
 ### macOS Apps (Casks)
 
 ```bash
-nb install --cask firefox     # install a .dmg/.pkg/.zip app
-nb remove --cask firefox      # uninstall it
-nb upgrade --cask             # upgrade all casks
+ubrew install --cask firefox     # install a .dmg/.pkg/.zip app
+ubrew remove --cask firefox      # uninstall it
+ubrew upgrade --cask             # upgrade all casks
 ```
 
-As of v0.1.192, the top 100 casks install through nanobrew's native pipeline — no `brew` subprocess, no Homebrew prefix, no Ruby. Native cask support covers apps, `.pkg`, fonts, binaries, suites, copied artifacts, installer scripts, `.tar.xz`, and extensionless vendor URLs. Casks outside the top 100 still fall back to the verified Homebrew path.
+As of v0.1.192, the top 100 casks install through ubrew's native pipeline — no `brew` subprocess, no Homebrew prefix, no Ruby. Native cask support covers apps, `.pkg`, fonts, binaries, suites, copied artifacts, installer scripts, `.tar.xz`, and extensionless vendor URLs. Casks outside the top 100 still fall back to the verified Homebrew path.
 
 ### Linux / Docker (deb packages)
 
 ```bash
-nb install --deb curl wget git    # install from Ubuntu/Debian repos
-nb remove --deb curl              # remove a deb package
-nb upgrade --deb                  # upgrade all installed deb packages
-nb list                           # shows deb packages alongside brew packages
-nb outdated                       # checks deb packages for newer versions too
+ubrew install --deb curl wget git    # install from Ubuntu/Debian repos
+ubrew remove --deb curl              # remove a deb package
+ubrew upgrade --deb                  # upgrade all installed deb packages
+ubrew list                           # shows deb packages alongside brew packages
+ubrew outdated                       # checks deb packages for newer versions too
 ```
 
 ```dockerfile
 # Replace slow apt-get in Dockerfiles
-COPY --from=nanobrew/nb /nb /usr/local/bin/nb
-RUN nb init && nb install --deb curl wget git
+COPY --from=ubrew/ubrew /ubrew /usr/local/bin/ubrew
+RUN ubrew init && ubrew install --deb curl wget git
 ```
 
 - Auto-detects distro and architecture (Ubuntu/Debian, amd64/arm64)
@@ -171,45 +154,45 @@ RUN nb init && nb install --deb curl wget git
 ### Keep packages up to date
 
 ```bash
-nb outdated                   # see what's behind
-nb upgrade                    # upgrade everything
-nb upgrade tree               # upgrade one package
-nb pin tree                   # prevent a package from upgrading
-nb unpin tree                 # allow upgrades again
+ubrew outdated                   # see what's behind
+ubrew upgrade                    # upgrade everything
+ubrew upgrade tree               # upgrade one package
+ubrew pin tree                   # prevent a package from upgrading
+ubrew unpin tree                 # allow upgrades again
 ```
 
 ### Undo and backup
 
 ```bash
-nb rollback tree              # revert to the previous version
-nb bundle dump                # export installed packages to a Nanobrew file
-nb bundle install             # reinstall everything from a Nanobrew file
+ubrew rollback tree              # revert to the previous version
+ubrew bundle dump                # export installed packages to a Brewfile
+ubrew bundle install             # reinstall everything from a Brewfile
 ```
 
 ### Diagnostics
 
 ```bash
-nb doctor                     # check for common problems
-nb cleanup                    # remove old caches and orphaned files
-nb cleanup --dry-run          # see what would be removed first
+ubrew doctor                     # check for common problems
+ubrew cleanup                    # remove old caches and orphaned files
+ubrew cleanup --dry-run          # see what would be removed first
 ```
 
 ### Download Telemetry
 
 ```bash
-nb telemetry status
-nb telemetry off
-nb telemetry on
+ubrew telemetry status
+ubrew telemetry off
+ubrew telemetry on
 ```
 
-nanobrew sends anonymized, best-effort download timing events to `https://backend.trilok.ai/v1/telemetry/system`. This helps prioritize which packages and casks should get native nanobrew support first, based on real download/install demand and slow paths.
+ubrew sends anonymized, best-effort download timing events to `https://backend.trilok.ai/v1/telemetry/system`. This helps prioritize which packages and casks should get native ubrew support first, based on real download/install demand and slow paths.
 
 The exact event shape is:
 
 ```json
 {
   "schema": 1,
-  "source": "nanobrew",
+  "source": "ubrew",
   "event": "download",
   "os": "macos",
   "arch": "arm64",
@@ -224,48 +207,48 @@ The exact event shape is:
 }
 ```
 
-It does not send URLs, paths, hostnames, usernames, IPs, user IDs, full package lists, or command history. `target_name` is only a package-like token such as `uv`, `firefox`, or `owner/tap/pkg`. You can opt out with `nb telemetry off`, `NANOBREW_NO_TELEMETRY=1`, or `NANOBREW_TELEMETRY=0`.
+It does not send URLs, paths, hostnames, usernames, IPs, user IDs, full package lists, or command history. `target_name` is only a package-like token such as `uv`, `firefox`, or `owner/tap/pkg`. You can opt out with `ubrew telemetry off`, `UBREW_NO_TELEMETRY=1`, or `UBREW_TELEMETRY=0`.
 
 ### Dependencies and services
 
 ```bash
-nb deps ffmpeg                # list all dependencies
-nb deps --tree ffmpeg         # show dependency tree
-nb services list              # show launchctl services from installed packages
-nb services start postgresql  # start a service
-nb services stop postgresql   # stop a service
+ubrew deps ffmpeg                # list all dependencies
+ubrew deps --tree ffmpeg         # show dependency tree
+ubrew services list              # show launchctl services from installed packages
+ubrew services start postgresql  # start a service
+ubrew services stop postgresql   # stop a service
 ```
 
 ### Shell completions
 
 ```bash
-nb completions zsh >> ~/.zshrc
-nb completions bash >> ~/.bashrc
-nb completions fish > ~/.config/fish/completions/nb.fish
+ubrew completions zsh >> ~/.zshrc
+ubrew completions bash >> ~/.bashrc
+ubrew completions fish > ~/.config/fish/completions/ubrew.fish
 ```
 
 ### Other
 
 ```bash
-nb update                     # self-update nanobrew
-nb init                       # create directory structure (run once)
-nb help                       # show all commands
+ubrew update                     # self-update ubrew
+ubrew init                       # create directory structure (run once)
+ubrew help                       # show all commands
 ```
 
 ## How it works
 
 ```
-nb install ffmpeg                        # macOS: Homebrew bottles
+ubrew install ffmpeg                        # macOS: Homebrew bottles
   │
   ├─ 1. Resolve dependencies (BFS, parallel API calls)
   ├─ 2. Skip anything already installed (warm path: ~3.5ms)
   ├─ 3. Download bottles in parallel (native HTTP, streaming SHA256)
-  ├─ 4. Extract into content-addressable store (/opt/nanobrew/store/<sha>)
+  ├─ 4. Extract into content-addressable store (/opt/ubrew/store/<sha>)
   ├─ 5. Clone into Cellar via APFS clonefile (zero-copy, instant)
   ├─ 6. Relocate Mach-O headers + batch codesign
-  └─ 7. Symlink binaries into /opt/nanobrew/prefix/bin/
+  └─ 7. Symlink binaries into /opt/ubrew/prefix/bin/
 
-nb install --deb curl                    # Linux: .deb packages
+ubrew install --deb curl                    # Linux: .deb packages
   │
   ├─ 1. Detect distro from /etc/os-release (Ubuntu/Debian, amd64/arm64)
   ├─ 2. Fetch + decompress package index (main + universe components)
@@ -277,7 +260,7 @@ nb install --deb curl                    # Linux: .deb packages
   ├─ 8. Run postinst scripts (ca-certificates, ldconfig, etc.)
   └─ 9. Run ldconfig for shared library registration
 
-nb install steipete/tap/sag              # Third-party taps
+ubrew install steipete/tap/sag              # Third-party taps
   │
   ├─ 1. Detect tap syntax (user/tap/formula)
   ├─ 2. Fetch Ruby formula from GitHub (raw.githubusercontent.com)
@@ -299,22 +282,17 @@ Key design choices:
 ## Testing
 
 ```bash
-# Run all tests (macOS — native)
-zig build test
+# Run unit tests
+odin test src
+mise run test-unit
 
-# Run individual module tests with verbose output
-zig test src/deb/index.zig         # 7 tests: package parsing, provides map
-zig test src/deb/resolver.zig      # 17 tests: dependency resolution, virtual packages
+# Run integration smoke tests
+mise run test
 
 # Cross-compile and run on Linux via Colima/Docker
-zig build test -Dtarget=aarch64-linux   # cross-compile to static ELF
-docker run --rm -v .zig-cache/o/<hash>/test:/test alpine /test
-
-# Or as a one-liner (find the binary automatically)
-docker run --rm -v "$(find .zig-cache -name test -newer build.zig | head -1):/t:ro" alpine /t
+odin build src -out:ubrew -o:speed -target:linux_amd64
+docker run --rm -v $(pwd)/ubrew:/ubrew:ro ubuntu:24.04 /ubrew help
 ```
-
-Zig's cross-compilation produces a statically-linked binary that runs directly in any Linux container — no need to install Zig or any toolchain inside Docker.
 
 ## Contributing
 
@@ -331,7 +309,7 @@ The short version:
 ## Directory layout
 
 ```
-/opt/nanobrew/
+/opt/ubrew/
   cache/
     blobs/      # downloaded bottles (by SHA256)
     api/        # cached formula metadata (5-min TTL)
@@ -349,40 +327,40 @@ The short version:
 
 ## Homebrew Compatibility
 
-nanobrew uses Homebrew's formulas, bottles, and cask definitions. It's a faster client for the same ecosystem — not a fork.
+ubrew uses Homebrew's formulas, bottles, and cask definitions. It's a faster client for the same ecosystem — not a fork.
 
 ### What works
 
 - **Bottle installs** — all pre-built Homebrew bottles install correctly
 - **Cask installs** — `.dmg`, `.zip`, `.pkg`, and `.tar.gz` casks
 - **Dependency resolution** — same transitive deps as Homebrew
-- **Third-party taps** — `nb install user/tap/formula` fetches from GitHub
-- **Shared Cellar** — packages install to `/opt/nanobrew/prefix/Cellar/` (same layout as Homebrew)
-- **Bundle/Brewfile** — `nb bundle dump` and `nb bundle install` for common `brew "pkg"` and `cask "pkg"` lines
+- **Third-party taps** — `ubrew install user/tap/formula` fetches from GitHub
+- **Shared Cellar** — packages install to `/opt/ubrew/prefix/Cellar/` (same layout as Homebrew)
+- **Bundle/Brewfile** — `ubrew bundle dump` and `ubrew bundle install` for common `brew "pkg"` and `cask "pkg"` lines
 
 ### What doesn't work (yet)
 
 - **Ruby `post_install` hooks** — Homebrew formulae with Ruby `post_install` blocks won't run those hooks. Most bottles don't need them.
 - **Build from source with custom options** — `args: ["with-feature"]` in Brewfiles is ignored
-- **`tap` command** — nanobrew auto-fetches taps inline; standalone `brew tap` is not needed
+- **`tap` command** — ubrew auto-fetches taps inline; standalone `brew tap` is not needed
 - **Mac App Store (`mas`)** — not supported
 - **Complex Ruby DSL in Brewfiles** — conditional blocks, custom Ruby code
 
 ### Migration from Homebrew
 
 ```bash
-nb migrate    # scan /opt/homebrew/Cellar and Caskroom, import into nanobrew's DB
+ubrew migrate    # scan /opt/homebrew/Cellar and Caskroom, import into ubrew's DB
 ```
 
-After migration, `nb list`, `nb outdated`, and `nb upgrade` will see your existing packages.
+After migration, `ubrew list`, `ubrew outdated`, and `ubrew upgrade` will see your existing packages.
 
 ### Switching back to Homebrew
 
-Packages installed by nanobrew live in `/opt/nanobrew/prefix/Cellar/` — they don't interfere with Homebrew's `/opt/homebrew/Cellar/`. You can safely remove nanobrew with `nb nuke` without affecting Homebrew.
+Packages installed by ubrew live in `/opt/ubrew/prefix/Cellar/` — they don't interfere with Homebrew's `/opt/homebrew/Cellar/`. You can safely remove ubrew with `ubrew nuke` without affecting Homebrew.
 
 ## Project status
 
-**Experimental** — works well for common packages. If something breaks, [open an issue](https://github.com/justrach/nanobrew/issues).
+**Experimental** — works well for common packages. If something breaks, [open an issue](https://github.com/rjallais/ubrew/issues).
 
 License: [Apache 2.0](./LICENSE)
 
@@ -390,36 +368,36 @@ License: [Apache 2.0](./LICENSE)
 
 | Command | Short | What it does |
 |---------|-------|-------------|
-| `nb install <pkg>` | `nb i` | Install packages |
-| `nb install --cask <app>` | | Install macOS apps |
-| `nb install --deb <pkg>` | | Install .deb packages (Linux/Docker) |
-| `nb install user/tap/formula` | | Install from a third-party tap |
-| `nb remove <pkg>` | `nb ui` | Uninstall packages |
-| `nb remove --deb <pkg>` | | Remove a .deb package (Linux/Docker) |
-| `nb list` | `nb ls` | List installed packages (brew + deb) |
-| `nb leaves [--tree]` | | List installed formulae with no dependents |
-| `nb where <pattern>` | `nb wh` | Show installed kegs, prefix files, and index hits matching pattern |
-| `nb info <pkg>` | | Show package details |
-| `nb info --cask <app>` | | Show cask details |
-| `nb search <query>` | `nb s` | Search formulas and casks |
-| `nb upgrade [pkg]` | | Upgrade packages |
-| `nb upgrade --deb` | | Upgrade all installed .deb packages |
-| `nb outdated` | | List outdated packages (brew + deb) |
-| `nb pin <pkg>` | | Prevent upgrades |
-| `nb unpin <pkg>` | | Allow upgrades |
-| `nb rollback <pkg>` | `nb rb` | Revert to previous version |
-| `nb bundle dump` | | Export installed packages |
-| `nb bundle install` | | Import from bundle file |
-| `nb doctor` | `nb dr` | Health check |
-| `nb cleanup` | `nb clean` | Remove old caches |
-| `nb deps [--tree] <pkg>` | | Show dependencies |
-| `nb services` | | Manage services (launchctl/systemd) |
-| `nb completions <shell>` | | Print shell completions |
-| `nb telemetry [status\|on\|off]` | | View or change telemetry opt-in |
-| `nb nuke` | | Remove all of nanobrew's state |
-| `nb migrate` | | Import packages from Homebrew |
-| `nb update` | | Self-update nanobrew |
-| `nb init` | | Create directory structure |
-| `nb help` | | Show help |
+| `ubrew install <pkg>` | `ubrew i` | Install packages |
+| `ubrew install --cask <app>` | | Install macOS apps |
+| `ubrew install --deb <pkg>` | | Install .deb packages (Linux/Docker) |
+| `ubrew install user/tap/formula` | | Install from a third-party tap |
+| `ubrew remove <pkg>` | `ubrew ui` | Uninstall packages |
+| `ubrew remove --deb <pkg>` | | Remove a .deb package (Linux/Docker) |
+| `ubrew list` | `ubrew ls` | List installed packages (brew + deb) |
+| `ubrew leaves [--tree]` | | List installed formulae with no dependents |
+| `ubrew where <pattern>` | `ubrew wh` | Show installed kegs, prefix files, and index hits matching pattern |
+| `ubrew info <pkg>` | | Show package details |
+| `ubrew info --cask <app>` | | Show cask details |
+| `ubrew search <query>` | `ubrew s` | Search formulas and casks |
+| `ubrew upgrade [pkg]` | | Upgrade packages |
+| `ubrew upgrade --deb` | | Upgrade all installed .deb packages |
+| `ubrew outdated` | | List outdated packages (brew + deb) |
+| `ubrew pin <pkg>` | | Prevent upgrades |
+| `ubrew unpin <pkg>` | | Allow upgrades |
+| `ubrew rollback <pkg>` | `ubrew rb` | Revert to previous version |
+| `ubrew bundle dump` | | Export installed packages |
+| `ubrew bundle install` | | Import from bundle file |
+| `ubrew doctor` | `ubrew dr` | Health check |
+| `ubrew cleanup` | `ubrew clean` | Remove old caches |
+| `ubrew deps [--tree] <pkg>` | | Show dependencies |
+| `ubrew services` | | Manage services (launchctl/systemd) |
+| `ubrew completions <shell>` | | Print shell completions |
+| `ubrew telemetry [status\|on\|off]` | | View or change telemetry opt-in |
+| `ubrew nuke` | | Remove all of ubrew's state |
+| `ubrew migrate` | | Import packages from Homebrew |
+| `ubrew update` | | Self-update ubrew |
+| `ubrew init` | | Create directory structure |
+| `ubrew help` | | Show help |
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, ubrew, feat/clean-downloads]
+    branches: [main, ubrew]
   pull_request:
     branches: [main]
 
@@ -36,12 +36,11 @@ jobs:
         run: |
           sudo mkdir -p /opt/ubrew
           sudo chown -R $USER /opt/ubrew
-          sudo mkdir -p /opt
-          sudo ln -sfn /opt/ubrew /opt/nanobrew
           ./ubrew tap trust ublue-os/tap || exit 1
-          ./ubrew tap trust justrach/nanobrew || exit 1
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
-          echo "/opt/nanobrew/prefix/bin" >> $GITHUB_PATH
+
+      - name: Run unit tests
+        run: odin test src
 
       - name: Run smoke tests
         run: bash tests/smoke-test.sh ./ubrew

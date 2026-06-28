@@ -7,3 +7,22 @@ ubrew_dbg
 
 # local-only SSH keys (never commit)
 data/.ssh/
+
+# Zig build artifacts (stale, project migrated to Odin)
+.zig-cache/
+zig-out/
+.zigrep_archive
+
+# Stale test artifacts
+test_exec_iso
+test_fchmod.bin
+test_iso
+test_temp
+ubrew-debug
+ubrew_baseline
+ubrew_new
+check_win.o
+nb-linux
+src.bin
+uBrew
+codedb.snapshot

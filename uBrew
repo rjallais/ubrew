@@ -1,7 +1,0 @@
-brew "steipete/tap/gogcli"
-brew "redis"
-brew "wget"
-brew "htop"
-brew "curl"
-cask "ublue-os/tap/bluefin-wallpapers"
-cask "font-inter"

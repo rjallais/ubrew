@@ -26,7 +26,7 @@ on:
         type: boolean
         default: false
       run_manager_comparison:
-        description: "Run sandboxed yt-dlp comparison across nanobrew, Homebrew, and zerobrew"
+        description: "Run sandboxed yt-dlp comparison across ubrew, Homebrew, and zerobrew"
         required: false
         type: boolean
         default: false
@@ -47,7 +47,6 @@ on:
       - codex/issue-251-upstream-tooling
     paths:
       - ".github/workflows/upstream-tooling.yml"
-      - "build.zig"
       - "registry/upstream.json"
       - "scripts/**"
       - "src/**"
@@ -64,24 +63,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+      - name: Set up mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Build nanobrew
-        run: zig build -Doptimize=ReleaseFast
+      - name: Build ubrew
+        run: odin build src -out:ubrew -o:speed
 
-      - name: Run upstream Zig tests
-        run: |
-          zig build test-upstream-registry
-          zig build test-upstream-github
-          zig build test
+      - name: Run Odin unit tests
+        run: odin test src
 
       - name: Check upstream script syntax
         run: |
@@ -104,18 +98,18 @@ jobs:
       - name: Run upstream tooling fixture tests
         run: node scripts/test-upstream-tooling.mjs
 
-      - name: Initialize disposable nanobrew root
+      - name: Initialize disposable ubrew root
         run: |
-          sudo mkdir -p /opt/nanobrew
-          sudo chown -R "$USER" /opt/nanobrew
-          ./zig-out/bin/nb init
+          sudo mkdir -p /opt/ubrew
+          sudo chown -R "$USER" /opt/ubrew
+          ./ubrew init
 
       - name: Smoke verified upstream metadata paths
         run: |
-          NANOBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./zig-out/bin/nb info actionlint
-          NANOBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./zig-out/bin/nb info fd
-          NANOBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./zig-out/bin/nb info --cask codex
-          NANOBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./zig-out/bin/nb info --cask visual-studio-code
+          UBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./ubrew info actionlint
+          UBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./ubrew info fd
+          UBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./ubrew info --cask codex
+          UBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1 ./ubrew info --cask visual-studio-code
 
       - name: Generate upstream coverage report
         run: node scripts/upstream-coverage-report.mjs --top 100 --json > upstream-coverage.json
@@ -149,24 +143,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+      - name: Set up mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Build nanobrew
-        run: zig build -Doptimize=ReleaseFast
+      - name: Build ubrew
+        run: odin build src -out:ubrew -o:speed
 
-      - name: Initialize disposable nanobrew root
+      - name: Initialize disposable ubrew root
         run: |
-          sudo mkdir -p /opt/nanobrew
-          sudo chown -R "$USER" /opt/nanobrew
-          ./zig-out/bin/nb init
+          sudo mkdir -p /opt/ubrew
+          sudo chown -R "$USER" /opt/ubrew
+          ./ubrew init
 
       - name: Benchmark actual formula installs
         run: |
@@ -228,27 +220,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+      - name: Set up mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Build current nanobrew
+      - name: Build current ubrew
         run: |
-          zig build -Doptimize=ReleaseFast
-          cp zig-out/bin/nb /tmp/nb-current
+          odin build src -out:ubrew -o:speed
+          cp ubrew /tmp/nb-current
 
-      - name: Build previous nanobrew release
+      - name: Build previous ubrew release
         run: |
-          git worktree add --detach /tmp/nanobrew-v0.1.191 v0.1.191
-          cd /tmp/nanobrew-v0.1.191
-          zig build -Doptimize=ReleaseFast
-          cp zig-out/bin/nb /tmp/nb-v0.1.191
+          git worktree add --detach /tmp/ubrew-v0.1.191 v0.1.191
+          cd /tmp/ubrew-v0.1.191
+          odin build src -out:ubrew -o:speed
+          cp ubrew /tmp/nb-v0.1.191
 
       - name: Download pinned zerobrew binary
         env:
@@ -292,7 +282,7 @@ jobs:
             "|---|---:|---:|---:|---:|",
             ...result.rows.map((row) => `| ${row.manager} | ${row.target_reinstall_ms}ms | ${row.noop_median_ms}ms | ${fmt(row.current_speedup_target_reinstall)} | ${fmt(row.current_speedup_noop)} |`),
             "",
-            "Current nanobrew is run as `nb install --shims yt-dlp`; the workflow also smoke-tests that `yt-dlp --version` works and dependency executables such as `deno`/`python3.14` are not exposed in nanobrew's `prefix/bin`.",
+            "Current ubrew is run as `ubrew install --shims yt-dlp`; the workflow also smoke-tests that `yt-dlp --version` works and dependency executables such as `deno`/`python3.14` are not exposed in ubrew's `prefix/bin`.",
             "",
           ];
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
@@ -317,24 +307,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+      - name: Set up mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Build nanobrew
-        run: zig build -Doptimize=ReleaseFast
+      - name: Build ubrew
+        run: odin build src -out:ubrew -o:speed
 
-      - name: Initialize disposable nanobrew root
+      - name: Initialize disposable ubrew root
         run: |
-          sudo mkdir -p /opt/nanobrew
-          sudo chown -R "$USER" /opt/nanobrew
-          ./zig-out/bin/nb init
+          sudo mkdir -p /opt/ubrew
+          sudo chown -R "$USER" /opt/ubrew
+          ./ubrew init
 
       - name: Benchmark actual cask installs
         run: |

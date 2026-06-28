@@ -32,6 +32,10 @@ description = "Run integration smoke tests"
 run = "./tests/smoke-test.sh ./ubrew"
 depends = ["build"]
 
+[tasks.test-unit]
+description = "Run Odin unit tests"
+run = "odin test src"
+
 [tasks.bench-install]
 description = "Benchmark installs vs nb/brew (if present)"
 run = "./bench/bench_pkgmgr.sh install tree"

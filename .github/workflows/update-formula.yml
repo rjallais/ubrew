@@ -1,12 +1,12 @@
 name: Update Homebrew Formula on Release
 
 # Fires after a maintainer publishes a GitHub Release with the locally
-# notarized macOS tarballs uploaded as assets. The release.yml workflow
+# notarized macOS tarballs uploaded as assets. The release workflow
 # itself stays disabled because Apple notarization runs from a developer
-# machine via scripts/notarize-macos.sh — see release.yml.disabled.
+# machine via scripts/notarize-macos.sh.
 #
 # This job downloads the two macOS tarballs from the published release,
-# recomputes their SHA256s, rewrites Formula/nanobrew.rb, runs the formula
+# recomputes their SHA256s, rewrites Formula/ubrew.rb, runs the formula
 # verifier, and opens a PR against main with the bump.
 #
 # Skipped automatically for prereleases (tags containing a hyphen, e.g.
@@ -62,54 +62,54 @@ jobs:
           mkdir -p artifacts
           gh release download "$TAG" \
             --repo "${{ github.repository }}" \
-            --pattern 'nb-arm64-apple-darwin.tar.gz' \
-            --pattern 'nb-x86_64-apple-darwin.tar.gz' \
+            --pattern 'ubrew-arm64-apple-darwin.tar.gz' \
+            --pattern 'ubrew-x86_64-apple-darwin.tar.gz' \
             --dir artifacts
           ls -la artifacts/
 
-      - name: Rewrite Formula/nanobrew.rb
+      - name: Rewrite Formula/ubrew.rb
         env:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          ARM64_SHA=$(sha256sum artifacts/nb-arm64-apple-darwin.tar.gz | cut -d' ' -f1)
-          X86_SHA=$(sha256sum artifacts/nb-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          ARM64_SHA=$(sha256sum artifacts/ubrew-arm64-apple-darwin.tar.gz | cut -d' ' -f1)
+          X86_SHA=$(sha256sum artifacts/ubrew-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
 
-          cat > Formula/nanobrew.rb <<FORMULA
-          class Nanobrew < Formula
-            desc "The fastest macOS package manager. Written in Zig."
-            homepage "https://github.com/justrach/nanobrew"
+          cat > Formula/ubrew.rb <<FORMULA
+          class Ubrew < Formula
+            desc "The fastest macOS package manager. Written in Odin."
+            homepage "https://github.com/rjallais/ubrew"
             license "Apache-2.0"
             version "${VERSION}"
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/justrach/nanobrew/releases/download/v${VERSION}/nb-arm64-apple-darwin.tar.gz"
+                url "https://github.com/rjallais/ubrew/releases/download/v${VERSION}/ubrew-arm64-apple-darwin.tar.gz"
                 sha256 "${ARM64_SHA}"
               else
-                url "https://github.com/justrach/nanobrew/releases/download/v${VERSION}/nb-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/rjallais/ubrew/releases/download/v${VERSION}/ubrew-x86_64-apple-darwin.tar.gz"
                 sha256 "${X86_SHA}"
               end
             end
 
 
             def install
-              bin.install "nb"
+              bin.install "ubrew"
             end
 
             def post_install
-              ohai "Run 'nb init' to create the nanobrew directory tree"
+              ohai "Run 'ubrew init' to create the ubrew directory tree"
             end
 
             test do
-              assert_match "nanobrew", shell_output("#{bin}/nb help")
+              assert_match "ubrew", shell_output("#{bin}/ubrew help")
             end
           end
           FORMULA
 
-          sed -i 's/^          //' Formula/nanobrew.rb
-          cat Formula/nanobrew.rb
+          sed -i 's/^          //' Formula/ubrew.rb
+          cat Formula/ubrew.rb
 
       - name: Verify formula against published release
-        run: bash scripts/verify-formula-release.sh Formula/nanobrew.rb
+        run: bash scripts/verify-formula-release.sh Formula/ubrew.rb
 
       - name: Open formula PR
         env:
@@ -120,7 +120,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add Formula/nanobrew.rb
+          git add Formula/ubrew.rb
           if git diff --cached --quiet; then
             echo "Formula already up to date for ${TAG}"
             exit 0
@@ -140,8 +140,8 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --title "formula: update to ${TAG}" \
-            --body "Automated bump of \`Formula/nanobrew.rb\` after the GitHub Release for \`${TAG}\` was published with notarized macOS tarballs.
+            --body "Automated bump of \`Formula/ubrew.rb\` after the GitHub Release for \`${TAG}\` was published with notarized macOS tarballs.
 
-          Verified by \`scripts/verify-formula-release.sh\`. Closes #274 once merged.
+          Verified by \`scripts/verify-formula-release.sh\`. Closes the relevant issue once merged.
 
           Maintainers: do not bump the formula to a version without a matching release (see docs/RELEASING.md)."
