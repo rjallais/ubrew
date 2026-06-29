@@ -163,6 +163,16 @@ fi
 # ===================================================================
 
 echo ""
+echo "--- Test: update (build search DB) ---"
+"$NB" update >/dev/null 2>&1 || true
+# Verify the search index was created before proceeding
+if [ -f /opt/ubrew/cache/api/search-index.db ]; then
+  pass "update built search DB at /opt/ubrew/cache/api/search-index.db"
+else
+  fail "update did not create search DB at /opt/ubrew/cache/api/search-index.db"
+fi
+
+echo ""
 echo "--- Test: search ripgrep ---"
 SEARCH_OUT=$("$NB" search ripgrep 2>&1) || true
 if grep -q "ripgrep" <<<"$SEARCH_OUT"; then
