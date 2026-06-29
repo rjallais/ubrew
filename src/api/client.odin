@@ -3176,7 +3176,7 @@ index_is_stale :: proc() -> bool {
 	if dst_err != nil { return true }
 	defer os.file_info_delete(dst_info, context.allocator)
 
-	src_paths := []string{FORMULA_LIST_CACHE, CASK_LIST_CACHE}
+	src_paths := []string{FORMULA_LIST_CACHE, CASK_LIST_CACHE, get_registry_path()}
 	for src_path in src_paths {
 		src_info, src_err := os.stat(src_path, context.temp_allocator)
 		if src_err != nil { continue }

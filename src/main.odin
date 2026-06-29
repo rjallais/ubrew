@@ -4974,6 +4974,14 @@ run_update :: proc(args: []string) {
 				}
 			}
 
+			// Skip untrusted taps — no trusted listing to probe
+			if !tap.tap_is_trusted(entry.name) {
+				if verbose {
+					fmt.printf("  [skip] tap %s is untrusted, skipping probe\n", entry.name)
+				}
+				continue
+			}
+
 			// Derive branch only for taps that need probing
 			branch_url := entry.url
 			if len(branch_url) == 0 {

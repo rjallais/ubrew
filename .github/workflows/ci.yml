@@ -23,6 +23,9 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
+      - name: Compile SQLite3
+        run: cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o
+
       - name: Build ubrew
         run: odin build src -out:ubrew -o:speed
 
@@ -37,6 +40,7 @@ jobs:
           sudo mkdir -p /opt/ubrew
           sudo chown -R $USER /opt/ubrew
           ./ubrew tap trust ublue-os/tap || exit 1
+          ./ubrew tap trust justrach/nanobrew || exit 1
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
 
       - name: Run unit tests
