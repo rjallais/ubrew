@@ -135,7 +135,7 @@ package_name_safe :: proc(name: string) -> bool {
     if len(name) == 0 || len(name) > 256 {
         return false
     }
-    if strings.contains(name, "..") {
+    if name[0] == '/' || strings.contains(name, "..") {
         return false
     }
     for r in name {
