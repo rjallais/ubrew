@@ -4,12 +4,10 @@ odin = "dev-2026-06"
 [env]
 UBREW_TELEMETRY = "0" # Disable telemetry in development environments
 
-_build_sqlite3 :: "cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o"
-
 [tasks.build]
 description = "Build ubrew with aggressive optimizations for the native CPU (fastest dev build, no LTO)"
 run = """
-{{_build_sqlite3}} && odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native
+cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native
 """
 sources = ["src/**/*.odin"]
 outputs = ["ubrew"]
@@ -17,7 +15,7 @@ outputs = ["ubrew"]
 [tasks.build-portable]
 description = "Build ubrew without CPU-specific optimizations (more portable binary)"
 run = """
-{{_build_sqlite3}} && odin build src -out:ubrew_portable -o:speed -no-bounds-check
+cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew_portable -o:speed -no-bounds-check
 """
 sources = ["src/**/*.odin"]
 outputs = ["ubrew_portable"]
@@ -25,7 +23,7 @@ outputs = ["ubrew_portable"]
 [tasks.build-prod]
 description = "Build ubrew for production: aggressive opts + LTO + release linker (requires lld+lto:thin; slowest build, fastest binary)"
 run = """
-{{_build_sqlite3}} && odin build src -out:ubrew_prod -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module -no-rpath
+cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew_prod -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module -no-rpath
 """
 sources = ["src/**/*.odin"]
 outputs = ["ubrew_prod"]
