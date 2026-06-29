@@ -2,8 +2,7 @@ package tap
 
 // Unit tests for the tap package.
 // Run with: odin test src/tap
-// or via:   mise run test-unit  (runs odin test src, which does NOT include subdirs)
-// To run this individually: odin test src/tap
+// or via:   mise run test-unit  (runs odin test src src/tap)
 
 import "core:testing"
 import "core:strings"

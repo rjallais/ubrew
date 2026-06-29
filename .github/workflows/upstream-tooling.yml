@@ -74,6 +74,12 @@ jobs:
       - name: Build ubrew
         run: odin build src -out:ubrew -o:speed
 
+      - name: Initialize ubrew environment
+        run: |
+          sudo mkdir -p /opt/ubrew
+          sudo chown -R "$USER" /opt/ubrew
+          ./ubrew init
+
       - name: Run Odin unit tests
         run: odin test src
 
@@ -97,12 +103,6 @@ jobs:
 
       - name: Run upstream tooling fixture tests
         run: node scripts/test-upstream-tooling.mjs
-
-      - name: Initialize disposable ubrew root
-        run: |
-          sudo mkdir -p /opt/ubrew
-          sudo chown -R "$USER" /opt/ubrew
-          ./ubrew init
 
       - name: Smoke verified upstream metadata paths
         run: |
@@ -235,10 +235,11 @@ jobs:
 
       - name: Build previous ubrew release
         run: |
+          mise install zig@latest
           git worktree add --detach /tmp/ubrew-v0.1.191 v0.1.191
           cd /tmp/ubrew-v0.1.191
-          odin build src -out:ubrew -o:speed
-          cp ubrew /tmp/nb-v0.1.191
+          zig build
+          cp zig-out/bin/nb /tmp/nb-v0.1.191
 
       - name: Download pinned zerobrew binary
         env:

@@ -129,7 +129,7 @@ jobs:
           FFMPEG_DEPS="11 deps"
 
           TABLE="| Package | Homebrew | zerobrew (cold) | zerobrew (warm) | ubrew (cold) | ubrew (warm) |
-          |---------|----------|-----------------|-----------------|--------------+--------------|
+          |---------|----------|-----------------|-----------------|--------------|--------------|
           | **tree** ($TREE_DEPS) | ${{ steps.tree.outputs.brew }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.zb_warm }} | **${{ steps.tree.outputs.nb_cold }}** | **${{ steps.tree.outputs.nb_warm }}** |
           | **ffmpeg** ($FFMPEG_DEPS) | ${{ steps.ffmpeg.outputs.brew }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.zb_warm }} | **${{ steps.ffmpeg.outputs.nb_cold }}** | **${{ steps.ffmpeg.outputs.nb_warm }}** |
           | **wget** ($WGET_DEPS) | ${{ steps.wget.outputs.brew }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.zb_warm }} | **${{ steps.wget.outputs.nb_cold }}** | **${{ steps.wget.outputs.nb_warm }}** |"
@@ -176,10 +176,11 @@ jobs:
 
           # ubrew install --deb curl
           NB_TIME=$(TIMEFORMAT='%R'; { time docker run --rm \
-            -v "$NB_ABS:/opt/ubrew:ro" \
+            -v "$NB_ABS:/usr/local/bin/ubrew:ro" \
             ubuntu:24.04 bash -c "
-              /opt/ubrew init >/dev/null 2>&1
-              /opt/ubrew install --deb curl 2>&1
+              mkdir -p /opt/ubrew
+              /usr/local/bin/ubrew init >/dev/null 2>&1
+              /usr/local/bin/ubrew install --deb curl 2>&1
             " ; } 2>&1 | tail -1)
 
           # apt-get install curl
@@ -199,10 +200,11 @@ jobs:
 
           # ubrew install --deb curl wget git
           NB_TIME=$(TIMEFORMAT='%R'; { time docker run --rm \
-            -v "$NB_ABS:/opt/ubrew:ro" \
+            -v "$NB_ABS:/usr/local/bin/ubrew:ro" \
             ubuntu:24.04 bash -c "
-              /opt/ubrew init >/dev/null 2>&1
-              /opt/ubrew install --deb curl wget git 2>&1
+              mkdir -p /opt/ubrew
+              /usr/local/bin/ubrew init >/dev/null 2>&1
+              /usr/local/bin/ubrew install --deb curl wget git 2>&1
             " ; } 2>&1 | tail -1)
 
           # apt-get install curl wget git

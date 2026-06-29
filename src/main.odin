@@ -4874,11 +4874,9 @@ run_update :: proc(args: []string) {
 
 		urls := make([dynamic]string, context.temp_allocator)
 		out_files := make([dynamic]string, context.temp_allocator)
-		z_files := make([dynamic]string, context.temp_allocator)
 		defer {
 			delete(urls)
 			delete(out_files)
-			delete(z_files)
 		}
 
 		token := platform.get_gh_token()
@@ -4888,49 +4886,65 @@ run_update :: proc(args: []string) {
 			append(&headers, fmt.tprintf("Authorization: Bearer %s", token))
 		}
 
-		// 1. Add formula.json to queue
+		// 1. Download formula.json + cask.json with ETag in a single curl
+		//    process using --next, saving one fork/exec per call.
 		_ = os.make_directory_all(api.API_CACHE_DIR, os.perm(0o755))
-		temp_f1, terr1 := os.create_temp_file("", "ubrew_formula_list_*.json")
-		if terr1 == nil {
+		etag_file_f := api.FORMULA_LIST_CACHE + ".etag"
+		etag_file_c := api.CASK_LIST_CACHE + ".etag"
+
+		temp_f1, err1 := os.create_temp_file(api.API_CACHE_DIR, "ubrew_formula_list_*.json")
+		if err1 == nil {
 			temp_file_formula = strings.clone(os.name(temp_f1), context.allocator)
 			os.close(temp_f1)
-			append(&urls, api.FORMULA_LIST_URL)
-			append(&out_files, temp_file_formula)
-			z_val := ""
-			if os.is_file(api.FORMULA_LIST_CACHE) {
-				z_val = api.FORMULA_LIST_CACHE
-			}
-			append(&z_files, z_val)
 		}
-
-		// 2. Add cask.json to queue
-		temp_f2, terr2 := os.create_temp_file("", "ubrew_cask_list_*.json")
-		if terr2 == nil {
+		temp_f2, err2 := os.create_temp_file(api.API_CACHE_DIR, "ubrew_cask_list_*.json")
+		if err2 == nil {
 			temp_file_cask = strings.clone(os.name(temp_f2), context.allocator)
 			os.close(temp_f2)
-			append(&urls, api.CASK_LIST_URL)
-			append(&out_files, temp_file_cask)
-			z_val := ""
-			if os.is_file(api.CASK_LIST_CACHE) {
-				z_val = api.CASK_LIST_CACHE
-			}
-			append(&z_files, z_val)
 		}
 
-		// 3. Add upstream.json to queue (staged download)
+		if temp_file_formula != "" && temp_file_cask != "" {
+			if api.fetch_etag_batch([]string{api.FORMULA_LIST_URL, api.CASK_LIST_URL},
+				[]string{temp_file_formula, temp_file_cask},
+				[]string{etag_file_f, etag_file_c},
+				headers[:]) {
+				rebuild_index = true
+			}
+		} else {
+			// Fallback: sequential if temp file creation failed
+			if temp_file_formula != "" && api.fetch_single_with_etag(api.FORMULA_LIST_URL, temp_file_formula, etag_file_f, headers[:]) {
+				rebuild_index = true
+			}
+			if temp_file_cask != "" && api.fetch_single_with_etag(api.CASK_LIST_URL, temp_file_cask, etag_file_c, headers[:]) {
+				rebuild_index = true
+			}
+		}
+
+		// 3. Download upstream.json sequentially (separate from tap probes
+		//    because -z / --time-cond would apply globally in --parallel mode
+		//    and cause GitHub API probes to return 304 Not Modified).
 		_ = os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
 		db_path := installer.UBREW_ROOT + "/db/upstream.json"
-		temp_f3, terr3 := os.create_temp_file("", "ubrew_upstream_*.json")
+		temp_f3, terr3 := os.create_temp_file(installer.UBREW_ROOT + "/db", "ubrew_upstream_*.json")
 		if terr3 == nil {
 			temp_file_upstream = strings.clone(os.name(temp_f3), context.allocator)
 			os.close(temp_f3)
-			append(&urls, "https://raw.githubusercontent.com/rjallais/ubrew/main/registry/upstream.json")
-			append(&out_files, temp_file_upstream)
-			z_val := ""
+			upstream_url := "https://raw.githubusercontent.com/rjallais/ubrew/main/registry/upstream.json"
+			upstream_args := make([dynamic]string, context.temp_allocator)
+			defer delete(upstream_args)
+			append(&upstream_args, "curl")
+			append(&upstream_args, "-sfL")
+			append(&upstream_args, "--compressed")
+			append(&upstream_args, "--http2")
+			append(&upstream_args, "--no-progress-meter")
 			if os.is_file(db_path) {
-				z_val = db_path
+				append(&upstream_args, "-z")
+				append(&upstream_args, db_path)
 			}
-			append(&z_files, z_val)
+			append(&upstream_args, "-o")
+			append(&upstream_args, temp_file_upstream)
+			append(&upstream_args, upstream_url)
+			_ = platform.exec_cmd("curl", upstream_args[:])
 		}
 
 		// 4. Add tap Formula_listing.json requests
@@ -4943,18 +4957,54 @@ run_update :: proc(args: []string) {
 			delete(job_taps)
 		}
 		suffixes := []string{"/contents/Formula", "/contents"}
-		for entry in taps {
+		TAP_LISTING_MAX_AGE :: 3600 // 1 hour, matches fetch_tap_listing_cached
+
+		// Pre-detect all tap branches via a single curl --parallel instead
+		// of N sequential curl subprocesses inside tap_from_entry.
+		branch_urls := make([]string, len(taps), context.temp_allocator)
+		for entry, i in taps {
+			if len(entry.url) > 0 {
+				branch_urls[i] = entry.url
+			} else {
+				branch_urls[i] = fmt.tprintf("https://github.com/%s", entry.name)
+			}
+		}
+		branch_results := tap.derive_branches_batch(branch_urls)
+		defer {
+			for b in branch_results { delete(b) }
+			delete(branch_results)
+		}
+
+		for entry, tap_idx in taps {
+			branch := branch_results[tap_idx]
 			t_ptr := new(tap.Tap)
-			t_ptr^ = tap.tap_from_entry(entry)
+			t_ptr^ = tap.Tap{
+				name   = strings.clone(entry.name, context.allocator),
+				url    = strings.clone(branch_urls[tap_idx], context.allocator),
+				branch = strings.clone(branch, context.allocator),
+			}
 			append(&job_taps, t_ptr)
 			t := t_ptr^
 			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, t.name)
 			_ = os.make_directory_all(cache_dir, os.perm(0o755))
 			cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
-			z_val := ""
-			if os.is_file(cache_path) {
-				z_val = cache_path
+
+			// Skip network probe if cache is fresh (< 1 hour old)
+			if fi, err := os.stat(cache_path, context.temp_allocator); err == nil {
+				mod_sec := time.time_to_unix(fi.modification_time)
+				if time.time_to_unix(time.now()) - mod_sec < TAP_LISTING_MAX_AGE {
+					if verbose {
+						fmt.printf("  [cache] tap %s listing is fresh, skipping probe\n", t.name)
+					}
+					continue
+				}
 			}
+
+			// Do NOT pass z_val (If-Modified-Since) to tap probe URLs.
+			// The cache file's mtime is always newer than GitHub's
+			// Last-Modified header, which causes every probe to return
+			// 304 Not Modified and curl to skip writing the temp file.
+			// The -z flag is only useful for upstream.json (raw content).
 			candidates := api.tap_primary_candidates(t, context.temp_allocator)
 			// Check for cached hit sidecar to skip 404 probes
 			hit_path := fmt.tprintf("%s/Formula_listing.hit", cache_dir)
@@ -4980,7 +5030,6 @@ run_update :: proc(args: []string) {
 				_ = os.remove(tmp_path)
 				append(&urls, api.tap_api_url(t, candidates[hit_c_idx], suffixes[hit_s_idx]))
 				append(&out_files, strings.clone(tmp_path, context.temp_allocator))
-				append(&z_files, strings.clone(z_val, context.temp_allocator))
 			} else {
 				// No cached hit: probe all candidates
 				for c, c_idx in candidates {
@@ -4989,7 +5038,6 @@ run_update :: proc(args: []string) {
 						_ = os.remove(tmp_path)
 						append(&urls, api.tap_api_url(t, c, suffix))
 						append(&out_files, strings.clone(tmp_path, context.temp_allocator))
-						append(&z_files, strings.clone(z_val, context.temp_allocator))
 					}
 				}
 			}
@@ -4998,9 +5046,9 @@ run_update :: proc(args: []string) {
 
 
 		// Execute the parallel HTTP/2 download
-		curl_ok := false
+		curl_ok := len(urls) == 0 // no work = no error
 		if len(urls) > 0 {
-			curl_ok = api.fetch_urls_parallel_http2(urls[:], out_files[:], headers[:], z_files[:])
+			curl_ok = api.fetch_urls_parallel_http2(urls[:], out_files[:], headers[:])
 		}
 
 		// Post-process Homebrew API lists
@@ -5053,6 +5101,7 @@ run_update :: proc(args: []string) {
 			t := t_ptr^
 			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, t.name)
 			cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
+			hit_path := fmt.tprintf("%s/Formula_listing.hit", cache_dir)
 			promoted := false
 			candidates := api.tap_primary_candidates(t, context.temp_allocator)
 			outer: for s_idx in 0..<2 {
@@ -5067,7 +5116,6 @@ run_update :: proc(args: []string) {
 							if char_idx < len(data) && data[char_idx] == '[' {
 								_ = os.write_entire_file(cache_path, data)
 								// Write the winning (c_idx, s_idx) to hit sidecar
-								hit_path := fmt.tprintf("%s/Formula_listing.hit", cache_dir)
 								_ = os.write_entire_file(hit_path, transmute([]u8)fmt.tprintf("%d,%d", c_idx, s_idx))
 								promoted = true
 								break outer
@@ -5077,9 +5125,14 @@ run_update :: proc(args: []string) {
 				}
 			}
 			if !promoted && os.is_file(cache_path) && curl_ok {
-				// The tap listing is already valid from a previous run and
-				// no better candidate was found this round. Keep the old
-				// cache and treat it as a success.
+				// Keep old cache, infer .hit if missing so future runs skip probes
+				if !os.is_file(hit_path) {
+					if data, rerr := os.read_entire_file(cache_path, context.temp_allocator); rerr == nil {
+						if hi, si, hok := api.Infer_Hit_From_Cache(data, candidates, suffixes); hok {
+							_ = os.write_entire_file(hit_path, transmute([]u8)fmt.tprintf("%d,%d", hi, si))
+						}
+					}
+				}
 				promoted = true
 			}
 			for c_idx in 0..<len(candidates) {
@@ -6594,19 +6647,10 @@ run_formulae :: proc(args: []string) {
         }
     }
 
-    // 1. Homebrew-core formulae: pull from the compact TSV search index
-    //    (~500KB, 8,403 lines, reads in one syscall). This is the same file
-    //    that `search` reads, so the data is always fresh after `update`.
-    if data, rerr := os.read_entire_file(api.FORMULA_SEARCH_INDEX, context.temp_allocator); rerr == nil {
-        for line in strings.split_lines(string(data)) {
-            if line == "" { continue }
-            // First TSV column is the formula name; desc/follow in cols 2+3.
-            tab := strings.index(line, "\t")
-            if tab < 0 {
-                insert_name(&seen, line)
-            } else {
-                insert_name(&seen, line[:tab])
-            }
+    // 1. Homebrew-core formulae: pull from the SQLite search database.
+    if names := api.get_all_formula_names(context.temp_allocator); names != nil {
+        for name in names {
+            insert_name(&seen, name)
         }
     } else if data, rerr2 := api.fetch_cached_api_list(api.FORMULA_LIST_URL, api.FORMULA_LIST_CACHE); rerr2 == nil {
         // Fallback: read the raw 30MB formula.json if the index doesn't
@@ -8240,225 +8284,78 @@ run_search :: proc(args_slice: []string) {
         }
     }
 
-    scan_tsv_index :: proc(path: string, is_cask: bool, pkg_names: []string, flags_desc: bool, matched_formulae: ^[dynamic]api.Formula_Search_Result, matched_casks: ^[dynamic]api.Cask_Search_Result) {
-        if !os.is_file(path) {
-            return
-        }
-        data, err := os.read_entire_file(path, context.temp_allocator)
-        if err != nil {
-            return
-        }
-        text := string(data)
-        
-        start := 0
-        for start < len(text) {
-            end := start
-            for end < len(text) && text[end] != '\n' {
-                end += 1
-            }
-            if end > start {
-                line := text[start:end]
-                tab1 := strings.index_byte(line, '\t')
-                if tab1 > 0 {
-                    name := line[:tab1]
-                    rest := line[tab1+1:]
-                    tab2 := strings.index_byte(rest, '\t')
-                    desc, version: string
-                    if tab2 >= 0 {
-                        desc = rest[:tab2]
-                        rest2 := rest[tab2+1:]
-                        tab3 := strings.index_byte(rest2, '\t')
-                        if tab3 >= 0 {
-                            version = rest2[:tab3]
-                        } else {
-                            version = rest2
-                        }
-                    } else {
-                        desc = rest
-                    }
-
-                    for query in pkg_names {
-                        is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
-                        
-                        match := false
-                        if flags_desc {
-                            match = match_query(name, query, is_regex) || match_query(desc, query, is_regex)
-                        } else {
-                            match = match_query(name, query, is_regex)
-                        }
-
-                        if match {
-                            if is_cask {
-                                append(matched_casks, api.Cask_Search_Result{
-                                    token = strings.clone(name, context.temp_allocator),
-                                    name = strings.clone(name, context.temp_allocator),
-                                    desc = strings.clone(desc, context.temp_allocator),
-                                    version = strings.clone(version, context.temp_allocator),
-                                })
-                            } else {
-                                append(matched_formulae, api.Formula_Search_Result{
-                                    name = strings.clone(name, context.temp_allocator),
-                                    desc = strings.clone(desc, context.temp_allocator),
-                                    version = strings.clone(version, context.temp_allocator),
-                                })
-                            }
-                            break
-                        }
-                    }
-                }
-            }
-            start = end + 1
-        }
-    }
-
-    scan_registry_json :: proc(matched_formulae: ^[dynamic]api.Formula_Search_Result, matched_casks: ^[dynamic]api.Cask_Search_Result, pkg_names: []string, flags_desc, formula_only, cask_only: bool) {
-        reg_path := api.get_registry_path()
-        if !os.is_file(reg_path) {
-            return
-        }
-        data, err := os.read_entire_file(reg_path, context.temp_allocator)
-        if err != nil {
-            return
-        }
-        
-        json_val, parse_err := json.parse(data, allocator = context.temp_allocator)
-        if parse_err != nil {
-            return
-        }
-
-        root_obj, ok := json_val.(json.Object)
-        if !ok {
-            return
-        }
-
-        records_val, ok2 := root_obj["records"]
-        if !ok2 {
-            return
-        }
-        records_arr, ok3 := records_val.(json.Array)
-        if !ok3 {
-            return
-        }
-
-        for rec_item in records_arr {
-            rec_obj, ok4 := rec_item.(json.Object)
-            if !ok4 {
-                continue
-            }
-
-            kind := ""
-            if kind_val, ok5 := rec_obj["kind"]; ok5 {
-                if ks, ok6 := kind_val.(json.String); ok6 {
-                    kind = string(ks)
-                }
-            }
-
-            is_cask := (kind == "cask")
-            if is_cask && formula_only do continue
-            if !is_cask && cask_only do continue
-
-            token := ""
-            if tok_val, ok5 := rec_obj["token"]; ok5 {
-                if ts, ok6 := tok_val.(json.String); ok6 {
-                    token = string(ts)
-                }
-            }
-            name := ""
-            if name_val, ok5 := rec_obj["name"]; ok5 {
-                if ns, ok6 := name_val.(json.String); ok6 {
-                    name = string(ns)
-                }
-            }
-            if token == "" && name != "" {
-                token = name
-            }
-
-            desc := ""
-            if desc_val, ok5 := rec_obj["desc"]; ok5 {
-                if ds, ok6 := desc_val.(json.String); ok6 {
-                    desc = string(ds)
-                }
-            }
-
-            version := ""
-            if res_val, ok5 := rec_obj["resolved"]; ok5 {
-                if res_obj, ok6 := res_val.(json.Object); ok6 {
-                    if ver_val, ok7 := res_obj["version"]; ok7 {
-                        if vs, ok8 := ver_val.(json.String); ok8 {
-                            version = string(vs)
-                        }
-                    }
-                }
-            }
-
-            for query in pkg_names {
-                is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
-                
-                match := false
-                if flags_desc {
-                    match = match_query(token, query, is_regex) || match_query(name, query, is_regex) || match_query(desc, query, is_regex)
-                } else {
-                    match = match_query(token, query, is_regex) || match_query(name, query, is_regex)
-                }
-
-                if match {
-                    if is_cask {
-                        exists := false
-                        for c in matched_casks^ {
-                            if c.token == token {
-                                exists = true
-                                break
-                            }
-                        }
-                        if !exists {
-                            append(matched_casks, api.Cask_Search_Result{
-                                token = strings.clone(token, context.temp_allocator),
-                                name = strings.clone(name, context.temp_allocator),
-                                desc = strings.clone(desc, context.temp_allocator),
-                                version = strings.clone(version, context.temp_allocator),
-                            })
-                        }
-                    } else {
-                        exists := false
-                        for f in matched_formulae^ {
-                            if f.name == token {
-                                exists = true
-                                break
-                            }
-                        }
-                        if !exists {
-                            append(matched_formulae, api.Formula_Search_Result{
-                                name = strings.clone(token, context.temp_allocator),
-                                desc = strings.clone(desc, context.temp_allocator),
-                                version = strings.clone(version, context.temp_allocator),
-                            })
-                        }
-                    }
-                    break
-                }
-            }
-        }
-    }
-
-    // Ensure index files exist
-    if !os.is_file(api.FORMULA_SEARCH_INDEX) {
-        api.build_formula_search_index()
-    }
-    if !os.is_file(api.CASK_SEARCH_INDEX) {
-        api.build_cask_search_index()
-    }
-
     matched_formulae := make([dynamic]api.Formula_Search_Result, context.temp_allocator)
     matched_casks := make([dynamic]api.Cask_Search_Result, context.temp_allocator)
 
-    if !flags.cask_only {
-        scan_tsv_index(api.FORMULA_SEARCH_INDEX, false, pkg_names[:], flags.desc, &matched_formulae, &matched_casks)
+    has_formula :: proc(mf: [dynamic]api.Formula_Search_Result, name: string) -> bool {
+        for f in mf { if f.name == name { return true } }
+        return false
     }
-    if !flags.formula_only {
-        scan_tsv_index(api.CASK_SEARCH_INDEX, true, pkg_names[:], flags.desc, &matched_formulae, &matched_casks)
+    has_cask :: proc(mc: [dynamic]api.Cask_Search_Result, token: string) -> bool {
+        for c in mc { if c.token == token { return true } }
+        return false
     }
 
-    scan_registry_json(&matched_formulae, &matched_casks, pkg_names[:], flags.desc, flags.formula_only, flags.cask_only)
+    // Search using SQLite DB (includes core formulae/casks + upstream registry entries)
+    // The DB is built during `ubrew update` — search only reads.
+    if !flags.cask_only {
+        for query in pkg_names {
+            is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
+            if is_regex {
+                results := api.search_db_all_formulae(context.temp_allocator)
+                for r in results {
+                    if (match_query(r.name, query, true) || (flags.desc && match_query(r.desc, query, true))) && !has_formula(matched_formulae, r.name) {
+                        append(&matched_formulae, api.Formula_Search_Result{
+                            name = strings.clone(r.name, context.temp_allocator),
+                            desc = strings.clone(r.desc, context.temp_allocator),
+                            version = strings.clone(r.version, context.temp_allocator),
+                        })
+                    }
+                }
+            } else {
+                results := api.search_index_formulae(strings.to_lower(query, context.temp_allocator), 100)
+                for r in results {
+                    if (flags.desc || strings.contains(strings.to_lower(r.name, context.temp_allocator), strings.to_lower(query, context.temp_allocator))) && !has_formula(matched_formulae, r.name) {
+                        append(&matched_formulae, api.Formula_Search_Result{
+                            name = strings.clone(r.name, context.temp_allocator),
+                            desc = strings.clone(r.desc, context.temp_allocator),
+                            version = strings.clone(r.version, context.temp_allocator),
+                        })
+                    }
+                }
+            }
+        }
+    }
+    if !flags.formula_only {
+        for query in pkg_names {
+            is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
+            if is_regex {
+                results := api.search_db_all_casks(context.temp_allocator)
+                for r in results {
+                    if (match_query(r.token, query, true) || match_query(r.name, query, true) || (flags.desc && match_query(r.desc, query, true))) && !has_cask(matched_casks, r.token) {
+                        append(&matched_casks, api.Cask_Search_Result{
+                            token = strings.clone(r.token, context.temp_allocator),
+                            name = strings.clone(r.name, context.temp_allocator),
+                            desc = strings.clone(r.desc, context.temp_allocator),
+                            version = strings.clone(r.version, context.temp_allocator),
+                        })
+                    }
+                }
+            } else {
+                results := api.search_index_casks(strings.to_lower(query, context.temp_allocator), 100)
+                for r in results {
+                    if (flags.desc || strings.contains(strings.to_lower(r.token, context.temp_allocator), strings.to_lower(query, context.temp_allocator)) || strings.contains(strings.to_lower(r.name, context.temp_allocator), strings.to_lower(query, context.temp_allocator))) && !has_cask(matched_casks, r.token) {
+                        append(&matched_casks, api.Cask_Search_Result{
+                            token = strings.clone(r.token, context.temp_allocator),
+                            name = strings.clone(r.name, context.temp_allocator),
+                            desc = strings.clone(r.desc, context.temp_allocator),
+                            version = strings.clone(r.version, context.temp_allocator),
+                        })
+                    }
+                }
+            }
+        }
+    }
 
     if !flags.cask_only {
         for query in pkg_names {

@@ -6,10 +6,10 @@ class Ubrew < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/rjallais/ubrew/releases/download/v0.1.0/ubrew-arm64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER"
+      sha256 "PLACEHOLDER" # TODO: replace with real SHA256 before merging/releasing
     else
       url "https://github.com/rjallais/ubrew/releases/download/v0.1.0/ubrew-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER"
+      sha256 "PLACEHOLDER" # TODO: replace with real SHA256 before merging/releasing
     end
   end
 

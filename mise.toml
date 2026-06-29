@@ -34,7 +34,7 @@ depends = ["build"]
 
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src"
+run = "odin test src src/tap"
 
 [tasks.bench-install]
 description = "Benchmark installs vs nb/brew (if present)"
