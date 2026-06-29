@@ -471,6 +471,69 @@ registry_preferred_asset_key :: proc() -> string {
     return "macos-arm64"
 }
 
+// registry_entry_platform_tag returns a platform tag for a registry entry
+// based on its assets (top-level and resolved). Returns "LM", "L", "M", or "A".
+registry_entry_platform_tag :: proc(rec_obj: json.Object) -> string {
+	if rec_obj == nil { return "A" }
+	check_assets :: proc(obj: json.Object, has_linux, has_macos: ^bool) {
+		if assets_obj, ok := json_object_or_nil(obj, "assets"); ok {
+			for k, _ in assets_obj {
+				if k == "linux-x86_64" || k == "linux-aarch64" || k == "linux-kde" || k == "linux-gnome" || k == "linux-png" {
+					has_linux^ = true
+				}
+				if k == "macos-x86_64" || k == "macos-arm64" {
+					has_macos^ = true
+				}
+			}
+		}
+	}
+	has_linux, has_macos := false, false
+	check_assets(rec_obj, &has_linux, &has_macos)
+	if ro, ok := json_object_or_nil(rec_obj, "resolved"); ok {
+		check_assets(ro, &has_linux, &has_macos)
+	}
+	if has_linux && has_macos { return "LM" }
+	if has_linux { return "L" }
+	if has_macos { return "M" }
+	return "A"
+}
+
+// registry_has_current_os_asset returns true if the assets object (either
+// on the record or in its resolved child) contains an entry compatible with
+// the current OS, using the same fallback chain as registry_pick_resolved_asset.
+registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
+	if rec_obj == nil { return false }
+	has_asset_from_obj :: proc(obj: json.Object) -> bool {
+		if obj == nil { return false }
+		assets_obj, aok := json_object_or_nil(obj, "assets")
+		if !aok { return false }
+
+		de := detect_desktop_env_api()
+		if de == .KDE {
+			if _, exists := assets_obj["linux-kde"]; exists { return true }
+		} else if de == .GNOME {
+			if _, exists := assets_obj["linux-gnome"]; exists { return true }
+		}
+		if _, exists := assets_obj["linux-png"]; exists { return true }
+
+		preferred := registry_preferred_asset_key()
+		fallback_keys := []string{preferred, "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"}
+		for k in fallback_keys {
+			if _, exists := assets_obj[k]; exists { return true }
+		}
+		for _, v in assets_obj {
+			if _, ok := v.(json.Object); ok { return true }
+		}
+		return false
+	}
+
+	if has_asset_from_obj(rec_obj) { return true }
+	if resolved_obj, ok := json_object_or_nil(rec_obj, "resolved"); ok {
+		if has_asset_from_obj(resolved_obj) { return true }
+	}
+	return false
+}
+
 registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string, sha256: string) {
     // Preferred path: resolved.assets[platform].{url, sha256}
     if assets_obj, ok := json_object_or_nil(resolved_obj, "assets"); ok {
@@ -1635,23 +1698,7 @@ append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, q
         }
 
         // Platform filter: skip entries with no asset for the current OS
-        preferred_key := registry_preferred_asset_key()
-        has_platform_asset := false
-        if assets_obj, ok2 := json_object_or_nil(rec_obj, "assets"); ok2 {
-            if _, exists := assets_obj[preferred_key]; exists {
-                has_platform_asset = true
-            }
-        }
-        if !has_platform_asset {
-            if resolved_obj, ok2 := json_object_or_nil(rec_obj, "resolved"); ok2 {
-                if assets_obj, ok3 := json_object_or_nil(resolved_obj, "assets"); ok3 {
-                    if _, exists := assets_obj[preferred_key]; exists {
-                        has_platform_asset = true
-                    }
-                }
-            }
-        }
-        if !has_platform_asset {
+        if !registry_has_current_os_asset(rec_obj) {
             continue
         }
 
@@ -1708,23 +1755,7 @@ append_registry_cask_matches :: proc(out: ^[dynamic]Cask_Search_Result, query_lo
         }
 
         // Platform filter: skip entries with no asset for the current OS
-        preferred_key := registry_preferred_asset_key()
-        has_platform_asset := false
-        if assets_obj, ok2 := json_object_or_nil(rec_obj, "assets"); ok2 {
-            if _, exists := assets_obj[preferred_key]; exists {
-                has_platform_asset = true
-            }
-        }
-        if !has_platform_asset {
-            if resolved_obj, ok2 := json_object_or_nil(rec_obj, "resolved"); ok2 {
-                if assets_obj, ok3 := json_object_or_nil(resolved_obj, "assets"); ok3 {
-                    if _, exists := assets_obj[preferred_key]; exists {
-                        has_platform_asset = true
-                    }
-                }
-            }
-        }
-        if !has_platform_asset {
+        if !registry_has_current_os_asset(rec_obj) {
             continue
         }
 
@@ -2441,7 +2472,7 @@ which_formula_indexed :: proc(cmd: string) -> []string {
 	if !ok { return nil }
 	defer sqlite3_close(db)
 
-	csql := strings.clone_to_cstring("SELECT name FROM formulae WHERE instr(',' || executables || ',', ',' || ? || ',') > 0")
+	csql := strings.clone_to_cstring("SELECT name, platform FROM formulae WHERE instr(',' || executables || ',', ',' || ? || ',') > 0")
 	defer delete(csql)
 	stmt: ^Sqlite3Stmt
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
@@ -2453,6 +2484,8 @@ which_formula_indexed :: proc(cmd: string) -> []string {
 	matches := make([dynamic]string, context.allocator)
 	for sqlite3_step(stmt) == SQLITE_ROW {
 		name := _db_col_text(stmt, 0)
+		platform := _db_col_text(stmt, 1)
+		if !formula_available_on_current_os(platform) { continue }
 		append(&matches, strings.clone(name, context.allocator))
 	}
 
@@ -2908,6 +2941,18 @@ _db_col_text :: proc(stmt: ^Sqlite3Stmt, iCol: i32) -> string {
 	return string(cstr)
 }
 
+escape_like :: proc(s: string, allocator := context.temp_allocator) -> string {
+	buf := strings.builder_make(allocator)
+	for i in 0..<len(s) {
+		b := s[i]
+		if b == '%' || b == '_' || b == '\\' {
+			strings.write_byte(&buf, '\\')
+		}
+		strings.write_byte(&buf, b)
+	}
+	return strings.to_string(buf)
+}
+
 build_search_db :: proc() -> bool {
 	if sqlite3_initialize() != SQLITE_OK { return false }
 
@@ -2939,7 +2984,7 @@ build_search_db :: proc() -> bool {
 		"DROP TABLE IF EXISTS casks;" +
 		"CREATE TABLE casks(token TEXT, name TEXT, desc TEXT, version TEXT, platform TEXT);" +
 		"DROP TABLE IF EXISTS registry;" +
-		"CREATE TABLE registry(token TEXT, name TEXT, desc TEXT, version TEXT, kind TEXT);",
+		"CREATE TABLE registry(token TEXT, name TEXT, desc TEXT, version TEXT, kind TEXT, platform TEXT);",
 		context.temp_allocator)
 	rc = sqlite3_exec(db, ddl, nil, nil, nil)
 	if rc != SQLITE_OK { return false }
@@ -2989,11 +3034,11 @@ build_search_db :: proc() -> bool {
 				_db_bind_text(stmt, 3, version)
 				_db_bind_text(stmt, 4, execs)
 				_db_bind_text(stmt, 5, plat)
-				sqlite3_step(stmt)
+				if sqlite3_step(stmt) != SQLITE_DONE { return false }
 			}
 		}
 	}
-	sqlite3_exec(db, "COMMIT", nil, nil, nil)
+	if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
 
 	cstmt: ^Sqlite3Stmt
 	ccsql := strings.clone_to_cstring("INSERT INTO casks(token, name, desc, version, platform) VALUES(?, ?, ?, ?, ?)")
@@ -3041,15 +3086,15 @@ build_search_db :: proc() -> bool {
 				_db_bind_text(cstmt, 3, desc)
 				_db_bind_text(cstmt, 4, v)
 				_db_bind_text(cstmt, 5, plat)
-				sqlite3_step(cstmt)
+				if sqlite3_step(cstmt) != SQLITE_DONE { return false }
 			}
 		}
 	}
-	sqlite3_exec(db, "COMMIT", nil, nil, nil)
+	if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
 
 	// Index upstream registry entries into the DB
 	rstmt: ^Sqlite3Stmt
-	rcsql := strings.clone_to_cstring("INSERT INTO registry(token, name, desc, version, kind) VALUES(?, ?, ?, ?, ?)")
+	rcsql := strings.clone_to_cstring("INSERT INTO registry(token, name, desc, version, kind, platform) VALUES(?, ?, ?, ?, ?, ?)")
 	defer delete(rcsql)
 	rc = sqlite3_prepare_v2(db, rcsql, -1, &rstmt, nil)
 	if rc != SQLITE_OK { return false }
@@ -3081,15 +3126,17 @@ build_search_db :: proc() -> bool {
 								if token == "" { continue }
 
 								sqlite3_reset(rstmt)
+								rplat := registry_entry_platform_tag(rec_obj)
 								_db_bind_text(rstmt, 1, token)
 								_db_bind_text(rstmt, 2, name)
 								_db_bind_text(rstmt, 3, desc)
 								_db_bind_text(rstmt, 4, version)
 								_db_bind_text(rstmt, 5, kind)
-								sqlite3_step(rstmt)
+								_db_bind_text(rstmt, 6, rplat)
+								if sqlite3_step(rstmt) != SQLITE_DONE { return false }
 							}
 						}
-						sqlite3_exec(db, "COMMIT", nil, nil, nil)
+						if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
 					}
 				}
 				json.destroy_value(reg_val)
@@ -3098,13 +3145,18 @@ build_search_db :: proc() -> bool {
 	}
 
 	// Create indexes after all data is loaded (faster than per-insert)
-	sqlite3_exec(db, strings.clone_to_cstring("CREATE INDEX IF NOT EXISTS idx_formulae_name ON formulae(name)", context.temp_allocator), nil, nil, nil)
-	sqlite3_exec(db, strings.clone_to_cstring("CREATE INDEX IF NOT EXISTS idx_casks_token ON casks(token)", context.temp_allocator), nil, nil, nil)
-	sqlite3_exec(db, strings.clone_to_cstring("CREATE INDEX IF NOT EXISTS idx_registry_token ON registry(token)", context.temp_allocator), nil, nil, nil)
-	sqlite3_exec(db, strings.clone_to_cstring("CREATE INDEX IF NOT EXISTS idx_registry_kind ON registry(kind)", context.temp_allocator), nil, nil, nil)
+	index_sqls := []string{
+		"CREATE INDEX IF NOT EXISTS idx_formulae_name ON formulae(name)",
+		"CREATE INDEX IF NOT EXISTS idx_casks_token ON casks(token)",
+		"CREATE INDEX IF NOT EXISTS idx_registry_token ON registry(token)",
+		"CREATE INDEX IF NOT EXISTS idx_registry_kind ON registry(kind)",
+	}
+	for idx_sql in index_sqls {
+		if sqlite3_exec(db, strings.clone_to_cstring(idx_sql, context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
+	}
 
 	os.remove(SEARCH_DB_PATH)
-	os.rename(tmp_path, SEARCH_DB_PATH)
+	if os.rename(tmp_path, SEARCH_DB_PATH) != nil { return false }
 	return true
 }
 
@@ -3154,15 +3206,16 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 
 	stmt: ^Sqlite3Stmt
 	csql := strings.clone_to_cstring(
-		"SELECT name, desc, version, platform FROM formulae WHERE name LIKE ? OR desc LIKE ? " +
-		"UNION SELECT token, desc, version, '' FROM registry WHERE (token LIKE ? OR name LIKE ? OR desc LIKE ?) AND kind = 'formula' " +
+		"SELECT name, desc, version, platform FROM formulae WHERE name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\' " +
+		"UNION SELECT token, desc, version, platform FROM registry WHERE (token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\') AND kind = 'formula' " +
 		"LIMIT ?")
 	defer delete(csql)
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
 	if rc != SQLITE_OK { return nil }
 	defer sqlite3_finalize(stmt)
 
-	pattern := fmt.aprintf("%%%s%%", query_lower, allocator = context.temp_allocator)
+	escaped := escape_like(query_lower)
+	pattern := fmt.aprintf("%%%s%%", escaped, allocator = context.temp_allocator)
 	_db_bind_text(stmt, 1, pattern)
 	_db_bind_text(stmt, 2, pattern)
 	_db_bind_text(stmt, 3, pattern)
@@ -3195,15 +3248,16 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 
 	stmt: ^Sqlite3Stmt
 	csql := strings.clone_to_cstring(
-		"SELECT token, name, desc, version, platform FROM casks WHERE token LIKE ? OR name LIKE ? OR desc LIKE ? " +
-		"UNION SELECT token, name, desc, version, '' FROM registry WHERE (token LIKE ? OR name LIKE ? OR desc LIKE ?) AND kind = 'cask' " +
+		"SELECT token, name, desc, version, platform FROM casks WHERE token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\' " +
+		"UNION SELECT token, name, desc, version, platform FROM registry WHERE (token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\') AND kind = 'cask' " +
 		"LIMIT ?")
 	defer delete(csql)
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
 	if rc != SQLITE_OK { return nil }
 	defer sqlite3_finalize(stmt)
 
-	pattern := fmt.aprintf("%%%s%%", query_lower, allocator = context.temp_allocator)
+	escaped := escape_like(query_lower)
+	pattern := fmt.aprintf("%%%s%%", escaped, allocator = context.temp_allocator)
 	_db_bind_text(stmt, 1, pattern)
 	_db_bind_text(stmt, 2, pattern)
 	_db_bind_text(stmt, 3, pattern)
@@ -3271,7 +3325,9 @@ get_all_formula_names :: proc(allocator := context.allocator) -> []string {
 	if !ok { return nil }
 	defer sqlite3_close(db)
 
-	csql := strings.clone_to_cstring("SELECT name, platform FROM formulae")
+	csql := strings.clone_to_cstring(
+		"SELECT name, platform FROM formulae " +
+		"UNION SELECT token, platform FROM registry WHERE kind = 'formula'")
 	defer delete(csql)
 	stmt: ^Sqlite3Stmt
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
@@ -3293,7 +3349,9 @@ search_db_all_formulae :: proc(allocator := context.allocator) -> []Formula_Sear
 	if !ok { return nil }
 	defer sqlite3_close(db)
 
-	csql := strings.clone_to_cstring("SELECT name, desc, version, platform FROM formulae")
+	csql := strings.clone_to_cstring(
+		"SELECT name, desc, version, platform FROM formulae " +
+		"UNION SELECT token, desc, version, platform FROM registry WHERE kind = 'formula'")
 	defer delete(csql)
 	stmt: ^Sqlite3Stmt
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
@@ -3321,7 +3379,9 @@ search_db_all_casks :: proc(allocator := context.allocator) -> []Cask_Search_Res
 	if !ok { return nil }
 	defer sqlite3_close(db)
 
-	csql := strings.clone_to_cstring("SELECT token, name, desc, version, platform FROM casks")
+	csql := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM casks " +
+		"UNION SELECT token, name, desc, version, platform FROM registry WHERE kind = 'cask'")
 	defer delete(csql)
 	stmt: ^Sqlite3Stmt
 	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)

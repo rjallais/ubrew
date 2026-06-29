@@ -4959,34 +4959,8 @@ run_update :: proc(args: []string) {
 		suffixes := []string{"/contents/Formula", "/contents"}
 		TAP_LISTING_MAX_AGE :: 3600 // 1 hour, matches fetch_tap_listing_cached
 
-		// Pre-detect all tap branches via a single curl --parallel instead
-		// of N sequential curl subprocesses inside tap_from_entry.
-		branch_urls := make([]string, len(taps), context.temp_allocator)
-		for entry, i in taps {
-			if len(entry.url) > 0 {
-				branch_urls[i] = entry.url
-			} else {
-				branch_urls[i] = fmt.tprintf("https://github.com/%s", entry.name)
-			}
-		}
-		branch_results := tap.derive_branches_batch(branch_urls)
-		defer {
-			for b in branch_results { delete(b) }
-			delete(branch_results)
-		}
-
-		for entry, tap_idx in taps {
-			branch := branch_results[tap_idx]
-			t_ptr := new(tap.Tap)
-			t_ptr^ = tap.Tap{
-				name   = strings.clone(entry.name, context.allocator),
-				url    = strings.clone(branch_urls[tap_idx], context.allocator),
-				branch = strings.clone(branch, context.allocator),
-			}
-			append(&job_taps, t_ptr)
-			t := t_ptr^
-			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, t.name)
-			_ = os.make_directory_all(cache_dir, os.perm(0o755))
+		for entry in taps {
+			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, entry.name)
 			cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
 			// Skip network probe if cache is fresh (< 1 hour old)
@@ -4994,11 +4968,30 @@ run_update :: proc(args: []string) {
 				mod_sec := time.time_to_unix(fi.modification_time)
 				if time.time_to_unix(time.now()) - mod_sec < TAP_LISTING_MAX_AGE {
 					if verbose {
-						fmt.printf("  [cache] tap %s listing is fresh, skipping probe\n", t.name)
+						fmt.printf("  [cache] tap %s listing is fresh, skipping probe\n", entry.name)
 					}
 					continue
 				}
 			}
+
+			// Derive branch only for taps that need probing
+			branch_url := entry.url
+			if len(branch_url) == 0 {
+				branch_url = fmt.tprintf("https://github.com/%s", entry.name)
+			}
+			branch := tap.derive_branch_from_url(branch_url)
+			t_ptr := new(tap.Tap)
+			t_ptr^ = tap.Tap{
+				name   = strings.clone(entry.name, context.allocator),
+				url    = strings.clone(branch_url, context.allocator),
+				branch = strings.clone(branch, context.allocator),
+			}
+			delete(branch)
+			append(&job_taps, t_ptr)
+			t := t_ptr^
+			cache_dir = fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, t.name)
+			_ = os.make_directory_all(cache_dir, os.perm(0o755))
+			cache_path = fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
 			// Do NOT pass z_val (If-Modified-Since) to tap probe URLs.
 			// The cache file's mtime is always newer than GitHub's

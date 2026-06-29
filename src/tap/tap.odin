@@ -289,9 +289,6 @@ derive_branches_batch :: proc(urls: []string) -> []string {
 			}
 			api_url = strings.concatenate({api_url, "?ref=default"}, context.temp_allocator)
 
-			append(&gh_indices, idx)
-			append(&api_urls, api_url)
-
 			temp_f, terr := os.create_temp_file("", "ubrew_branch_*.json")
 			if terr != nil {
 				// Could not allocate a temp file for this probe — fall back
@@ -300,6 +297,8 @@ derive_branches_batch :: proc(urls: []string) -> []string {
 				branches[idx] = strings.clone("main", context.allocator)
 				continue
 			}
+			append(&gh_indices, idx)
+			append(&api_urls, api_url)
 			temp_name := strings.clone(os.name(temp_f), context.allocator)
 			os.close(temp_f)
 			append(&temp_files, temp_name)

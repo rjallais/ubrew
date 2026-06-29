@@ -40,7 +40,7 @@ If you rely on `post_install` hooks, build-from-source options, or Mac App Store
 |---------|----------|-----------------|-----------------|--------------+--------------|
 | **tree** (0 deps) | 3.554s | 2.260s | 0.311s | **1.288s** | **0.003s** |
 | **ffmpeg** (11 deps) | 8.007s | 5.335s | 2.860s | **1.751s** | **0.014s** |
-| **wget** (6 deps) | 3.958s | 6.425s | 0.841s | **3.876s** | **0.010s** | 3.935s | 5.502s | 0.587s | **3.211s** | **0.027s** |
+| **wget** (6 deps) | 3.958s | 6.425s | 0.841s | **3.876s** | **0.010s** |
 
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-06-22. Auto-updated weekly.
 
