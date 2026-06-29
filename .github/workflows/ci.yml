@@ -23,11 +23,18 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
-      - name: Compile SQLite3
-        run: cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o
+      - name: Build libsqlite3-fts5 (FTS5-enabled shared library)
+        run: |
+          cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 src/api/sqlite3.c -o src/api/sqlite3-fts5.o
+          case "$(uname -s)" in
+            Darwin) ext=dylib ;;
+            *)      ext=so    ;;
+          esac
+          cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+          strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 
       - name: Build ubrew
-        run: odin build src -out:ubrew -o:speed
+        run: odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:speed
 
       - name: Verify binary
         run: |
@@ -44,7 +51,7 @@ jobs:
           echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH
 
       - name: Run unit tests
-        run: odin test src
+        run: odin test src -define:SQLITE3_CUSTOM_FTS5=true
 
       - name: Run smoke tests
         run: bash tests/smoke-test.sh ./ubrew
