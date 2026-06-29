@@ -4,27 +4,35 @@ odin = "dev-2026-06"
 [env]
 UBREW_TELEMETRY = "0" # Disable telemetry in development environments
 
+[tasks.build-libsqlite]
+description = "One-time build of libsqlite3-fts5 from the amalgamation (only needed when sqlite3.c changes)"
+run = """
+case "$(uname -s)" in
+  Darwin) ext=dylib ;;
+  *)      ext=so    ;;
+esac
+cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 src/api/sqlite3.c -o src/api/sqlite3-fts5.o &&
+cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}" &&
+strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+"""
+sources = ["src/api/sqlite3.c"]
+outputs = ["src/vendor/odin-sqlite3/libsqlite3-fts5.so", "src/vendor/odin-sqlite3/libsqlite3-fts5.dylib"]
+
 [tasks.build]
 description = "Build ubrew with aggressive optimizations for the native CPU (fastest dev build, no LTO)"
-run = """
-cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native
-"""
+run = "odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native"
 sources = ["src/**/*.odin"]
 outputs = ["ubrew"]
 
 [tasks.build-portable]
 description = "Build ubrew without CPU-specific optimizations (more portable binary)"
-run = """
-cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew_portable -o:speed -no-bounds-check
-"""
+run = "odin build src -out:ubrew_portable -define:SQLITE3_CUSTOM_FTS5=true -o:speed -no-bounds-check"
 sources = ["src/**/*.odin"]
 outputs = ["ubrew_portable"]
 
 [tasks.build-prod]
 description = "Build ubrew for production: aggressive opts + LTO + release linker (requires lld+lto:thin; slowest build, fastest binary)"
-run = """
-cc -c -O2 src/api/sqlite3.c -o src/api/sqlite3.o && odin build src -out:ubrew_prod -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module -no-rpath
-"""
+run = "odin build src -out:ubrew_prod -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module"
 sources = ["src/**/*.odin"]
 outputs = ["ubrew_prod"]
 
@@ -40,7 +48,7 @@ depends = ["build"]
 
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src src/tap src/api"
+run = "odin test src src/tap src/api -define:SQLITE3_CUSTOM_FTS5=true"
 
 [tasks.bench-install]
 description = "Benchmark installs vs nb/brew (if present)"
@@ -64,12 +72,12 @@ depends = ["build"]
 
 [tasks.clean]
 description = "Clean up compiler build artifacts"
-run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg"
+run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg src/api/sqlite3.o"
 
 [tasks.check]
 description = "Type check all Odin source files"
-run = "odin check src"
+run = "odin check src -define:SQLITE3_CUSTOM_FTS5=true"
 
 [tasks.profile-build]
 description = "Show compile-time stage timings for the current build configuration"
-run = "odin build src -out:ubrew -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -show-timings"
+run = "odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -show-timings"

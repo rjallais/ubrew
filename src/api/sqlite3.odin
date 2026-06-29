@@ -1,38 +1,29 @@
 package api
 
 import "core:c"
+import fts "../vendor/odin-sqlite3"
 
-foreign import sqlite3_lib "sqlite3.o"
+// ----------------------------------------------------------------
+// Re-exported types from the vendored odin-sqlite3 community bindings
+// ----------------------------------------------------------------
+Connection          :: fts.Connection
+Statement           :: fts.Statement
+Result_Code         :: fts.Result_Code
+Destructor          :: fts.Destructor
+Destructor_Behavior :: fts.Destructor_Behavior
+Backup              :: fts.Backup
+Blob                :: fts.Blob
 
-SQLITE_OK   :: 0
-SQLITE_ROW  :: 100
-SQLITE_DONE :: 101
-
+// Open flags (kept as raw i32 for bitwise-OR compatibility)
 SQLITE_OPEN_READONLY  :: 0x00000001
 SQLITE_OPEN_READWRITE :: 0x00000002
 SQLITE_OPEN_CREATE    :: 0x00000004
 SQLITE_OPEN_NOMUTEX   :: 0x00008000
 
-Sqlite3Db   :: struct {}
-Sqlite3Stmt :: struct {}
-
-foreign sqlite3_lib {
-	sqlite3_initialize   :: proc() -> i32 ---
-	sqlite3_shutdown     :: proc() -> i32 ---
-	sqlite3_config       :: proc(op: i32, #c_vararg args: ..any) -> i32 ---
-	sqlite3_open_v2      :: proc(filename: cstring, ppDb: ^^Sqlite3Db, flags: i32, zVfs: cstring) -> i32 ---
-	sqlite3_close        :: proc(db: ^Sqlite3Db) -> i32 ---
-	sqlite3_exec         :: proc(db: ^Sqlite3Db, sql: cstring, callback: rawptr, arg: rawptr, errmsg: ^cstring) -> i32 ---
-	sqlite3_prepare_v2   :: proc(db: ^Sqlite3Db, sql: cstring, nByte: i32, ppStmt: ^^Sqlite3Stmt, pzTail: ^cstring) -> i32 ---
-	sqlite3_step         :: proc(stmt: ^Sqlite3Stmt) -> i32 ---
-	sqlite3_column_text  :: proc(stmt: ^Sqlite3Stmt, iCol: i32) -> cstring ---
-	sqlite3_column_int   :: proc(stmt: ^Sqlite3Stmt, iCol: i32) -> i32 ---
-	sqlite3_finalize     :: proc(stmt: ^Sqlite3Stmt) -> i32 ---
-	sqlite3_reset        :: proc(stmt: ^Sqlite3Stmt) -> i32 ---
-	sqlite3_errmsg       :: proc(db: ^Sqlite3Db) -> cstring ---
-	sqlite3_changes      :: proc(db: ^Sqlite3Db) -> i32 ---
-	sqlite3_bind_text    :: proc(stmt: ^Sqlite3Stmt, index: i32, value: cstring, n: i32, destructor: rawptr) -> i32 ---
-	sqlite3_bind_int     :: proc(stmt: ^Sqlite3Stmt, index: i32, value: i32) -> i32 ---
-}
-
-SQLITE_TRANSIENT :: rawptr(~uintptr(0))
+// Re-export useful functions under the old api.* namespace so client.odin
+// can use them without a separate import alias.
+// (client.odin now imports fts directly for SQLite calls; these re-exports
+//  are for other packages that might reference api.sqlite3_*)
+// client.odin imports fts directly for SQLite calls; these re-exports
+// are for other packages that might reference api.sqlite3_*
+// (not currently used — kept for compatibility)

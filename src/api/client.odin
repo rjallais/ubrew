@@ -5,6 +5,8 @@ import "core:os"
 import "core:encoding/json"
 import "core:strings"
 import "core:time"
+import "core:c"
+import fts "../vendor/odin-sqlite3"
 import "../cask"
 import "../formula"
 import "../kernel"
@@ -2470,19 +2472,19 @@ which_formula :: proc(cmd: string) -> []string {
 which_formula_indexed :: proc(cmd: string) -> []string {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
 	csql := strings.clone_to_cstring("SELECT name, platform FROM formulae WHERE instr(',' || executables || ',', ',' || ? || ',') > 0")
 	defer delete(csql)
-	stmt: ^Sqlite3Stmt
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
 	_db_bind_text(stmt, 1, cmd)
 
 	matches := make([dynamic]string, context.allocator)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		name := _db_col_text(stmt, 0)
 		platform := _db_col_text(stmt, 1)
 		if !formula_available_on_current_os(platform) { continue }
@@ -2930,13 +2932,13 @@ cask_available_on_current_os :: proc(platform_tag: string) -> bool {
 
 // --- SQLite Search Database ---
 
-_db_bind_text :: proc(stmt: ^Sqlite3Stmt, idx: i32, val: string) {
+_db_bind_text :: proc(stmt: ^Statement, idx: i32, val: string) {
 	cstr := cstring(raw_data(val))
-	sqlite3_bind_text(stmt, idx, cstr, i32(len(val)), SQLITE_TRANSIENT)
+	fts.bind_text(stmt, c.int(idx), cstr, c.int(len(val)), Destructor{behaviour = .Transient})
 }
 
-_db_col_text :: proc(stmt: ^Sqlite3Stmt, iCol: i32) -> string {
-	cstr := sqlite3_column_text(stmt, iCol)
+_db_col_text :: proc(stmt: ^Statement, iCol: i32) -> string {
+	cstr := fts.column_text(stmt, c.int(iCol))
 	if cstr == nil { return "" }
 	return string(cstr)
 }
@@ -2953,8 +2955,37 @@ escape_like :: proc(s: string, allocator := context.temp_allocator) -> string {
 	return strings.to_string(buf)
 }
 
+// build_fts_query converts a user's lowercase search string into an FTS5
+// MATCH query. Each word gets '*' appended for prefix matching so that
+// typing "wget" also matches "wget2", "wgetter", etc.  Terms are AND-ed
+// (space-separated, which is FTS5's default conjunction operator).
+build_fts_query :: proc(s: string, allocator := context.temp_allocator) -> string {
+	buf := strings.builder_make(allocator)
+	i := 0
+	for i < len(s) {
+		// Skip whitespace
+		for i < len(s) && (s[i] == ' ' || s[i] == '	' || s[i] == '\n' || s[i] == '\r') {
+			i += 1
+		}
+		if i >= len(s) { break }
+
+		if len(strings.to_string(buf)) > 0 {
+			strings.write_byte(&buf, ' ')
+		}
+
+		start := i
+		for i < len(s) && s[i] != ' ' && s[i] != '	' && s[i] != '\n' && s[i] != '\r' {
+			i += 1
+		}
+		term := s[start:i]
+		strings.write_string(&buf, term)
+		strings.write_byte(&buf, '*')
+	}
+	return strings.to_string(buf)
+}
+
 build_search_db :: proc() -> bool {
-	if sqlite3_initialize() != SQLITE_OK { return false }
+	if fts.initialize() != .Ok { return false }
 
 	data_f, rerr_f := os.read_entire_file(FORMULA_LIST_CACHE, context.allocator)
 	if rerr_f != nil || len(data_f) == 0 { return false }
@@ -2968,15 +2999,15 @@ build_search_db :: proc() -> bool {
 
 	tmp_path := SEARCH_DB_PATH + ".tmp"
 
-	db: ^Sqlite3Db
+	db: ^Connection
 	cpath := strings.clone_to_cstring(tmp_path, context.temp_allocator)
-	rc := sqlite3_open_v2(cpath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_close(db)
+	rc := fts.open_v2(cpath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil)
+	if rc != .Ok { return false }
+	defer fts.close(db)
 
-	sqlite3_exec(db, strings.clone_to_cstring("PRAGMA synchronous=OFF", context.temp_allocator), nil, nil, nil)
-	sqlite3_exec(db, strings.clone_to_cstring("PRAGMA journal_mode=MEMORY", context.temp_allocator), nil, nil, nil)
-	sqlite3_exec(db, strings.clone_to_cstring("PRAGMA cache_size=-64000", context.temp_allocator), nil, nil, nil)
+	fts.exec(db, strings.clone_to_cstring("PRAGMA synchronous=OFF", context.temp_allocator), nil, nil, nil)
+	fts.exec(db, strings.clone_to_cstring("PRAGMA journal_mode=MEMORY", context.temp_allocator), nil, nil, nil)
+	fts.exec(db, strings.clone_to_cstring("PRAGMA cache_size=-64000", context.temp_allocator), nil, nil, nil)
 
 	ddl := strings.clone_to_cstring(
 		"DROP TABLE IF EXISTS formulae;" +
@@ -2984,19 +3015,26 @@ build_search_db :: proc() -> bool {
 		"DROP TABLE IF EXISTS casks;" +
 		"CREATE TABLE casks(token TEXT, name TEXT, desc TEXT, version TEXT, platform TEXT);" +
 		"DROP TABLE IF EXISTS registry;" +
-		"CREATE TABLE registry(token TEXT, name TEXT, desc TEXT, version TEXT, kind TEXT, platform TEXT);",
+		"CREATE TABLE registry(token TEXT, name TEXT, desc TEXT, version TEXT, kind TEXT, platform TEXT);" +
+		// FTS5 virtual tables for full-text search (also dropped when content tables are dropped)
+		"DROP TABLE IF EXISTS formulae_fts;" +
+		"CREATE VIRTUAL TABLE formulae_fts USING fts5(name, desc, version, executables, platform, tokenize='porter unicode61');" +
+		"DROP TABLE IF EXISTS casks_fts;" +
+		"CREATE VIRTUAL TABLE casks_fts USING fts5(token, name, desc, version, platform, tokenize='porter unicode61');" +
+		"DROP TABLE IF EXISTS registry_fts;" +
+		"CREATE VIRTUAL TABLE registry_fts USING fts5(token, name, desc, version, kind, platform, tokenize='porter unicode61');",
 		context.temp_allocator)
-	rc = sqlite3_exec(db, ddl, nil, nil, nil)
-	if rc != SQLITE_OK { return false }
+	rc = fts.exec(db, ddl, nil, nil, nil)
+	if rc != .Ok { return false }
 
-	stmt: ^Sqlite3Stmt
+	stmt: ^Statement
 	csql := strings.clone_to_cstring("INSERT INTO formulae(name, desc, version, executables, platform) VALUES(?, ?, ?, ?, ?)")
 	defer delete(csql)
-	rc = sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_finalize(stmt)
+	rc = fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
 
-	sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+	fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
 
 	text := string(data_f)
 	depth := 0
@@ -3028,26 +3066,26 @@ build_search_db :: proc() -> bool {
 				execs := json_field_array_as_csv(obj, "executables")
 				plat := json_raw_bottle_platforms(obj)
 
-				sqlite3_reset(stmt)
+				fts.reset(stmt)
 				_db_bind_text(stmt, 1, name)
 				_db_bind_text(stmt, 2, desc)
 				_db_bind_text(stmt, 3, version)
 				_db_bind_text(stmt, 4, execs)
 				_db_bind_text(stmt, 5, plat)
-				if sqlite3_step(stmt) != SQLITE_DONE { return false }
+				if fts.step(stmt) != .Done { return false }
 			}
 		}
 	}
-	if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
+	if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
 
-	cstmt: ^Sqlite3Stmt
+	cstmt: ^Statement
 	ccsql := strings.clone_to_cstring("INSERT INTO casks(token, name, desc, version, platform) VALUES(?, ?, ?, ?, ?)")
 	defer delete(ccsql)
-	rc = sqlite3_prepare_v2(db, ccsql, -1, &cstmt, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_finalize(cstmt)
+	rc = fts.prepare_v2(db, ccsql, -1, &cstmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(cstmt)
 
-	sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+	fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
 
 	text_c := string(data_c)
 	depth = 0
@@ -3080,25 +3118,25 @@ build_search_db :: proc() -> bool {
 				v := json_field_string_raw(obj, "version")
 				plat := "M"
 
-				sqlite3_reset(cstmt)
+				fts.reset(cstmt)
 				_db_bind_text(cstmt, 1, token)
 				_db_bind_text(cstmt, 2, name)
 				_db_bind_text(cstmt, 3, desc)
 				_db_bind_text(cstmt, 4, v)
 				_db_bind_text(cstmt, 5, plat)
-				if sqlite3_step(cstmt) != SQLITE_DONE { return false }
+				if fts.step(cstmt) != .Done { return false }
 			}
 		}
 	}
-	if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
+	if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
 
 	// Index upstream registry entries into the DB
-	rstmt: ^Sqlite3Stmt
+	rstmt: ^Statement
 	rcsql := strings.clone_to_cstring("INSERT INTO registry(token, name, desc, version, kind, platform) VALUES(?, ?, ?, ?, ?, ?)")
 	defer delete(rcsql)
-	rc = sqlite3_prepare_v2(db, rcsql, -1, &rstmt, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_finalize(rstmt)
+	rc = fts.prepare_v2(db, rcsql, -1, &rstmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(rstmt)
 
 	reg_path := get_registry_path()
 	if os.is_file(reg_path) {
@@ -3107,7 +3145,7 @@ build_search_db :: proc() -> bool {
 			if reg_val, reg_parse_err := json.parse(reg_data); reg_parse_err == nil {
 				if root_obj, root_ok := reg_val.(json.Object); root_ok {
 					if records_arr, arr_ok := json_array_or_nil(root_obj, "records"); arr_ok {
-						sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+						fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
 						for rec_item in records_arr {
 							if rec_obj, rec_ok := rec_item.(json.Object); rec_ok {
 								token, name, desc, version, kind := "", "", "", "", ""
@@ -3125,7 +3163,7 @@ build_search_db :: proc() -> bool {
 								if token == "" && name != "" { token = name }
 								if token == "" { continue }
 
-								sqlite3_reset(rstmt)
+								fts.reset(rstmt)
 								rplat := registry_entry_platform_tag(rec_obj)
 								_db_bind_text(rstmt, 1, token)
 								_db_bind_text(rstmt, 2, name)
@@ -3133,10 +3171,10 @@ build_search_db :: proc() -> bool {
 								_db_bind_text(rstmt, 4, version)
 								_db_bind_text(rstmt, 5, kind)
 								_db_bind_text(rstmt, 6, rplat)
-								if sqlite3_step(rstmt) != SQLITE_DONE { return false }
+								if fts.step(rstmt) != .Done { return false }
 							}
 						}
-						if sqlite3_exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
+						if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
 					}
 				}
 				json.destroy_value(reg_val)
@@ -3152,7 +3190,21 @@ build_search_db :: proc() -> bool {
 		"CREATE INDEX IF NOT EXISTS idx_registry_kind ON registry(kind)",
 	}
 	for idx_sql in index_sqls {
-		if sqlite3_exec(db, strings.clone_to_cstring(idx_sql, context.temp_allocator), nil, nil, nil) != SQLITE_OK { return false }
+		if fts.exec(db, strings.clone_to_cstring(idx_sql, context.temp_allocator), nil, nil, nil) != .Ok { return false }
+	}
+
+	// Populate FTS5 virtual tables from the content tables.
+	// Done as a single INSERT...SELECT per table, which is much faster
+	// than per-row inserts into the FTS index.
+	fts_populate := []string{
+		"INSERT INTO formulae_fts(rowid, name, desc, version, executables, platform) SELECT rowid, name, desc, version, executables, platform FROM formulae",
+		"INSERT INTO casks_fts(rowid, token, name, desc, version, platform) SELECT rowid, token, name, desc, version, platform FROM casks",
+		"INSERT INTO registry_fts(rowid, token, name, desc, version, kind, platform) SELECT rowid, token, name, desc, version, kind, platform FROM registry",
+	}
+	for pop_sql in fts_populate {
+		if fts.exec(db, strings.clone_to_cstring(pop_sql, context.temp_allocator), nil, nil, nil) != .Ok {
+			return false
+		}
 	}
 
 	os.remove(SEARCH_DB_PATH)
@@ -3190,41 +3242,41 @@ index_is_stale :: proc() -> bool {
 
 // --- SQLite-backed search ---
 
-_open_search_db :: proc() -> (db: ^Sqlite3Db, ok: bool) {
-	sqlite3_initialize()
+_open_search_db :: proc() -> (db: ^Connection, ok: bool) {
+	fts.initialize()
 	cpath := strings.clone_to_cstring(SEARCH_DB_PATH)
 	defer delete(cpath)
-	rc := sqlite3_open_v2(cpath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
-	if rc != SQLITE_OK { return nil, false }
+	rc := fts.open_v2(cpath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+	if rc != .Ok { return nil, false }
 	return db, true
 }
 
 search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Search_Result {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
-	stmt: ^Sqlite3Stmt
+	stmt: ^Statement
+	fts_q := build_fts_query(query_lower)
 	csql := strings.clone_to_cstring(
-		"SELECT name, desc, version, platform FROM formulae WHERE name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\' " +
-		"UNION SELECT token, desc, version, platform FROM registry WHERE (token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\') AND kind = 'formula' " +
+		"SELECT name, desc, version, platform FROM formulae_fts WHERE name MATCH ? OR desc MATCH ? OR executables MATCH ? " +
+		"UNION SELECT token, desc, version, platform FROM registry_fts WHERE (token MATCH ? OR name MATCH ? OR desc MATCH ?) AND kind MATCH 'formula' " +
 		"LIMIT ?")
 	defer delete(csql)
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
-	escaped := escape_like(query_lower)
-	pattern := fmt.aprintf("%%%s%%", escaped, allocator = context.temp_allocator)
-	_db_bind_text(stmt, 1, pattern)
-	_db_bind_text(stmt, 2, pattern)
-	_db_bind_text(stmt, 3, pattern)
-	_db_bind_text(stmt, 4, pattern)
-	_db_bind_text(stmt, 5, pattern)
-	sqlite3_bind_int(stmt, 6, i32(limit))
+	_db_bind_text(stmt, 1, fts_q)
+	_db_bind_text(stmt, 2, fts_q)
+	_db_bind_text(stmt, 3, fts_q)
+	_db_bind_text(stmt, 4, fts_q)
+	_db_bind_text(stmt, 5, fts_q)
+	_db_bind_text(stmt, 6, fts_q)
+	fts.bind_int(stmt, 7, i32(limit))
 
 	out := make([dynamic]Formula_Search_Result)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		name := _db_col_text(stmt, 0)
 		if name == "" { continue }
 		desc := _db_col_text(stmt, 1)
@@ -3244,30 +3296,29 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Result {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
-	stmt: ^Sqlite3Stmt
+	stmt: ^Statement
+	fts_q := build_fts_query(query_lower)
 	csql := strings.clone_to_cstring(
-		"SELECT token, name, desc, version, platform FROM casks WHERE token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\' " +
-		"UNION SELECT token, name, desc, version, platform FROM registry WHERE (token LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR desc LIKE ? ESCAPE '\\') AND kind = 'cask' " +
+		"SELECT token, name, desc, version, platform FROM casks_fts WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
+		"UNION SELECT token, name, desc, version, platform FROM registry_fts WHERE (token MATCH ? OR name MATCH ? OR desc MATCH ?) AND kind MATCH 'cask' " +
 		"LIMIT ?")
 	defer delete(csql)
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
-	escaped := escape_like(query_lower)
-	pattern := fmt.aprintf("%%%s%%", escaped, allocator = context.temp_allocator)
-	_db_bind_text(stmt, 1, pattern)
-	_db_bind_text(stmt, 2, pattern)
-	_db_bind_text(stmt, 3, pattern)
-	_db_bind_text(stmt, 4, pattern)
-	_db_bind_text(stmt, 5, pattern)
-	_db_bind_text(stmt, 6, pattern)
-	sqlite3_bind_int(stmt, 7, i32(limit))
+	_db_bind_text(stmt, 1, fts_q)
+	_db_bind_text(stmt, 2, fts_q)
+	_db_bind_text(stmt, 3, fts_q)
+	_db_bind_text(stmt, 4, fts_q)
+	_db_bind_text(stmt, 5, fts_q)
+	_db_bind_text(stmt, 6, fts_q)
+	fts.bind_int(stmt, 7, i32(limit))
 
 	out := make([dynamic]Cask_Search_Result)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		token := _db_col_text(stmt, 0)
 		if token == "" { continue }
 		name := _db_col_text(stmt, 1)
@@ -3289,33 +3340,33 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 is_core_formula :: proc(name: string) -> bool {
 	db, ok := _open_search_db()
 	if !ok { return false }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
-	stmt: ^Sqlite3Stmt
+	stmt: ^Statement
 	csql := strings.clone_to_cstring("SELECT 1 FROM formulae WHERE name = ?")
 	defer delete(csql)
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_finalize(stmt)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
 
 	_db_bind_text(stmt, 1, name)
-	return sqlite3_step(stmt) == SQLITE_ROW
+	return fts.step(stmt) == .Row
 }
 
 is_core_cask :: proc(name: string) -> bool {
 	db, ok := _open_search_db()
 	if !ok { return false }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
-	stmt: ^Sqlite3Stmt
+	stmt: ^Statement
 	csql := strings.clone_to_cstring("SELECT 1 FROM casks WHERE token = ?")
 	defer delete(csql)
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return false }
-	defer sqlite3_finalize(stmt)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
 
 	_db_bind_text(stmt, 1, name)
-	return sqlite3_step(stmt) == SQLITE_ROW
+	return fts.step(stmt) == .Row
 }
 
 // --- Public helpers for main.odin ---
@@ -3323,19 +3374,19 @@ is_core_cask :: proc(name: string) -> bool {
 get_all_formula_names :: proc(allocator := context.allocator) -> []string {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
 	csql := strings.clone_to_cstring(
 		"SELECT name, platform FROM formulae " +
 		"UNION SELECT token, platform FROM registry WHERE kind = 'formula'")
 	defer delete(csql)
-	stmt: ^Sqlite3Stmt
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
 	out := make([dynamic]string, allocator)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		name := _db_col_text(stmt, 0)
 		platform := _db_col_text(stmt, 1)
 		if !formula_available_on_current_os(platform) { continue }
@@ -3347,19 +3398,19 @@ get_all_formula_names :: proc(allocator := context.allocator) -> []string {
 search_db_all_formulae :: proc(allocator := context.allocator) -> []Formula_Search_Result {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
 	csql := strings.clone_to_cstring(
 		"SELECT name, desc, version, platform FROM formulae " +
 		"UNION SELECT token, desc, version, platform FROM registry WHERE kind = 'formula'")
 	defer delete(csql)
-	stmt: ^Sqlite3Stmt
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
 	out := make([dynamic]Formula_Search_Result, allocator)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		name := _db_col_text(stmt, 0)
 		desc := _db_col_text(stmt, 1)
 		version := _db_col_text(stmt, 2)
@@ -3377,19 +3428,19 @@ search_db_all_formulae :: proc(allocator := context.allocator) -> []Formula_Sear
 search_db_all_casks :: proc(allocator := context.allocator) -> []Cask_Search_Result {
 	db, ok := _open_search_db()
 	if !ok { return nil }
-	defer sqlite3_close(db)
+	defer fts.close(db)
 
 	csql := strings.clone_to_cstring(
 		"SELECT token, name, desc, version, platform FROM casks " +
 		"UNION SELECT token, name, desc, version, platform FROM registry WHERE kind = 'cask'")
 	defer delete(csql)
-	stmt: ^Sqlite3Stmt
-	rc := sqlite3_prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != SQLITE_OK { return nil }
-	defer sqlite3_finalize(stmt)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
 
 	out := make([dynamic]Cask_Search_Result, allocator)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	for fts.step(stmt) == .Row {
 		token := _db_col_text(stmt, 0)
 		name := _db_col_text(stmt, 1)
 		desc := _db_col_text(stmt, 2)
