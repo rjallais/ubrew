@@ -234,7 +234,7 @@ connection closed
 
 ## Using SQLCipher instead of vanilla SQLite
 
-This binding can talk to **[SQLCipher](https://github.com/sqlcipher/sqlcipher)** out-of-the-box – you just need to link against `libsqlcipher` (note: this has only been tested on MacOS but should work across platforms):
+This binding can talk to **[SQLCipher](https://github.com/sqlcipher/sqlcipher)** out-of-the-box – you just need to link against `libsqlcipher` (note: this has only been tested on macOS but should work across platforms):
 
 ```sh
 odin build . -define:SQLITE3_USE_SQLCIPHER=true
