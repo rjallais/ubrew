@@ -164,12 +164,15 @@ fi
 
 echo ""
 echo "--- Test: update (build search DB) ---"
-"$NB" update >/dev/null 2>&1 || true
-# Verify the search index was created before proceeding
-if [ -f /opt/ubrew/cache/api/search-index.db ]; then
-  pass "update built search DB at /opt/ubrew/cache/api/search-index.db"
+if "$NB" update >/dev/null 2>&1; then
+  # Verify the search index was created before proceeding
+  if [ -f /opt/ubrew/cache/api/search-index.db ]; then
+    pass "update built search DB at /opt/ubrew/cache/api/search-index.db"
+  else
+    fail "update exited 0 but did not create search DB at /opt/ubrew/cache/api/search-index.db"
+  fi
 else
-  fail "update did not create search DB at /opt/ubrew/cache/api/search-index.db"
+  fail "ubrew update failed — earlier `|| true` masked regressions in FTS5 / build_search_db"
 fi
 
 echo ""

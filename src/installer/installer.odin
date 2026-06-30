@@ -445,24 +445,32 @@ relocate_macho_file :: proc(path: string) {
 		//    only ever appearing as path-prefix substrings in load
 		//    commands (which is how Homebrew bottle.rb writes them),
 		//    so the rewrite is unambiguous.
-		platform.exec_cmd(
+		//    Note: install_name_tool exits non-zero on any unfixable
+		//    entry; we log a warning so a broken Mach-O doesn't silently
+		//    land in the keg and surface only at first launch.
+		if !platform.exec_cmd(
 			"install_name_tool",
 			[]string{
 				"-rpath", "@@HOMEBREW_PREFIX@@/opt", PREFIX + "/opt",
 				"-rpath", "@@HOMEBREW_CELLAR@@",     PREFIX + "/Cellar",
 				path,
 			},
-		)
+		) {
+			fmt.eprintf("Warning: install_name_tool failed for %s — Mach-O rebuild may not relaunch correctly\n", path)
+		}
 
 		// 4. Re-sign ad-hoc. install_name_tool strips the ad-hoc
 		//    signature unconditionally — we must restore it for the
 		//    binary to launch on Apple Silicon (and under SIP for
 		//    Intel). `-` means ad-hoc signing, which requires no
-		//    signing identity.
-		platform.exec_cmd(
+		//    signing identity. If the re-sign fails the binary is now
+		//    unsigned entirely; log it explicitly.
+		if !platform.exec_cmd(
 			"codesign",
 			[]string{"--force", "--sign", "-", path},
-		)
+		) {
+			fmt.eprintf("Warning: codesign failed for %s — Mach-O is missing ad-hoc signature\n", path)
+		}
 	}
 }
 
