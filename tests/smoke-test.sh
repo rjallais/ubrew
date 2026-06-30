@@ -172,7 +172,7 @@ if "$NB" update >/dev/null 2>&1; then
     fail "update exited 0 but did not create search DB at /opt/ubrew/cache/api/search-index.db"
   fi
 else
-  fail "ubrew update failed — earlier `|| true` masked regressions in FTS5 / build_search_db"
+  fail "ubrew update failed (earlier '|| true' masked regressions in FTS5 / build_search_db)"
 fi
 
 echo ""
