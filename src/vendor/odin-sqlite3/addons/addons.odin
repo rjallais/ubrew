@@ -134,31 +134,37 @@ prepare :: proc(
 		if param.value == nil {
 			if rc := sqlite3.bind_null(stmt^, idx); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.(i32); ok {
 			if rc := sqlite3.bind_int(stmt^, idx, c.int(v)); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.(i64); ok {
 			if rc := sqlite3.bind_int64(stmt^, idx, c.int64_t(v)); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.(f64); ok {
 			if rc := sqlite3.bind_double(stmt^, idx, f64(v)); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.([]byte); ok {
 			if rc := sqlite3.bind_blob64(stmt^, idx, slice.as_ptr(v), c.int64_t(len(v)), {behaviour = .Static}); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.(bool); ok {
 			if rc := sqlite3.bind_int(stmt^, idx, c.int(v ? 1 : 0)); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else if v, ok := param.value.(string); ok {
@@ -168,11 +174,13 @@ prepare :: proc(
 			cstr := strings.unsafe_string_to_cstring(v)
 			if rc := sqlite3.bind_text(stmt^, idx, cstr, c.int(len(v)), {behaviour = .Static}); rc != .Ok {
 				sqlite3.finalize(stmt^)
+				stmt^ = nil
 				return rc
 			}
 		} else {
 			log.errorf("unhandled parameter type {}", param.value)
 			sqlite3.finalize(stmt^)
+			stmt^ = nil
 			return .Internal
 		}
 	}

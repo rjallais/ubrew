@@ -272,8 +272,10 @@ main :: proc() {
     }
     defer sqlite3.close(db)
 
-    // Derive a raw key from your chosen password.
-    // SQLCipher expects exactly 32 bytes for AES‑256.
+    // Provide the database key. SQLCipher accepts a password of any
+    // length and derives the encryption key internally via PBKDF2.
+    // For AES‑256 the raw key must be 32 bytes, but in practice a
+    // passphrase is more common — pass it directly as a byte slice.
     secret  := []byte("this is my super secret password!!!!!") // 32 bytes
     if sqlite3.key(db, raw_data(secret), cast(c.int)len(secret)) != 0 {
         panic("key failed")

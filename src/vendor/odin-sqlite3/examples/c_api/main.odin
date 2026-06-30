@@ -71,8 +71,10 @@ main :: proc() {
 		}
 
 		exp := sqlite.expanded_sql(stmt)
-		fmt.printfln("prepared sql: {}\n", exp)
-		sqlite.free(exp)
+		if exp != nil {
+			fmt.printfln("prepared sql: {}\n", exp)
+			sqlite.free(exp)
+		}
 
 		albums: [dynamic]Album
 		defer {
