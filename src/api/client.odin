@@ -519,12 +519,18 @@ registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
 		if _, exists := assets_obj["linux-png"]; exists { return true }
 
 		preferred := registry_preferred_asset_key()
-		fallback_keys := []string{preferred, "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"}
-		for k in fallback_keys {
-			if _, exists := assets_obj[k]; exists { return true }
+		// Only consider asset keys for the *current* OS — never
+		// accept a macOS asset on Linux or vice versa.
+		os_keys: []string
+		when ODIN_OS == .Linux {
+			os_keys = []string{preferred, "linux-x86_64", "linux-aarch64"}
+		} else when ODIN_OS == .Darwin {
+			os_keys = []string{preferred, "macos-x86_64", "macos-arm64"}
+		} else {
+			os_keys = []string{preferred}
 		}
-		for _, v in assets_obj {
-			if _, ok := v.(json.Object); ok { return true }
+		for k in os_keys {
+			if _, exists := assets_obj[k]; exists { return true }
 		}
 		return false
 	}
@@ -2990,7 +2996,17 @@ build_fts_query :: proc(s: string, allocator := context.temp_allocator) -> strin
 			i += 1
 		}
 		term := s[start:i]
-		strings.write_string(&buf, term)
+		// Wrap each term in double-quotes so FTS5 treats it as a
+		// literal phrase rather than query syntax.  Double any
+		// internal quote characters (FTS5 escape convention).
+		strings.write_byte(&buf, '"')
+		for j in 0..<len(term) {
+			if term[j] == '"' {
+				strings.write_byte(&buf, '"')
+			}
+			strings.write_byte(&buf, term[j])
+		}
+		strings.write_byte(&buf, '"')
 		strings.write_byte(&buf, '*')
 	}
 	return strings.to_string(buf)
@@ -3273,6 +3289,10 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	// Step 1: core formulae via `formulae_fts`. Three MATCH binds,
 	// no `kind` predicate, no UNION. The fix isolates the broken
 	// `AND kind MATCH …` from the (now-fine) per-column MATCH.
+	// Inflate the SQL LIMIT so OS-availability filtering at the
+	// application layer can discard cross-platform rows without
+	// starving the result set.
+	sql_limit := limit * 4
 	stmt: ^Statement
 	csql0 := strings.clone_to_cstring(
 		"SELECT name, desc, version, platform FROM formulae_fts " +
@@ -3284,7 +3304,7 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	_db_bind_text(stmt, 1, fts_q)
 	_db_bind_text(stmt, 2, fts_q)
 	_db_bind_text(stmt, 3, fts_q)
-	fts.bind_int(stmt, 4, i32(limit))
+	fts.bind_int(stmt, 4, i32(sql_limit))
 
 	out := make([dynamic]Formula_Search_Result)
 	for fts.step(stmt) == .Row {
@@ -3321,7 +3341,7 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	_db_bind_text(stmt2, 1, fts_q)
 	_db_bind_text(stmt2, 2, fts_q)
 	_db_bind_text(stmt2, 3, fts_q)
-	fts.bind_int(stmt2, 4, i32(limit))
+	fts.bind_int(stmt2, 4, i32(sql_limit))
 
 	for fts.step(stmt2) == .Row {
 		token := _db_col_text(stmt2, 0)
@@ -3351,6 +3371,10 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	// Same two-step pattern as `search_index_formulae`: split the
 	// core casks FTS query from the registry-tap query to avoid the
 	// broken `AND kind MATCH …` inside a UNION.
+	// Inflate the SQL LIMIT so OS-availability filtering at the
+	// application layer can discard cross-platform rows without
+	// starving the result set.
+	sql_limit := limit * 4
 	stmt: ^Statement
 	csql0 := strings.clone_to_cstring(
 		"SELECT token, name, desc, version, platform FROM casks_fts " +
@@ -3362,7 +3386,7 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	_db_bind_text(stmt, 1, fts_q)
 	_db_bind_text(stmt, 2, fts_q)
 	_db_bind_text(stmt, 3, fts_q)
-	fts.bind_int(stmt, 4, i32(limit))
+	fts.bind_int(stmt, 4, i32(sql_limit))
 
 	out := make([dynamic]Cask_Search_Result)
 	for fts.step(stmt) == .Row {
@@ -3396,7 +3420,7 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	_db_bind_text(stmt2, 1, fts_q)
 	_db_bind_text(stmt2, 2, fts_q)
 	_db_bind_text(stmt2, 3, fts_q)
-	fts.bind_int(stmt2, 4, i32(limit))
+	fts.bind_int(stmt2, 4, i32(sql_limit))
 
 	for fts.step(stmt2) == .Row {
 		token := _db_col_text(stmt2, 0)

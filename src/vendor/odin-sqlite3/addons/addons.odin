@@ -51,6 +51,8 @@ query :: proc(
 // Allocates. Make sure to free results even when the return value is not .Ok
 @(require_results)
 read_all_rows :: proc(stmt: ^sqlite3.Statement, out: ^[dynamic]$T) -> sqlite3.Result_Code {
+	defer sqlite3.finalize(stmt)
+
 	fields, err := get_type_fields(T)
 	if err != nil {
 		log.error(err)
@@ -65,8 +67,11 @@ read_all_rows :: proc(stmt: ^sqlite3.Statement, out: ^[dynamic]$T) -> sqlite3.Re
 		field_map[field.tag] = &field
 	}
 
-	defer sqlite3.finalize(stmt)
-	for sqlite3.step(stmt) == .Row {
+	rc: sqlite3.Result_Code
+	for {
+		rc = sqlite3.step(stmt)
+		if rc != .Row { break }
+
 		item: T
 		cols := sqlite3.column_count(stmt)
 		for i in 0 ..< cols {
@@ -90,7 +95,7 @@ read_all_rows :: proc(stmt: ^sqlite3.Statement, out: ^[dynamic]$T) -> sqlite3.Re
 		append(out, item)
 	}
 
-	return .Ok
+	return rc == .Done ? .Ok : rc
 }
 
 @(require_results)
@@ -127,26 +132,49 @@ prepare :: proc(
 		idx := c.int(param.index)
 
 		if param.value == nil {
-			sqlite3.bind_null(stmt^, idx) or_return
+			if rc := sqlite3.bind_null(stmt^, idx); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else if v, ok := param.value.(i32); ok {
-			sqlite3.bind_int(stmt^, idx, c.int(v)) or_return
+			if rc := sqlite3.bind_int(stmt^, idx, c.int(v)); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else if v, ok := param.value.(i64); ok {
-			sqlite3.bind_int64(stmt^, idx, c.int64_t(v)) or_return
+			if rc := sqlite3.bind_int64(stmt^, idx, c.int64_t(v)); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
+		} else if v, ok := param.value.(f64); ok {
+			if rc := sqlite3.bind_double(stmt^, idx, f64(v)); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else if v, ok := param.value.([]byte); ok {
-			sqlite3.bind_blob64(stmt^, idx, slice.as_ptr(v), c.int64_t(len(v)), {behaviour = .Static}) or_return
+			if rc := sqlite3.bind_blob64(stmt^, idx, slice.as_ptr(v), c.int64_t(len(v)), {behaviour = .Static}); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else if v, ok := param.value.(bool); ok {
-			sqlite3.bind_int(stmt^, idx, c.int(v ? 1 : 0)) or_return
+			if rc := sqlite3.bind_int(stmt^, idx, c.int(v ? 1 : 0)); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else if v, ok := param.value.(string); ok {
 			// Sqlite treats our parameter as a "cstring" if we pass a negative length.
 			// Explicitly it's just a slice.
 			// https://sqlite.org/c3ref/bind_blob.html.
 			cstr := strings.unsafe_string_to_cstring(v)
-			sqlite3.bind_text(stmt^, idx, cstr, c.int(len(v)), {behaviour = .Static}) or_return
+			if rc := sqlite3.bind_text(stmt^, idx, cstr, c.int(len(v)), {behaviour = .Static}); rc != .Ok {
+				sqlite3.finalize(stmt^)
+				return rc
+			}
 		} else {
 			log.errorf("unhandled parameter type {}", param.value)
+			sqlite3.finalize(stmt^)
 			return .Internal
 		}
-
 	}
 
 	exp_statement := sqlite3.expanded_sql(stmt^)

@@ -244,14 +244,14 @@ odin build . -define:SQLITE3_USE_SQLCIPHER=true
 
 ### 🔐  SQLCipher-only functions
 
-When `USE_SQLCIPHER` is **true** four extra C symbols become available in the `sqlite` package:
+When `USE_SQLCIPHER` is **true** four extra C symbols become available in the `sqlite3` package:
 
-| Odin name            | C symbol             | Purpose |
-|----------------------|----------------------|---------|
-| `sqlite.key`         | `sqlite3_key`        | Apply the *initial* key (password or raw binary) to a newly-opened database connection. |
-| `sqlite.key_v2`      | `sqlite3_key_v2`     | Same as above, but lets you specify the schema name (usually `"main"`). |
-| `sqlite.rekey`       | `sqlite3_rekey`      | Re-encrypt the database with a **new** key. |
-| `sqlite.rekey_v2`    | `sqlite3_rekey_v2`   | Same as above, but scoped to a specific attached schema. |
+| Binding symbol    | C function        | Description |
+|-------------------|-------------------|-------------|
+| `sqlite3.key`         | `sqlite3_key`        | Apply the *initial* key (password or raw binary) to a newly-opened database connection. |
+| `sqlite3.key_v2`      | `sqlite3_key_v2`     | Same as above, but lets you specify the schema name (usually `"main"`). |
+| `sqlite3.rekey`       | `sqlite3_rekey`      | Re-encrypt the database with a **new** key. |
+| `sqlite3.rekey_v2`    | `sqlite3_rekey_v2`   | Same as above, but scoped to a specific attached schema. |
 
 You can also use the bare `PRAGMA key="mypassword"` and `PRAGMA rekey="newpassword"` if desired.
 
@@ -261,31 +261,32 @@ You can also use the bare `PRAGMA key="mypassword"` and `PRAGMA rekey="newpasswo
 
 ```odin
 import "core:c"
+import sqlite3 ".."
 
 main :: proc() {
-    db: ^sqlite.Connection = nil
+    db: ^sqlite3.Connection = nil
 
     // Open the database file.
-    if sqlite.open("./encrypted.sqlite", &db) != .Ok {
+    if sqlite3.open("./encrypted.sqlite", &db) != .Ok {
         panic("open failed")
     }
-    defer sqlite.close(db)
+    defer sqlite3.close(db)
 
-    // Provide the secret for the database. You MUST do this before using it.
-    secret := "Tr0ub4dor&3";
-    if sqlite.key(db, raw_data(secret), cast(c.int)len(secret)) != 0 {
-        // Handle error - note: this will return 0 even if the key is wrong.
-        // You will get an error on the next call if the key is wrong.
+    // Derive a raw key from your chosen password.
+    // SQLCipher expects exactly 32 bytes for AES‑256.
+    secret  := []byte("this is my super secret password!!!!!") // 32 bytes
+    if sqlite3.key(db, raw_data(secret), cast(c.int)len(secret)) != 0 {
+        panic("key failed")
     }
 
-    // ...Everything else is the same as using SQLite...
+    // Now you can use sqlite3.exec / sqlite3.prepare_v2 normally.
+    // Everything below this line is transparently encrypted.
 
-    // Change the secret for the database.
-    new_secret := "CorrectHorseBatteryStaple";
-    sqlite.rekey(db, raw_data(new_secret), cast(c.int)len(new_secret))
+    // To change the key at runtime:
+    // new_secret  := []byte("this is my other secret password!!")
+    // sqlite3.rekey(db, raw_data(new_secret), cast(c.int)len(new_secret))
 }
 ```
-
 ---
 
 ## Contributions

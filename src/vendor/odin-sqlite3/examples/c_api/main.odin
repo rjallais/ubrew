@@ -70,7 +70,9 @@ main :: proc() {
 			fmt.panicf("failed to bind value to limit. result code: {}", rc)
 		}
 
-		fmt.printfln("prepared sql: {}\n", sqlite.expanded_sql(stmt))
+		exp := sqlite.expanded_sql(stmt)
+		fmt.printfln("prepared sql: {}\n", exp)
+		sqlite.free(exp)
 
 		albums: [dynamic]Album
 		defer {
