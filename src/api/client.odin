@@ -2268,12 +2268,18 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
         return false
     }
 
-    // Snapshot pre-transfer sizes so we can detect actual new content
-    // vs. a 304 that left the old file untouched.
+    // Snapshot pre-transfer sizes AND mtimes so we can detect actual
+    // new content vs. a 304 that left the old file untouched. Size
+    // alone misses in-place edits where the upstream JSON keeps the
+    // same byte count but changes content (e.g. a description fix).
+    pre_mtimes := make([]time.Time, len(urls), context.temp_allocator)
+    defer delete(pre_mtimes)
     pre_sizes := make([]i64, len(urls), context.temp_allocator)
+    defer delete(pre_sizes)
     for i in 0..<len(urls) {
         if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil {
-            pre_sizes[i] = fi.size
+            pre_sizes[i]  = fi.size
+            pre_mtimes[i] = fi.modification_time
         }
     }
 
@@ -2309,8 +2315,14 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
 
     any_updated := false
     for i in 0..<len(out_files) {
-        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 && fi.size != pre_sizes[i] {
-            any_updated = true
+        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
+            // Either the byte count changed (200 with new payload) or
+            // the mtime advanced past the pre-snapshot (curl's write
+            // bumps mtime on every successful download). The mtime
+            // check covers in-place edits where size is unchanged.
+            if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
+                any_updated = true
+            }
         }
     }
     return any_updated
