@@ -2456,7 +2456,7 @@ which_formula :: proc(cmd: string) -> []string {
 				if name == "" {
 					continue
 				}
-				if formula_provides_executable(obj, cmd) {
+				if formula_provides_executable(obj, cmd) && formula_available_on_current_os(json_raw_bottle_platforms(obj)) {
 					append(&matches, strings.clone(name, context.allocator))
 				}
 			}
