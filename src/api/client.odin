@@ -3256,24 +3256,23 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	if !ok { return nil }
 	defer fts.close(db)
 
-	stmt: ^Statement
 	fts_q := build_fts_query(query_lower)
-	csql := strings.clone_to_cstring(
-		"SELECT name, desc, version, platform FROM formulae_fts WHERE name MATCH ? OR desc MATCH ? OR executables MATCH ? " +
-		"UNION SELECT token, desc, version, platform FROM registry_fts WHERE (token MATCH ? OR name MATCH ? OR desc MATCH ?) AND kind MATCH 'formula' " +
-		"LIMIT ?")
-	defer delete(csql)
-	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != .Ok { return nil }
-	defer fts.finalize(stmt)
 
+	// Step 1: core formulae via `formulae_fts`. Three MATCH binds,
+	// no `kind` predicate, no UNION. The fix isolates the broken
+	// `AND kind MATCH …` from the (now-fine) per-column MATCH.
+	stmt: ^Statement
+	csql0 := strings.clone_to_cstring(
+		"SELECT name, desc, version, platform FROM formulae_fts " +
+		"WHERE name MATCH ? OR desc MATCH ? OR executables MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql0)
+	if fts.prepare_v2(db, csql0, -1, &stmt, nil) != .Ok { return nil }
+	defer fts.finalize(stmt)
 	_db_bind_text(stmt, 1, fts_q)
 	_db_bind_text(stmt, 2, fts_q)
 	_db_bind_text(stmt, 3, fts_q)
-	_db_bind_text(stmt, 4, fts_q)
-	_db_bind_text(stmt, 5, fts_q)
-	_db_bind_text(stmt, 6, fts_q)
-	fts.bind_int(stmt, 7, i32(limit))
+	fts.bind_int(stmt, 4, i32(limit))
 
 	out := make([dynamic]Formula_Search_Result)
 	for fts.step(stmt) == .Row {
@@ -3284,8 +3283,45 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 		platform := _db_col_text(stmt, 3)
 		if !formula_available_on_current_os(platform) { continue }
 		append(&out, Formula_Search_Result{
-			name = strings.clone(name),
-			desc = strings.clone(desc),
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
+	}
+
+	// Step 2: 3rd-party-tap formulae via `registry_fts`. The original
+	// code used a `UNION` whose second arm carried
+	// `AND kind MATCH 'formula'`. Under SQLite FTS5 that predicate
+	// returns zero rows when its rowid source also has other MATCH
+	// operators in the same WHERE (the FTS5 planner mixes the two
+	// expressions across columns instead of AND-intersecting).
+	// We isolate `registry_fts` into a separate prepare and look up
+	// the row's `kind` in the regular `registry` content table.
+	stmt2: ^Statement
+	csql1 := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM registry_fts " +
+		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql1)
+	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
+	defer fts.finalize(stmt2)
+	_db_bind_text(stmt2, 1, fts_q)
+	_db_bind_text(stmt2, 2, fts_q)
+	_db_bind_text(stmt2, 3, fts_q)
+	fts.bind_int(stmt2, 4, i32(limit))
+
+	for fts.step(stmt2) == .Row {
+		token := _db_col_text(stmt2, 0)
+		if token == "" { continue }
+		if !_registry_kind_is(db, token, "formula") { continue }
+		desc := _db_col_text(stmt2, 2)
+		version := _db_col_text(stmt2, 3)
+		platform := _db_col_text(stmt2, 4)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&out, Formula_Search_Result{
+			name    = strings.clone(token),
+			desc    = strings.clone(desc),
 			version = strings.clone(version),
 		})
 		if len(out) >= limit { break }
@@ -3298,24 +3334,23 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	if !ok { return nil }
 	defer fts.close(db)
 
-	stmt: ^Statement
 	fts_q := build_fts_query(query_lower)
-	csql := strings.clone_to_cstring(
-		"SELECT token, name, desc, version, platform FROM casks_fts WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
-		"UNION SELECT token, name, desc, version, platform FROM registry_fts WHERE (token MATCH ? OR name MATCH ? OR desc MATCH ?) AND kind MATCH 'cask' " +
-		"LIMIT ?")
-	defer delete(csql)
-	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
-	if rc != .Ok { return nil }
-	defer fts.finalize(stmt)
 
+	// Same two-step pattern as `search_index_formulae`: split the
+	// core casks FTS query from the registry-tap query to avoid the
+	// broken `AND kind MATCH …` inside a UNION.
+	stmt: ^Statement
+	csql0 := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM casks_fts " +
+		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql0)
+	if fts.prepare_v2(db, csql0, -1, &stmt, nil) != .Ok { return nil }
+	defer fts.finalize(stmt)
 	_db_bind_text(stmt, 1, fts_q)
 	_db_bind_text(stmt, 2, fts_q)
 	_db_bind_text(stmt, 3, fts_q)
-	_db_bind_text(stmt, 4, fts_q)
-	_db_bind_text(stmt, 5, fts_q)
-	_db_bind_text(stmt, 6, fts_q)
-	fts.bind_int(stmt, 7, i32(limit))
+	fts.bind_int(stmt, 4, i32(limit))
 
 	out := make([dynamic]Cask_Search_Result)
 	for fts.step(stmt) == .Row {
@@ -3327,15 +3362,74 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 		platform := _db_col_text(stmt, 4)
 		if !cask_available_on_current_os(platform) { continue }
 		append(&out, Cask_Search_Result{
-			token = strings.clone(token),
-			name = strings.clone(name),
-			desc = strings.clone(desc),
+			token   = strings.clone(token),
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
+	}
+
+	// Tap-provided casks via `registry_fts`, filtered by `kind` in
+	// the regular `registry` content table (see the formulae proc for
+	// why the inline `AND kind MATCH …` is broken).
+	stmt2: ^Statement
+	csql1 := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM registry_fts " +
+		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql1)
+	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
+	defer fts.finalize(stmt2)
+	_db_bind_text(stmt2, 1, fts_q)
+	_db_bind_text(stmt2, 2, fts_q)
+	_db_bind_text(stmt2, 3, fts_q)
+	fts.bind_int(stmt2, 4, i32(limit))
+
+	for fts.step(stmt2) == .Row {
+		token := _db_col_text(stmt2, 0)
+		if token == "" { continue }
+		if !_registry_kind_is(db, token, "cask") { continue }
+		name := _db_col_text(stmt2, 1)
+		desc := _db_col_text(stmt2, 2)
+		version := _db_col_text(stmt2, 3)
+		platform := _db_col_text(stmt2, 4)
+		if !cask_available_on_current_os(platform) { continue }
+		append(&out, Cask_Search_Result{
+			token   = strings.clone(token),
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
 			version = strings.clone(version),
 		})
 		if len(out) >= limit { break }
 	}
 	return out[:]
 }
+
+// _registry_kind_is returns true iff registry.kind == kind_for for the
+// given token. The kind filter is run against the regular content table
+// rather than inside a virtual-table MATCH predicate (the FTS5 quirk
+// motivating this split). Each call is one prepared/executed query;
+// for large hit sets a small per-search cache could amortise this —
+// not currently a hot path because `append_tap_formulae_matches` in
+// main.odin still hits `registry` directly.
+_registry_kind_is :: proc(db: ^Connection, token: string, kind_for: string) -> bool {
+	stmt: ^Statement
+	csql := strings.clone_to_cstring(
+		"SELECT kind FROM registry WHERE token = ? AND kind = ?")
+	defer delete(csql)
+	if fts.prepare_v2(db, csql, -1, &stmt, nil) != .Ok { return false }
+	defer fts.finalize(stmt)
+	_db_bind_text(stmt, 1, token)
+	_db_bind_text(stmt, 2, kind_for)
+	got := false
+	for fts.step(stmt) == .Row {
+		k := _db_col_text(stmt, 0)
+		if k == kind_for { got = true; break }
+	}
+	return got
+}
+
 
 is_core_formula :: proc(name: string) -> bool {
 	db, ok := _open_search_db()
