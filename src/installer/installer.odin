@@ -370,7 +370,7 @@ relocate_single_file :: proc(path: string) {
 			fmt.eprintf("Warning: rpath for %s exceeded buffer; skipping rpath rewrite\n", path)
 		}
 	} else if is_macho_file(path) {
-		// Skip Mach-O files to avoid byte shifting / binary corruption
+		relocate_macho_file(path)
 	} else {
 		data, read_err := os.read_entire_file(path, context.temp_allocator)
 		if read_err == nil && len(data) > 0 {
@@ -383,6 +383,86 @@ relocate_single_file :: proc(path: string) {
 				_ = os.write_entire_file_from_string(path, new_content)
 			}
 		}
+	}
+}
+
+// relocate_macho_file rewrites Homebrew bottle Mach-O placeholders
+// (`@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`) inside LC_RPATH and
+// LC_LOAD_DYLIB load commands so the dynamic linker can resolve
+// dependencies at launch on macOS.
+//
+// Mach-O bottles ship from the Homebrew build farm with those
+// placeholders inserted by `bottle.rb` and intended to be substituted
+// by the consumer installer. Without translation, dyld follows
+// unreplaced paths on launch and the kernel rejects the process with
+// `Bad CPU type in executable` / `code signature invalid` / `Killed`
+// (seen concretely on macOS arm64 for `perl` in the CI smoke test,
+// regression #221).
+//
+// `install_name_tool` unconditionally strips the ad-hoc code signature
+// on the file it modifies, so we follow up with
+// `codesign --force --sign -` to re-sign ad-hoc — otherwise launch
+// fails with `code signature invalid` for any binary that originally
+// bore one (which is all of them after bottle.rb writes the bottle).
+//
+// On non-Darwin platforms this is a no-op so the call site in
+// relocate_single_file remains portable.
+relocate_macho_file :: proc(path: string) {
+	when ODIN_OS == .Darwin {
+		// 1. Scan for placeholders. `otool -l` dumps the load-command
+		//    stream; if neither substring is present there is nothing
+		//    to rewrite and we skip both tools. This preserves the
+		//    existing code signature in the common case.
+		lbuf: [16384]u8
+		otool_args := []string{"otool", "-l", path}
+		_, truncated := platform.exec_cmd_capture("otool", otool_args, lbuf[:], true)
+		needs_rewrite := truncated
+		if !needs_rewrite {
+			load_cmds := string(lbuf[:])
+			needs_rewrite = strings.contains(load_cmds, "@@HOMEBREW_PREFIX@@") ||
+			                strings.contains(load_cmds, "@@HOMEBREW_CELLAR@@")
+		} else if data, read_err := os.read_entire_file(path, context.temp_allocator); read_err == nil {
+			needs_rewrite = strings.contains(string(data), "@@HOMEBREW_PREFIX@@") ||
+			                strings.contains(string(data), "@@HOMEBREW_CELLAR@@")
+		}
+		if !needs_rewrite {
+			return
+		}
+
+		// 2. Bottled Mach-O files are 0o555; install_name_tool
+		//    refuses to write read-only files. Make writable first.
+		chmod_args := []string{"chmod", "+w", path}
+		platform.exec_cmd("chmod", chmod_args)
+
+		// 3. Rewrite each placeholder in the binary's load commands.
+		//    `install_name_tool -rpath` is a literal substring
+		//    replacement against LC_RPATH entries. We issue one
+		//    call per (oldprefix -> newprefix) pair. The two paths
+		//    we need to translate are:
+		//      @@HOMEBREW_PREFIX@@/opt -> PREFIX/opt
+		//      @@HOMEBREW_CELLAR@@/... -> PREFIX/Cellar/...
+		//    The Cellar substitution relies on the placeholders
+		//    only ever appearing as path-prefix substrings in load
+		//    commands (which is how Homebrew bottle.rb writes them),
+		//    so the rewrite is unambiguous.
+		platform.exec_cmd(
+			"install_name_tool",
+			[]string{
+				"-rpath", "@@HOMEBREW_PREFIX@@/opt", PREFIX + "/opt",
+				"-rpath", "@@HOMEBREW_CELLAR@@",     PREFIX + "/Cellar",
+				path,
+			},
+		)
+
+		// 4. Re-sign ad-hoc. install_name_tool strips the ad-hoc
+		//    signature unconditionally — we must restore it for the
+		//    binary to launch on Apple Silicon (and under SIP for
+		//    Intel). `-` means ad-hoc signing, which requires no
+		//    signing identity.
+		platform.exec_cmd(
+			"codesign",
+			[]string{"--force", "--sign", "-", path},
+		)
 	}
 }
 
