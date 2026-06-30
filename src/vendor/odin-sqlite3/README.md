@@ -89,7 +89,7 @@ The base package follows the standard SQLite3 C API conventions, while the addon
 
 You can fine-tune how the library is searched for by setting the following defineables using `odin [command] -define:XYZ=value`.
  - `SQLITE3_DYNAMIC_LIB` - Flag to use the dynamic library instead of the static one. Defaults to `false`.
- - `SQLITE3_SYSTEM_LIB` - Flag to search the library in system defined paths instead of in the working directory. Defaults to `false`.
+ - `SQLITE3_SYSTEM_LIB` - Flag to search the library in system-defined paths instead of in the working directory. Defaults to `false`.
 
 For more examples and details, refer to the source code.
 
