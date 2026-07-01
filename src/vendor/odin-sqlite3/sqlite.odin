@@ -266,7 +266,7 @@ Result_Code :: enum (c.int) {
 foreign sqlite {
 	free :: proc "c" (ptr: rawptr) ---
 	open :: proc "c" (filename: cstring, db: ^^Connection) -> Result_Code ---
-	open16 :: proc "c" (filename: cstring, db: ^^Connection) -> Result_Code ---
+	open16 :: proc "c" (filename: rawptr, db: ^^Connection) -> Result_Code ---
 	open_v2 :: proc "c" (filename: cstring, db: ^^Connection, flags: c.int, z_vfs: cstring) -> Result_Code ---
 	initialize :: proc "c" () -> Result_Code ---
 	shutdown :: proc "c" () -> Result_Code ---
@@ -297,7 +297,7 @@ foreign sqlite {
 	bind_int64 :: proc "c" (statement: ^Statement, param_idx: c.int, param_value: c.int64_t) -> Result_Code ---
 	bind_null :: proc "c" (statement: ^Statement, param_idx: c.int) -> Result_Code ---
 	bind_text :: proc "c" (statement: ^Statement, param_idx: c.int, param_value: cstring, param_len: c.int, free: Destructor) -> Result_Code ---
-	bind_text16 :: proc "c" (statement: ^Statement, param_idx: c.int, param_value: cstring, param_len: c.int, free: Destructor) -> Result_Code ---
+	bind_text16 :: proc "c" (statement: ^Statement, param_idx: c.int, param_value: rawptr, param_len: c.int, free: Destructor) -> Result_Code ---
 	bind_text64 :: proc "c" (statement: ^Statement, param_idx: c.int, param_value: cstring, param_len: c.int64_t, free: Destructor, encoding: c.uchar) -> Result_Code ---
 	bind_zeroblob :: proc "c" (statement: ^Statement, param_idx: c.int, len: c.int) -> Result_Code ---
 	bind_zeroblob64 :: proc "c" (statement: ^Statement, param_idx: c.int, len: c.int64_t) -> Result_Code ---
