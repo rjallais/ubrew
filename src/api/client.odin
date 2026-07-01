@@ -3235,7 +3235,6 @@ build_search_db :: proc() -> bool {
 		}
 	}
 
-	os.remove(SEARCH_DB_PATH)
 	if os.rename(tmp_path, SEARCH_DB_PATH) != nil { return false }
 	return true
 }

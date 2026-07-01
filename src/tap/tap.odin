@@ -257,8 +257,7 @@ derive_branch_from_url :: proc(url: string) -> string {
 //
 // Ownership: the returned slice and each element string are independently
 // heap-allocated via context.allocator. Callers must `delete()` every
-// element string before deleting the slice itself, or call the
-// `free_branches_batch` helper below.
+// element string before deleting the slice itself.
 derive_branches_batch :: proc(urls: []string) -> []string {
 	branches := make([]string, len(urls), context.allocator)
 

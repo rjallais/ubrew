@@ -5087,7 +5087,9 @@ run_update :: proc(args: []string) {
 				if data, rerr := os.read_entire_file(temp_file_upstream, context.temp_allocator); rerr == nil && len(data) > 0 {
 					if val, json_err := json.parse(data); json_err == nil {
 						json.destroy_value(val)
-						_ = os.rename(temp_file_upstream, db_path)
+						if os.rename(temp_file_upstream, db_path) == nil {
+							rebuild_index = true
+						}
 					}
 				}
 			}
