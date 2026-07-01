@@ -1,14 +1,14 @@
 # Contributing
 
-Thanks for your interest in nanobrew.
+Thanks for your interest in ubrew.
 
 ## Security Model and PR Policy
 
-**nanobrew is a package manager.** It runs with elevated trust on user systems: it downloads and executes binaries, patches ELF interpreters, writes to `/opt`, and manages system-level service files. A single malicious or poorly-reviewed PR can compromise every machine that installs an affected version.
+**ubrew is a package manager.** It runs with elevated trust on user systems: it downloads and executes binaries, patches ELF interpreters, writes to `/opt`, and manages system-level service files. A single malicious or poorly-reviewed PR can compromise every machine that installs an affected version.
 
 Following a confirmed supply-chain attack attempt via an external pull request, this project has adopted a **maintainer-only merge policy**:
 
-- All code merged to `main` is authored and reviewed by the core maintainer (@justrach).
+- All code merged to `main` is authored and reviewed by the core maintainer (@rjallais).
 - External pull requests will be closed without merge, regardless of quality.
 - This is a permanent policy, not a temporary freeze.
 
@@ -23,7 +23,7 @@ Following a confirmed supply-chain attack attempt via an external pull request, 
 If you have found a **security vulnerability**, do not open a public issue. Email the maintainer directly or use GitHub's private vulnerability reporting.
 
 ---
-This codebase moves quickly across Zig runtime code, packaging logic, platform-specific install flows, and CI. Small, current, issue-linked PRs are much easier to review and much less likely to regress behavior.
+This codebase moves quickly across Odin runtime code, packaging logic, platform-specific install flows, and CI. Small, current, issue-linked PRs are much easier to review and much less likely to regress behavior.
 
 ## Ground Rules
 
@@ -65,7 +65,7 @@ If there is no failing test yet, write one first unless the failure is impossibl
 
 Acceptable proof in a PR:
 
-- `before`: exact failing `zig build test`, shell repro, or install command
+- `before`: exact failing `odin check src`, shell repro, or install command
 - `after`: the same command rerun cleanly
 - nearby guard: the closest relevant module, platform, or regression test still passing
 
@@ -122,8 +122,6 @@ If the branch changes behavior that normally goes through GitHub Actions, do not
 
 Do not commit generated or local-build artifacts, including:
 
-- `.zig-cache/`
-- `zig-out/`
 - compiled `.dylib`, `.so`, `.o`, or temp binaries
 - local logs or benchmark artifacts unless the PR is explicitly about publishing benchmark evidence
 
@@ -136,8 +134,8 @@ At minimum, run the narrowest relevant tests for the code you changed.
 Examples:
 
 ```bash
-zig build test
-zig build linux
+odin check src
+mise run test
 tests/linux-relocation-failure.sh
 ```
 

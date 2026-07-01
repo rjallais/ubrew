@@ -5,6 +5,8 @@ import "core:os"
 import "core:encoding/json"
 import "core:strings"
 import "core:time"
+import "core:c"
+import fts "../vendor/odin-sqlite3"
 import "../cask"
 import "../formula"
 import "../kernel"
@@ -44,12 +46,12 @@ CASK_LIST_CACHE :: API_CACHE_DIR + "/cask.json"
 FORMULA_LIST_URL :: "https://formulae.brew.sh/api/formula.json"
 CASK_LIST_URL :: "https://formulae.brew.sh/api/cask.json"
 
-// Phase 2: compact TSV search index files. Built from the 30MB formula.json /
-// 15MB cask.json dumps on first search (or `update`). Each line is one
-// record: `name\tdesc\tversion\n` (casks also have token). Reads/scans are
-// ~50x faster than parsing the full JSON dump.
-FORMULA_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.formulae.tsv"
-CASK_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.casks.tsv"
+// Phase 2: SQLite search database. Built from the 30MB formula.json /
+// 15MB cask.json dumps on first search (or `update`). Uses SQL LIKE
+// for fast case-insensitive substring matching via SQLite's B-tree scan.
+SEARCH_DB_PATH :: API_CACHE_DIR + "/search-index.db"
+FORMULA_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.db"
+CASK_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.db"
 
 registry_mmap_parse :: proc(path: string) -> (json.Value, json.Error) {
 	mf, ok := kernel.mapped_file_open(path)
@@ -340,6 +342,11 @@ append_api_formulae_matches_fast :: proc(data: []u8, out: ^[dynamic]Formula_Sear
 				if !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
 					continue
 				}
+				// Skip formulae unavailable on the current platform
+				plat := json_raw_bottle_platforms(obj)
+				if !formula_available_on_current_os(plat) {
+					continue
+				}
 				if formula_results_contains(out^[:], name) {
 					continue
 				}
@@ -404,6 +411,10 @@ append_api_cask_matches_fast :: proc(data: []u8, out: ^[dynamic]Cask_Search_Resu
 				if !lower_contains(token, query_lower) && !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
 					continue
 				}
+				// Homebrew core casks are macOS-only; skip on other platforms
+				when ODIN_OS != .Darwin {
+					continue
+				}
 				if cask_results_contains(out^[:], token) {
 					continue
 				}
@@ -462,34 +473,107 @@ registry_preferred_asset_key :: proc() -> string {
     return "macos-arm64"
 }
 
+// registry_entry_platform_tag returns a platform tag for a registry entry
+// based on its assets (top-level and resolved). Returns "LM", "L", "M", or "A".
+registry_entry_platform_tag :: proc(rec_obj: json.Object) -> string {
+	if rec_obj == nil { return "A" }
+	check_assets :: proc(obj: json.Object, has_linux, has_macos: ^bool) {
+		if assets_obj, ok := json_object_or_nil(obj, "assets"); ok {
+			for k, _ in assets_obj {
+				if k == "linux-x86_64" || k == "linux-aarch64" || k == "linux-kde" || k == "linux-gnome" || k == "linux-png" {
+					has_linux^ = true
+				}
+				if k == "macos-x86_64" || k == "macos-arm64" {
+					has_macos^ = true
+				}
+			}
+		}
+	}
+	has_linux, has_macos := false, false
+	check_assets(rec_obj, &has_linux, &has_macos)
+	if ro, ok := json_object_or_nil(rec_obj, "resolved"); ok {
+		check_assets(ro, &has_linux, &has_macos)
+	}
+	if has_linux && has_macos { return "LM" }
+	if has_linux { return "L" }
+	if has_macos { return "M" }
+	return "A"
+}
+
+// registry_has_current_os_asset returns true if the assets object (either
+// on the record or in its resolved child) contains an entry compatible with
+// the current OS, using the same fallback chain as registry_pick_resolved_asset.
+registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
+	if rec_obj == nil { return false }
+	has_asset_from_obj :: proc(obj: json.Object) -> bool {
+		if obj == nil { return false }
+		assets_obj, aok := json_object_or_nil(obj, "assets")
+		if !aok { return false }
+
+		preferred := registry_preferred_asset_key()
+		// Only consider asset keys for the *current* OS and arch — never
+		// accept a macOS asset on Linux, or vice versa, or an incompatible arch.
+		os_keys: []string
+		when ODIN_OS == .Linux {
+			de := detect_desktop_env_api()
+			if de == .KDE {
+				if _, exists := assets_obj["linux-kde"]; exists { return true }
+			} else if de == .GNOME {
+				if _, exists := assets_obj["linux-gnome"]; exists { return true }
+			}
+			if _, exists := assets_obj["linux-png"]; exists { return true }
+			os_keys = []string{preferred}
+		} else when ODIN_OS == .Darwin {
+			os_keys = []string{preferred}
+		} else {
+			os_keys = []string{preferred}
+		}
+		for k in os_keys {
+			if _, exists := assets_obj[k]; exists { return true }
+		}
+		return false
+	}
+
+	if has_asset_from_obj(rec_obj) { return true }
+	if resolved_obj, ok := json_object_or_nil(rec_obj, "resolved"); ok {
+		if has_asset_from_obj(resolved_obj) { return true }
+	}
+	return false
+}
+
 registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string, sha256: string) {
     // Preferred path: resolved.assets[platform].{url, sha256}
     if assets_obj, ok := json_object_or_nil(resolved_obj, "assets"); ok {
-        // Desktop environment specific wallpaper selections
-        de := detect_desktop_env_api()
-        if de == .KDE {
-            if v, exists := assets_obj["linux-kde"]; exists {
-                if ao, ok2 := v.(json.Object); ok2 {
-                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-                }
-            }
-        } else if de == .GNOME {
-            if v, exists := assets_obj["linux-gnome"]; exists {
-                if ao, ok2 := v.(json.Object); ok2 {
-                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-                }
-            }
-        }
-
-        // Fallback wallpaper key
-        if v, exists := assets_obj["linux-png"]; exists {
-            if ao, ok2 := v.(json.Object); ok2 {
-                return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-            }
-        }
-
         preferred := registry_preferred_asset_key()
-        fallback_keys := []string{preferred, "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"}
+        fallback_keys: []string
+        when ODIN_OS == .Linux {
+            // Desktop environment specific wallpaper selections
+            de := detect_desktop_env_api()
+            if de == .KDE {
+                if v, exists := assets_obj["linux-kde"]; exists {
+                    if ao, ok2 := v.(json.Object); ok2 {
+                        return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                    }
+                }
+            } else if de == .GNOME {
+                if v, exists := assets_obj["linux-gnome"]; exists {
+                    if ao, ok2 := v.(json.Object); ok2 {
+                        return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                    }
+                }
+            }
+            // Fallback wallpaper key
+            if v, exists := assets_obj["linux-png"]; exists {
+                if ao, ok2 := v.(json.Object); ok2 {
+                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                }
+            }
+            fallback_keys = []string{preferred}
+        } else when ODIN_OS == .Darwin {
+            fallback_keys = []string{preferred}
+        } else {
+            fallback_keys = []string{preferred}
+        }
 
         for k in fallback_keys {
             if v, exists := assets_obj[k]; exists {
@@ -499,10 +583,18 @@ registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string,
             }
         }
 
-        // Fallback: first available asset
-        for _, v in assets_obj {
-            if ao, ok2 := v.(json.Object); ok2 {
-                return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+        // Fallback: first available asset that matches our OS and arch
+        for k, v in assets_obj {
+            is_valid := k == preferred
+            when ODIN_OS == .Linux {
+                if k == "linux-kde" || k == "linux-gnome" || k == "linux-png" {
+                    is_valid = true
+                }
+            }
+            if is_valid {
+                if ao, ok2 := v.(json.Object); ok2 {
+                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                }
             }
         }
     }
@@ -1286,6 +1378,41 @@ extract_string_array :: proc(obj: json.Object, key: string) -> []string {
     return nil
 }
 
+select_bottle_key :: proc(files_obj: json.Object) -> string {
+	preferred := "x86_64_linux"
+	when ODIN_OS == .Linux {
+		when ODIN_ARCH == .arm64 {
+			preferred = "arm64_linux"
+		} else {
+			preferred = "x86_64_linux"
+		}
+	} else when ODIN_OS == .Darwin {
+		when ODIN_ARCH == .arm64 {
+			keys := []string{"arm64_sequoia", "arm64_sonoma", "arm64_ventura", "arm64_monterey", "arm64_big_sur"}
+			for k in keys {
+				if _, exists := files_obj[k]; exists { return k }
+			}
+			preferred = "arm64_sonoma"
+		} else {
+			keys := []string{"sequoia", "sonoma", "ventura", "monterey", "big_sur"}
+			for k in keys {
+				if _, exists := files_obj[k]; exists { return k }
+			}
+			preferred = "sonoma"
+		}
+	}
+	if _, exists := files_obj[preferred]; exists {
+		return preferred
+	}
+	if _, exists := files_obj["all"]; exists {
+		return "all"
+	}
+	for k, _ in files_obj {
+		return k
+	}
+	return preferred
+}
+
 fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
 
@@ -1369,10 +1496,7 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
             if files_val, ok4 := stable_obj["files"]; ok4 {
                 files_obj := files_val.(json.Object)
 
-                target_key := "x86_64_linux"
-                if _, exists := files_obj[target_key]; !exists {
-                    target_key = "all"
-                }
+                target_key := select_bottle_key(files_obj)
 
                 if target_val, exists := files_obj[target_key]; exists {
                     target_obj := target_val.(json.Object)
@@ -1624,6 +1748,12 @@ append_registry_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, q
         if !lower_contains(token, query_lower) && !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
             continue
         }
+
+        // Platform filter: skip entries with no asset for the current OS
+        if !registry_has_current_os_asset(rec_obj) {
+            continue
+        }
+
         if formula_results_contains(out^[:], token) {
             continue
         }
@@ -1675,6 +1805,12 @@ append_registry_cask_matches :: proc(out: ^[dynamic]Cask_Search_Result, query_lo
         if !lower_contains(token, query_lower) && !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
             continue
         }
+
+        // Platform filter: skip entries with no asset for the current OS
+        if !registry_has_current_os_asset(rec_obj) {
+            continue
+        }
+
         if cask_results_contains(out^[:], token) {
             continue
         }
@@ -1724,8 +1860,8 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 		}
 	} else {
 		// Auto-build the index if missing (first search after install/cleanup)
-		if !os.is_file(FORMULA_SEARCH_INDEX) {
-			build_formula_search_index()
+		if !os.is_file(SEARCH_DB_PATH) {
+			build_search_db()
 		}
 		if index_results2 := search_index_formulae(query_lower, limit); len(index_results2) > 0 {
 			defer delete(index_results2)
@@ -2141,6 +2277,114 @@ fetch_urls_parallel_http2 :: proc(urls, out_files: []string, headers: []string, 
     return platform.exec_cmd("curl", args[:])
 }
 
+// fetch_single_with_etag downloads a single URL to out_file using curl's
+// --etag-compare and --etag-save. Returns true if the file was actually
+// downloaded (200 response), false if 304 Not Modified or on error.
+// The etag_file stores the ETag header value between runs.
+fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []string = nil) -> bool {
+    args := make([dynamic]string, context.temp_allocator)
+    defer delete(args)
+    append(&args, "curl")
+    append(&args, "-sfL")
+    append(&args, "--compressed")
+    append(&args, "--http2")
+    if os.is_file(etag_file) {
+        append(&args, "--etag-compare")
+        append(&args, etag_file)
+    }
+    append(&args, "--etag-save")
+    append(&args, etag_file)
+    for h in headers {
+        append(&args, "-H")
+        append(&args, h)
+    }
+    append(&args, "-o")
+    append(&args, out_file)
+    append(&args, url)
+
+    pre_size: i64
+    pre_mtime: time.Time
+    if fi, err := os.stat(out_file, context.temp_allocator); err == nil {
+        pre_size = fi.size
+        pre_mtime = fi.modification_time
+    }
+
+    ok := platform.exec_cmd("curl", args[:])
+    if !ok { return false }
+    fi, fi_err := os.stat(out_file, context.temp_allocator)
+    if fi_err != nil || fi.size == 0 { return false }
+    return fi.size != pre_size || fi.modification_time != pre_mtime
+}
+
+// fetch_etag_batch downloads multiple URLs sequentially in a single curl
+// process using --next between transfers. Each URL gets its own ETag file.
+// Saves one fork/exec per additional URL vs calling fetch_single_with_etag N
+// times. Returns true if any output file was actually written (200 response).
+fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []string) -> bool {
+    if len(urls) == 0 || len(urls) != len(out_files) || len(urls) != len(etag_files) {
+        return false
+    }
+
+    // Snapshot pre-transfer sizes AND mtimes so we can detect actual
+    // new content vs. a 304 that left the old file untouched. Size
+    // alone misses in-place edits where the upstream JSON keeps the
+    // same byte count but changes content (e.g. a description fix).
+    pre_mtimes := make([]time.Time, len(urls), context.allocator)
+    defer delete(pre_mtimes)
+    pre_sizes := make([]i64, len(urls), context.allocator)
+    defer delete(pre_sizes)
+    for i in 0..<len(urls) {
+        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil {
+            pre_sizes[i]  = fi.size
+            pre_mtimes[i] = fi.modification_time
+        }
+    }
+
+    args := make([dynamic]string, context.temp_allocator)
+    defer delete(args)
+
+    for i in 0..<len(urls) {
+        if i > 0 {
+            append(&args, "--next")
+        } else {
+            append(&args, "curl")
+        }
+        append(&args, "-sfL")
+        append(&args, "--compressed")
+        append(&args, "--http2")
+        if os.is_file(etag_files[i]) {
+            append(&args, "--etag-compare")
+            append(&args, etag_files[i])
+        }
+        append(&args, "--etag-save")
+        append(&args, etag_files[i])
+        for h in headers {
+            append(&args, "-H")
+            append(&args, h)
+        }
+        append(&args, "-o")
+        append(&args, out_files[i])
+        append(&args, urls[i])
+    }
+
+    ok := platform.exec_cmd("curl", args[:])
+    if !ok { return false }
+
+    any_updated := false
+    for i in 0..<len(out_files) {
+        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
+            // Either the byte count changed (200 with new payload) or
+            // the mtime advanced past the pre-snapshot (curl's write
+            // bumps mtime on every successful download). The mtime
+            // check covers in-place edits where size is unchanged.
+            if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
+                any_updated = true
+            }
+        }
+    }
+    return any_updated
+}
+
 // warm_formulae_cache_parallel batch-fetches the per-formula JSON files
 // for `names` that are not already cached, using a single
 // --http2 --parallel curl invocation. The cached files are written to
@@ -2228,8 +2472,8 @@ which_formula :: proc(cmd: string) -> []string {
 	}
 
 	// Auto-build the index if missing (first which-formula call)
-	if !os.is_file(FORMULA_SEARCH_INDEX) {
-		build_formula_search_index()
+	if !os.is_file(SEARCH_DB_PATH) {
+		build_search_db()
 		if indexed2 := which_formula_indexed(cmd); indexed2 != nil {
 			return indexed2
 		}
@@ -2281,7 +2525,7 @@ which_formula :: proc(cmd: string) -> []string {
 				if name == "" {
 					continue
 				}
-				if formula_provides_executable(obj, cmd) {
+				if formula_provides_executable(obj, cmd) && formula_available_on_current_os(json_raw_bottle_platforms(obj)) {
 					append(&matches, strings.clone(name, context.allocator))
 				}
 			}
@@ -2290,50 +2534,34 @@ which_formula :: proc(cmd: string) -> []string {
 	return matches[:]
 }
 
-// which_formula_indexed uses the compact TSV search index (with its
-// executables column) instead of scanning the 30MB formula.json. Returns
-// nil if the index doesn't exist (caller should fall back to the JSON scan).
-// Returns an empty (non-nil) slice if the index exists but has no matches.
+// which_formula_indexed uses the SQLite search database's executables
+// column instead of scanning the 30MB formula.json. Returns nil if the
+// DB doesn't exist (caller should fall back to the JSON scan). Returns
+// an empty (non-nil) slice if the DB exists but has no matches.
 which_formula_indexed :: proc(cmd: string) -> []string {
-	data, rerr := os.read_entire_file(FORMULA_SEARCH_INDEX, context.allocator)
-	if rerr != nil || len(data) == 0 {
-		return nil
-	}
-	defer delete(data)
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
 
-	cmd_lower := strings.to_lower(cmd, context.temp_allocator)
+	csql := strings.clone_to_cstring("SELECT name, platform FROM formulae WHERE instr(',' || executables || ',', ',' || ? || ',') > 0")
+	defer delete(csql)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
+
+	_db_bind_text(stmt, 1, cmd)
+
 	matches := make([dynamic]string, context.allocator)
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' {
-			end += 1
-		}
-		if end > start {
-			line := text[start:end]
-			tab1 := strings.index_byte(line, '\t')
-			if tab1 > 0 {
-				name := line[:tab1]
-				rest := line[tab1+1:]
-				tab2 := strings.index_byte(rest, '\t')
-				if tab2 >= 0 {
-					rest2 := rest[tab2+1:]
-					tab3 := strings.index_byte(rest2, '\t')
-					if tab3 >= 0 {
-						execs_str := rest2[tab3+1:]
-						if execs_str != "" && csv_contains(execs_str, cmd, cmd_lower) {
-							append(&matches, strings.clone(name, context.allocator))
-						}
-					}
-				}
-			}
-		}
-		start = end + 1
+	for fts.step(stmt) == .Row {
+		name := _db_col_text(stmt, 0)
+		platform := _db_col_text(stmt, 1)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&matches, strings.clone(name, context.allocator))
 	}
-	// Return a non-nil empty slice to distinguish "index exists but no
-	// matches" from "index doesn't exist". Odin treats []string{} with
-	// nil data as == nil, so we must ensure the result is non-nil.
+
+	// Return a non-nil empty slice to distinguish "exists but no matches"
+	// from "doesn't exist".
 	if len(matches) == 0 {
 		dummy := make([dynamic]string, 0, 1, context.allocator)
 		return dummy[:]
@@ -2586,6 +2814,54 @@ verify_tap_cache :: proc(t: tap.Tap) -> bool {
 	return i < len(data) && data[i] == '['
 }
 
+// Infer_Hit_From_Cache reads the cached Formula_listing.json and determines
+// which (candidate_index, suffix_index) produced it, by matching the first
+// entry's GitHub API URL against the probe candidates. Returns false if the
+// cache is empty or the URL cannot be parsed.
+Infer_Hit_From_Cache :: proc(data: []u8, candidates: []string, suffixes: []string) -> (c_idx: int, s_idx: int, ok: bool) {
+	text := string(data)
+	// Find the first `"url"` key, then skip whitespace + colon to reach the value.
+	url_key := strings.index(text, `"url"`)
+	if url_key < 0 { return 0, 0, false }
+	after_key := text[url_key + len(`"url"`):]
+	// Skip whitespace and colon
+	i := 0
+	for i < len(after_key) && (after_key[i] == ' ' || after_key[i] == '\t' || after_key[i] == '\n' || after_key[i] == '\r' || after_key[i] == ':') {
+		i += 1
+	}
+	if i >= len(after_key) || after_key[i] != '"' { return 0, 0, false }
+	// Skip opening quote and "https://api.github.com/repos/" prefix
+	url_start := i + 1
+	prefix := "https://api.github.com/repos/"
+	if len(after_key) < url_start + len(prefix) { return 0, 0, false }
+	if after_key[url_start:url_start + len(prefix)] != prefix { return 0, 0, false }
+	rest := after_key[url_start + len(prefix):]
+	end := strings.index(rest, `"`)
+	if end < 0 { return 0, 0, false }
+	full_path := rest[:end]
+	// full_path is "owner/repo/contents/..." or "owner/repo/contents/Formula/..."
+	first_slash := strings.index(full_path, "/")
+	if first_slash < 0 { return 0, 0, false }
+	remainder := full_path[first_slash + 1:]
+	second_slash := strings.index(remainder, "/")
+	if second_slash < 0 { return 0, 0, false }
+	owner_repo := full_path[:first_slash + 1 + second_slash]
+
+	// Determine which suffix was used
+	path_after_repo := remainder[second_slash + 1:]
+	suffix_is_formula := strings.has_prefix(path_after_repo, "contents/Formula")
+	suffix_is_root := strings.has_prefix(path_after_repo, "contents/")
+	if !suffix_is_formula && !suffix_is_root { return 0, 0, false }
+	s_idx = 0 if suffix_is_formula else 1
+
+	for c, i in candidates {
+		if c == owner_repo {
+			return i, s_idx, true
+		}
+	}
+	return 0, 0, false
+}
+
 // Phase 2: build a compact TSV search index from the JSON dump.
 // The full formula.json is 30MB / 8403 formulae and cask.json is 15MB /
 // ~5000 casks. The formulae index is `name\tdesc\tversion\texecutables\n`
@@ -2597,123 +2873,264 @@ verify_tap_cache :: proc(t: tap.Tap) -> bool {
 //
 // Writes to a temp file in API_CACHE_DIR then atomically renames over
 // the target. Returns true on success.
-build_formula_search_index :: proc() -> bool {
-	data, rerr := os.read_entire_file(FORMULA_LIST_CACHE, context.allocator)
-	if rerr != nil || len(data) == 0 {
-		return false
+// json_raw_bottle_platforms inspects a raw formula JSON object and returns
+// a compact platform tag based on which bottle keys are present:
+//   "A"  – the "all" key is present (works everywhere)
+//   "LM" – both Linux and macOS keys are present
+//   "L"  – only Linux keys are present
+//   "M"  – only macOS keys are present
+//   ""   – no bottle section found (head-only / source-only formula)
+// This avoids full JSON parsing; it simply checks for key substrings
+// within the "files" sub-object of the bottle section.
+json_raw_bottle_platforms :: proc(obj: string) -> string {
+	// Locate the correct "bottle" section (must be followed by ":" and then "{")
+	bottle_idx := -1
+	start_search := 0
+	for {
+		idx := strings.index(obj[start_search:], "\"bottle\"")
+		if idx < 0 {
+			break
+		}
+		idx += start_search
+		
+		// Verify character after "bottle"
+		pos := idx + len("\"bottle\"")
+		// skip whitespace
+		for pos < len(obj) && (obj[pos] == ' ' || obj[pos] == '\t' || obj[pos] == '\r' || obj[pos] == '\n') {
+			pos += 1
+		}
+		if pos < len(obj) && obj[pos] == ':' {
+			pos += 1
+			for pos < len(obj) && (obj[pos] == ' ' || obj[pos] == '\t' || obj[pos] == '\r' || obj[pos] == '\n') {
+				pos += 1
+			}
+			if pos < len(obj) && obj[pos] == '{' {
+				bottle_idx = idx
+				break
+			}
+		}
+		start_search = idx + 1
 	}
-	defer delete(data)
 
-	// Build the whole TSV in memory first, then write once. Writing
-	// 8403 lines char-by-char through fmt.wprintf is ~50,000 unbuffered
-	// syscalls and takes 50+ seconds. A single bulk write is <10ms.
-	buf := make([dynamic]u8, 0, 1 << 20, context.allocator)
-	defer delete(buf)
-
-	text := string(data)
+	if bottle_idx < 0 {
+		return ""
+	}
+	// Narrow the search to the bottle section. Find the opening brace
+	// of the bottle object and scan until its matching closing brace.
+	rest := obj[bottle_idx:]
+	brace_start := strings.index_byte(rest, '{')
+	if brace_start < 0 {
+		return ""
+	}
+	// Find the matching closing brace by depth-tracking.
 	depth := 0
-	obj_start := 0
-	in_string := false
-	escaped := false
-	written := 0
-	for i := 0; i < len(text); i += 1 {
-		c := text[i]
-		if in_string {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				in_string = false
-			}
+	bottle_end := brace_start
+	in_str := false
+	esc := false
+	for i := brace_start; i < len(rest); i += 1 {
+		c := rest[i]
+		if in_str {
+			if esc { esc = false }
+			else if c == '\\' { esc = true }
+			else if c == '"' { in_str = false }
 			continue
 		}
-		if c == '"' {
-			in_string = true
-			continue
-		}
-		if c == '{' {
-			if depth == 0 {
-				obj_start = i
-			}
-			depth += 1
-			continue
-		}
-		if c == '}' && depth > 0 {
+		if c == '"' { in_str = true; continue }
+		if c == '{' { depth += 1 }
+		else if c == '}' {
 			depth -= 1
 			if depth == 0 {
-				obj := text[obj_start:i+1]
-				name := json_field_string_raw(obj, "name")
-				if name == "" {
-					continue
-				}
-			desc := json_field_string_raw(obj, "desc")
-			version := json_field_string_raw(obj, "stable")
-			execs := json_field_array_as_csv(obj, "executables")
-			append_tsv_field(&buf, name)
-			append(&buf, '\t')
-			append_tsv_field(&buf, desc)
-			append(&buf, '\t')
-			append_tsv_field(&buf, version)
-			append(&buf, '\t')
-			append_tsv_field(&buf, execs)
-			append(&buf, '\n')
-				written += 1
+				bottle_end = i + 1
+				break
 			}
 		}
 	}
-	if written == 0 {
-		return false
+	bottle_section := rest[:bottle_end]
+
+	// Check for the universal "all" key
+	if strings.contains(bottle_section, "\"all\"") {
+		return "A"
 	}
 
-	// Atomic write via temp file and rename.
-	tmp_path := fmt.tprintf("%s.tmp", FORMULA_SEARCH_INDEX)
-	if werr := os.write_entire_file(tmp_path, buf[:]); werr != nil {
-		return false
+	has_linux := strings.contains(bottle_section, "\"x86_64_linux\"") ||
+	             strings.contains(bottle_section, "\"arm64_linux\"")
+	has_macos := strings.contains(bottle_section, "\"arm64_sonoma\"") ||
+	             strings.contains(bottle_section, "\"arm64_sequoia\"") ||
+	             strings.contains(bottle_section, "\"arm64_ventura\"") ||
+	             strings.contains(bottle_section, "\"ventura\"") ||
+	             strings.contains(bottle_section, "\"sonoma\"") ||
+	             strings.contains(bottle_section, "\"sequoia\"") ||
+	             strings.contains(bottle_section, "\"monterey\"") ||
+	             strings.contains(bottle_section, "\"big_sur\"") ||
+	             strings.contains(bottle_section, "\"catalina\"")
+
+	if has_linux && has_macos { return "LM" }
+	if has_linux             { return "L" }
+	if has_macos             { return "M" }
+	return ""
+}
+
+// formula_available_on_current_os returns true if a platform tag from
+// the search index indicates the formula is available on the current OS.
+// An empty tag (source-only) is treated as available everywhere.
+formula_available_on_current_os :: proc(platform_tag: string) -> bool {
+	if len(platform_tag) == 0 || platform_tag == "A" || platform_tag == "LM" {
+		return true
 	}
-	if rename_err := os.rename(tmp_path, FORMULA_SEARCH_INDEX); rename_err != nil {
-		os.remove(tmp_path)
-		return false
+	when ODIN_OS == .Linux {
+		return platform_tag == "L"
+	} else when ODIN_OS == .Darwin {
+		return platform_tag == "M"
 	}
 	return true
 }
 
-build_cask_search_index :: proc() -> bool {
-	data, rerr := os.read_entire_file(CASK_LIST_CACHE, context.allocator)
-	if rerr != nil || len(data) == 0 {
-		return false
+// cask_available_on_current_os returns true if a platform tag from the
+// cask search index indicates the cask is available on the current OS.
+cask_available_on_current_os :: proc(platform_tag: string) -> bool {
+	if len(platform_tag) == 0 || platform_tag == "A" || platform_tag == "LM" {
+		return true
 	}
-	defer delete(data)
+	when ODIN_OS == .Linux {
+		return platform_tag == "L"
+	} else when ODIN_OS == .Darwin {
+		return true // Allow searching/listing Linux casks on Darwin
+	}
+	return true
+}
 
-	buf := make([dynamic]u8, 0, 1 << 19, context.allocator)
-	defer delete(buf)
+// --- SQLite Search Database ---
 
-	text := string(data)
+_db_bind_text :: proc(stmt: ^Statement, idx: i32, val: string) {
+	cstr := cstring(raw_data(val))
+	fts.bind_text(stmt, c.int(idx), cstr, c.int(len(val)), Destructor{behaviour = .Transient})
+}
+
+_db_col_text :: proc(stmt: ^Statement, iCol: i32) -> string {
+	cstr := fts.column_text(stmt, c.int(iCol))
+	if cstr == nil { return "" }
+	return string(cstr)
+}
+
+escape_like :: proc(s: string, allocator := context.temp_allocator) -> string {
+	buf := strings.builder_make(allocator)
+	for i in 0..<len(s) {
+		b := s[i]
+		if b == '%' || b == '_' || b == '\\' {
+			strings.write_byte(&buf, '\\')
+		}
+		strings.write_byte(&buf, b)
+	}
+	return strings.to_string(buf)
+}
+
+// build_fts_query converts a user's lowercase search string into an FTS5
+// MATCH query. Each word gets '*' appended for prefix matching so that
+// typing "wget" also matches "wget2", "wgetter", etc.  Terms are AND-ed
+// (space-separated, which is FTS5's default conjunction operator).
+build_fts_query :: proc(s: string, allocator := context.temp_allocator) -> string {
+	buf := strings.builder_make(allocator)
+	i := 0
+	for i < len(s) {
+		// Skip whitespace
+		for i < len(s) && (s[i] == ' ' || s[i] == '	' || s[i] == '\n' || s[i] == '\r') {
+			i += 1
+		}
+		if i >= len(s) { break }
+
+		if len(strings.to_string(buf)) > 0 {
+			strings.write_byte(&buf, ' ')
+		}
+
+		start := i
+		for i < len(s) && s[i] != ' ' && s[i] != '	' && s[i] != '\n' && s[i] != '\r' {
+			i += 1
+		}
+		term := s[start:i]
+		// Wrap each term in double-quotes so FTS5 treats it as a
+		// literal phrase rather than query syntax.  Double any
+		// internal quote characters (FTS5 escape convention).
+		strings.write_byte(&buf, '"')
+		for j in 0..<len(term) {
+			if term[j] == '"' {
+				strings.write_byte(&buf, '"')
+			}
+			strings.write_byte(&buf, term[j])
+		}
+		strings.write_byte(&buf, '"')
+		strings.write_byte(&buf, '*')
+	}
+	return strings.to_string(buf)
+}
+
+build_search_db :: proc() -> bool {
+	if fts.initialize() != .Ok { return false }
+
+	data_f, rerr_f := os.read_entire_file(FORMULA_LIST_CACHE, context.allocator)
+	if rerr_f != nil || len(data_f) == 0 { return false }
+	defer delete(data_f)
+
+	data_c, rerr_c := os.read_entire_file(CASK_LIST_CACHE, context.allocator)
+	if rerr_c != nil || len(data_c) == 0 { return false }
+	defer delete(data_c)
+
+	os.make_directory_all(API_CACHE_DIR)
+
+	tmp_path := SEARCH_DB_PATH + ".tmp"
+
+	db: ^Connection
+	cpath := strings.clone_to_cstring(tmp_path, context.temp_allocator)
+	rc := fts.open_v2(cpath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil)
+	if rc != .Ok { return false }
+	defer fts.close(db)
+
+	fts.exec(db, strings.clone_to_cstring("PRAGMA synchronous=OFF", context.temp_allocator), nil, nil, nil)
+	fts.exec(db, strings.clone_to_cstring("PRAGMA journal_mode=MEMORY", context.temp_allocator), nil, nil, nil)
+	fts.exec(db, strings.clone_to_cstring("PRAGMA cache_size=-64000", context.temp_allocator), nil, nil, nil)
+
+	ddl := strings.clone_to_cstring(
+		"DROP TABLE IF EXISTS formulae;" +
+		"CREATE TABLE formulae(name TEXT, desc TEXT, version TEXT, executables TEXT, platform TEXT);" +
+		"DROP TABLE IF EXISTS casks;" +
+		"CREATE TABLE casks(token TEXT, name TEXT, desc TEXT, version TEXT, platform TEXT);" +
+		"DROP TABLE IF EXISTS registry;" +
+		"CREATE TABLE registry(token TEXT, name TEXT, desc TEXT, version TEXT, kind TEXT, platform TEXT);" +
+		// FTS5 virtual tables for full-text search (also dropped when content tables are dropped)
+		"DROP TABLE IF EXISTS formulae_fts;" +
+		"CREATE VIRTUAL TABLE formulae_fts USING fts5(name, desc, version, executables, platform, tokenize='porter unicode61');" +
+		"DROP TABLE IF EXISTS casks_fts;" +
+		"CREATE VIRTUAL TABLE casks_fts USING fts5(token, name, desc, version, platform, tokenize='porter unicode61');" +
+		"DROP TABLE IF EXISTS registry_fts;" +
+		"CREATE VIRTUAL TABLE registry_fts USING fts5(token, name, desc, version, kind, platform, tokenize='porter unicode61');",
+		context.temp_allocator)
+	rc = fts.exec(db, ddl, nil, nil, nil)
+	if rc != .Ok { return false }
+
+	stmt: ^Statement
+	csql := strings.clone_to_cstring("INSERT INTO formulae(name, desc, version, executables, platform) VALUES(?, ?, ?, ?, ?)")
+	defer delete(csql)
+	rc = fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
+
+	fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+
+	text := string(data_f)
 	depth := 0
 	obj_start := 0
 	in_string := false
 	escaped := false
-	written := 0
 	for i := 0; i < len(text); i += 1 {
 		c := text[i]
 		if in_string {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				in_string = false
-			}
+			if escaped { escaped = false }
+			else if c == '\\' { escaped = true }
+			else if c == '"' { in_string = false }
 			continue
 		}
-		if c == '"' {
-			in_string = true
-			continue
-		}
+		if c == '"' { in_string = true; continue }
 		if c == '{' {
-			if depth == 0 {
-				obj_start = i
-			}
+			if depth == 0 { obj_start = i }
 			depth += 1
 			continue
 		}
@@ -2721,80 +3138,178 @@ build_cask_search_index :: proc() -> bool {
 			depth -= 1
 			if depth == 0 {
 				obj := text[obj_start:i+1]
-				token := json_field_string_raw(obj, "token")
-				if token == "" {
-					continue
-				}
 				name := json_field_string_raw(obj, "name")
-				if name == "" {
-					name = token
-				}
+				if name == "" { continue }
 				desc := json_field_string_raw(obj, "desc")
-				version := json_field_string_raw(obj, "version")
-				append_tsv_field(&buf, token)
-				append(&buf, '\t')
-				append_tsv_field(&buf, name)
-				append(&buf, '\t')
-				append_tsv_field(&buf, desc)
-				append(&buf, '\t')
-				append_tsv_field(&buf, version)
-				append(&buf, '\n')
-				written += 1
+				version := json_field_string_raw(obj, "stable")
+				execs := json_field_array_as_csv(obj, "executables")
+				plat := json_raw_bottle_platforms(obj)
+
+				fts.reset(stmt)
+				_db_bind_text(stmt, 1, name)
+				_db_bind_text(stmt, 2, desc)
+				_db_bind_text(stmt, 3, version)
+				_db_bind_text(stmt, 4, execs)
+				_db_bind_text(stmt, 5, plat)
+				if fts.step(stmt) != .Done { return false }
 			}
 		}
 	}
-	if written == 0 {
-		return false
+	if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
+
+	cstmt: ^Statement
+	ccsql := strings.clone_to_cstring("INSERT INTO casks(token, name, desc, version, platform) VALUES(?, ?, ?, ?, ?)")
+	defer delete(ccsql)
+	rc = fts.prepare_v2(db, ccsql, -1, &cstmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(cstmt)
+
+	fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+
+	text_c := string(data_c)
+	depth = 0
+	obj_start = 0
+	in_string = false
+	escaped = false
+	for i := 0; i < len(text_c); i += 1 {
+		c := text_c[i]
+		if in_string {
+			if escaped { escaped = false }
+			else if c == '\\' { escaped = true }
+			else if c == '"' { in_string = false }
+			continue
+		}
+		if c == '"' { in_string = true; continue }
+		if c == '{' {
+			if depth == 0 { obj_start = i }
+			depth += 1
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth -= 1
+			if depth == 0 {
+				obj := text_c[obj_start:i+1]
+				token := json_field_string_raw(obj, "token")
+				if token == "" { continue }
+				name := json_field_string_raw(obj, "name")
+				if name == "" { name = token }
+				desc := json_field_string_raw(obj, "desc")
+				v := json_field_string_raw(obj, "version")
+				plat := "M"
+
+				fts.reset(cstmt)
+				_db_bind_text(cstmt, 1, token)
+				_db_bind_text(cstmt, 2, name)
+				_db_bind_text(cstmt, 3, desc)
+				_db_bind_text(cstmt, 4, v)
+				_db_bind_text(cstmt, 5, plat)
+				if fts.step(cstmt) != .Done { return false }
+			}
+		}
+	}
+	if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
+
+	// Index upstream registry entries into the DB
+	rstmt: ^Statement
+	rcsql := strings.clone_to_cstring("INSERT INTO registry(token, name, desc, version, kind, platform) VALUES(?, ?, ?, ?, ?, ?)")
+	defer delete(rcsql)
+	rc = fts.prepare_v2(db, rcsql, -1, &rstmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(rstmt)
+
+	reg_path := get_registry_path()
+	if os.is_file(reg_path) {
+		if reg_data, reg_err := os.read_entire_file(reg_path, context.allocator); reg_err == nil {
+			defer delete(reg_data)
+			if reg_val, reg_parse_err := json.parse(reg_data); reg_parse_err == nil {
+				if root_obj, root_ok := reg_val.(json.Object); root_ok {
+					if records_arr, arr_ok := json_array_or_nil(root_obj, "records"); arr_ok {
+						fts.exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+						for rec_item in records_arr {
+							if rec_obj, rec_ok := rec_item.(json.Object); rec_ok {
+								token, name, desc, version, kind := "", "", "", "", ""
+								if tv, ok := rec_obj["token"]; ok { if ts, ok := tv.(json.String); ok { token = string(ts) } }
+								if nv, ok := rec_obj["name"]; ok { if ns, ok := nv.(json.String); ok { name = string(ns) } }
+								if dv, ok := rec_obj["desc"]; ok { if ds, ok := dv.(json.String); ok { desc = string(ds) } }
+								if kv, ok := rec_obj["kind"]; ok { if ks, ok := kv.(json.String); ok { kind = string(ks) } }
+								if rv, ok := rec_obj["resolved"]; ok {
+									if ro, ok := rv.(json.Object); ok {
+										if vv, ok := ro["version"]; ok {
+											if vs, ok := vv.(json.String); ok { version = string(vs) }
+										}
+									}
+								}
+								if token == "" && name != "" { token = name }
+								if token == "" { continue }
+
+								fts.reset(rstmt)
+								rplat := registry_entry_platform_tag(rec_obj)
+								_db_bind_text(rstmt, 1, token)
+								_db_bind_text(rstmt, 2, name)
+								_db_bind_text(rstmt, 3, desc)
+								_db_bind_text(rstmt, 4, version)
+								_db_bind_text(rstmt, 5, kind)
+								_db_bind_text(rstmt, 6, rplat)
+								if fts.step(rstmt) != .Done { return false }
+							}
+						}
+						if fts.exec(db, strings.clone_to_cstring("COMMIT", context.temp_allocator), nil, nil, nil) != .Ok { return false }
+					}
+				}
+				json.destroy_value(reg_val)
+			}
+		}
 	}
 
-	// Atomic write via temp file and rename.
-	tmp_path := fmt.tprintf("%s.tmp", CASK_SEARCH_INDEX)
-	if werr := os.write_entire_file(tmp_path, buf[:]); werr != nil {
-		return false
+	// Create indexes after all data is loaded (faster than per-insert)
+	index_sqls := []string{
+		"CREATE INDEX IF NOT EXISTS idx_formulae_name ON formulae(name)",
+		"CREATE INDEX IF NOT EXISTS idx_casks_token ON casks(token)",
+		"CREATE INDEX IF NOT EXISTS idx_registry_token ON registry(token)",
+		"CREATE INDEX IF NOT EXISTS idx_registry_kind ON registry(kind)",
 	}
-	if rename_err := os.rename(tmp_path, CASK_SEARCH_INDEX); rename_err != nil {
-		os.remove(tmp_path)
-		return false
+	for idx_sql in index_sqls {
+		if fts.exec(db, strings.clone_to_cstring(idx_sql, context.temp_allocator), nil, nil, nil) != .Ok { return false }
 	}
+
+	// Populate FTS5 virtual tables from the content tables.
+	// Done as a single INSERT...SELECT per table, which is much faster
+	// than per-row inserts into the FTS index.
+	fts_populate := []string{
+		"INSERT INTO formulae_fts(rowid, name, desc, version, executables, platform) SELECT rowid, name, desc, version, executables, platform FROM formulae",
+		"INSERT INTO casks_fts(rowid, token, name, desc, version, platform) SELECT rowid, token, name, desc, version, platform FROM casks",
+		"INSERT INTO registry_fts(rowid, token, name, desc, version, kind, platform) SELECT rowid, token, name, desc, version, kind, platform FROM registry",
+	}
+	for pop_sql in fts_populate {
+		if fts.exec(db, strings.clone_to_cstring(pop_sql, context.temp_allocator), nil, nil, nil) != .Ok {
+			return false
+		}
+	}
+
+	if os.rename(tmp_path, SEARCH_DB_PATH) != nil { return false }
 	return true
 }
+
+build_formula_search_index :: proc() -> bool { return build_search_db() }
+
+build_cask_search_index :: proc() -> bool { return build_search_db() }
 
 build_search_index :: proc() -> (formulae_ok, casks_ok: bool) {
-	// Skip rebuild if the JSON dumps haven't changed since the last
-	// index build. mtime check avoids the 170ms cost of re-parsing
-	// 45MB of JSON on every `ubrew update` (which is called frequently
-	// in workflows like `update && upgrade`).
-	if !index_is_stale() {
-		return true, true
-	}
-	formulae_ok = build_formula_search_index()
-	casks_ok = build_cask_search_index()
-	return
+	if !index_is_stale() { return true, true }
+	ok := build_search_db()
+	return ok, ok
 }
 
-// index_is_stale returns true iff the index files are missing or older
-// than the underlying JSON dumps. Used to skip the index rebuild on
-// `update` calls that didn't actually refresh the JSON.
 index_is_stale :: proc() -> bool {
-	pairs := [][]string{
-		{FORMULA_LIST_CACHE, FORMULA_SEARCH_INDEX},
-		{CASK_LIST_CACHE, CASK_SEARCH_INDEX},
-	}
-	for pair in pairs {
-		src, dst := pair[0], pair[1]
-		src_info, src_err := os.stat(src, context.allocator)
-		if src_err != nil {
-			return true
-		}
-		defer os.file_info_delete(src_info, context.allocator)
-		if !os.is_file(dst) {
-			return true
-		}
-		dst_info, dst_err := os.stat(dst, context.allocator)
-		if dst_err != nil {
-			return true
-		}
-		defer os.file_info_delete(dst_info, context.allocator)
+	if !os.is_file(SEARCH_DB_PATH) { return true }
+	dst_info, dst_err := os.stat(SEARCH_DB_PATH, context.allocator)
+	if dst_err != nil { return true }
+	defer os.file_info_delete(dst_info, context.allocator)
+
+	src_paths := []string{FORMULA_LIST_CACHE, CASK_LIST_CACHE, get_registry_path()}
+	for src_path in src_paths {
+		src_info, src_err := os.stat(src_path, context.temp_allocator)
+		if src_err != nil { continue }
 		if time.time_to_unix(src_info.modification_time) >
 		   time.time_to_unix(dst_info.modification_time) {
 			return true
@@ -2803,203 +3318,301 @@ index_is_stale :: proc() -> bool {
 	return false
 }
 
-// append_tsv_field is the in-place version of tsv_escape: appends the
-// scrubbed bytes directly to a buffer (no allocation per call). Used by
-// the bulk-write path in build_*_search_index.
-append_tsv_field :: proc(buf: ^[dynamic]u8, s: string) {
-	for i := 0; i < len(s); i += 1 {
-		c := s[i]
-		if c == '\t' || c == '\n' || c == '\r' {
-			append(buf, ' ')
-		} else {
-			append(buf, c)
-		}
-	}
+// --- SQLite-backed search ---
+
+_open_search_db :: proc() -> (db: ^Connection, ok: bool) {
+	fts.initialize()
+	cpath := strings.clone_to_cstring(SEARCH_DB_PATH)
+	defer delete(cpath)
+	rc := fts.open_v2(cpath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+	if rc != .Ok { return nil, false }
+	return db, true
 }
 
 search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Search_Result {
-	mf, ok := kernel.mapped_file_open(FORMULA_SEARCH_INDEX)
-	if !ok {
-		return nil
-	}
-	defer kernel.mapped_file_close(&mf)
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
 
-	data := kernel.mapped_file_bytes(&mf)
-	if len(data) == 0 {
-		return nil
-	}
+	fts_q := build_fts_query(query_lower)
+
+	// Step 1: core formulae via `formulae_fts`. Three MATCH binds,
+	// no `kind` predicate, no UNION. The fix isolates the broken
+	// `AND kind MATCH …` from the (now-fine) per-column MATCH.
+	// Inflate the SQL LIMIT so OS-availability filtering at the
+	// application layer can discard cross-platform rows without
+	// starving the result set.
+	sql_limit := limit * 4
+	stmt: ^Statement
+	csql0 := strings.clone_to_cstring(
+		"SELECT name, desc, version, platform FROM formulae_fts " +
+		"WHERE name MATCH ? OR desc MATCH ? OR executables MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql0)
+	if fts.prepare_v2(db, csql0, -1, &stmt, nil) != .Ok { return nil }
+	defer fts.finalize(stmt)
+	_db_bind_text(stmt, 1, fts_q)
+	_db_bind_text(stmt, 2, fts_q)
+	_db_bind_text(stmt, 3, fts_q)
+	fts.bind_int(stmt, 4, i32(sql_limit))
 
 	out := make([dynamic]Formula_Search_Result)
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' {
-			end += 1
-		}
-		if end > start {
-			line := text[start:end]
-			tab1 := strings.index_byte(line, '\t')
-			if tab1 > 0 {
-				name := line[:tab1]
-				rest := line[tab1+1:]
-				tab2 := strings.index_byte(rest, '\t')
-				desc, version: string
-				if tab2 >= 0 {
-					desc = rest[:tab2]
-					rest2 := rest[tab2+1:]
-					tab3 := strings.index_byte(rest2, '\t')
-					if tab3 >= 0 {
-						version = rest2[:tab3]
-					} else {
-						version = rest2
-					}
-				} else {
-					desc = rest
-				}
-				if lower_contains(name, query_lower) || lower_contains(desc, query_lower) {
-					append(&out, Formula_Search_Result{
-						name = strings.clone(name),
-						desc = strings.clone(desc),
-						version = strings.clone(version),
-					})
-					if len(out) >= limit {
-						break
-					}
-				}
-			}
-		}
-		start = end + 1
+	for fts.step(stmt) == .Row {
+		name := _db_col_text(stmt, 0)
+		if name == "" { continue }
+		desc := _db_col_text(stmt, 1)
+		version := _db_col_text(stmt, 2)
+		platform := _db_col_text(stmt, 3)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&out, Formula_Search_Result{
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
 	}
 
+	// Step 2: 3rd-party-tap formulae via `registry_fts`. The original
+	// code used a `UNION` whose second arm carried
+	// `AND kind MATCH 'formula'`. Under SQLite FTS5 that predicate
+	// returns zero rows when its rowid source also has other MATCH
+	// operators in the same WHERE (the FTS5 planner mixes the two
+	// expressions across columns instead of AND-intersecting).
+	// We work around this by joining FTS rowids against the `registry`
+	// content table and filtering on `kind` in SQL, so the LIMIT
+	// only counts formula-kind rows.
+	stmt2: ^Statement
+	csql1 := strings.clone_to_cstring(
+		"SELECT r.token, r.name, r.desc, r.version, r.platform " +
+		"FROM registry_fts fts JOIN registry r ON r.rowid = fts.rowid " +
+		"WHERE (fts.token MATCH ? OR fts.name MATCH ? OR fts.desc MATCH ?) " +
+		"AND r.kind = 'formula' LIMIT ?")
+	defer delete(csql1)
+	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
+	defer fts.finalize(stmt2)
+	_db_bind_text(stmt2, 1, fts_q)
+	_db_bind_text(stmt2, 2, fts_q)
+	_db_bind_text(stmt2, 3, fts_q)
+	fts.bind_int(stmt2, 4, i32(sql_limit))
+
+	for fts.step(stmt2) == .Row {
+		token := _db_col_text(stmt2, 0)
+		if token == "" { continue }
+		desc := _db_col_text(stmt2, 2)
+		version := _db_col_text(stmt2, 3)
+		platform := _db_col_text(stmt2, 4)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&out, Formula_Search_Result{
+			name    = strings.clone(token),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
+	}
 	return out[:]
 }
 
 search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Result {
-	mf, ok := kernel.mapped_file_open(CASK_SEARCH_INDEX)
-	if !ok {
-		return nil
-	}
-	defer kernel.mapped_file_close(&mf)
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
 
-	data := kernel.mapped_file_bytes(&mf)
-	if len(data) == 0 {
-		return nil
-	}
+	fts_q := build_fts_query(query_lower)
+
+	// Same two-step pattern as `search_index_formulae`: split the
+	// core casks FTS query from the registry-tap query to avoid the
+	// broken `AND kind MATCH …` inside a UNION.
+	// Inflate the SQL LIMIT so OS-availability filtering at the
+	// application layer can discard cross-platform rows without
+	// starving the result set.
+	sql_limit := limit * 4
+	stmt: ^Statement
+	csql0 := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM casks_fts " +
+		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
+		"LIMIT ?")
+	defer delete(csql0)
+	if fts.prepare_v2(db, csql0, -1, &stmt, nil) != .Ok { return nil }
+	defer fts.finalize(stmt)
+	_db_bind_text(stmt, 1, fts_q)
+	_db_bind_text(stmt, 2, fts_q)
+	_db_bind_text(stmt, 3, fts_q)
+	fts.bind_int(stmt, 4, i32(sql_limit))
 
 	out := make([dynamic]Cask_Search_Result)
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' {
-			end += 1
-		}
-		if end > start {
-			line := text[start:end]
-			tab1 := strings.index_byte(line, '\t')
-			if tab1 > 0 {
-				token := line[:tab1]
-				rest := line[tab1+1:]
-				tab2 := strings.index_byte(rest, '\t')
-				name, desc, version: string
-				if tab2 >= 0 {
-					name = rest[:tab2]
-					rest2 := rest[tab2+1:]
-					tab3 := strings.index_byte(rest2, '\t')
-					if tab3 >= 0 {
-						desc = rest2[:tab3]
-						version = rest2[tab3+1:]
-					} else {
-						desc = rest2
-					}
-				} else {
-					name = rest
-				}
-				if lower_contains(token, query_lower) || lower_contains(name, query_lower) || lower_contains(desc, query_lower) {
-					append(&out, Cask_Search_Result{
-						token = strings.clone(token),
-						name = strings.clone(name),
-						desc = strings.clone(desc),
-						version = strings.clone(version),
-					})
-					if len(out) >= limit {
-						break
-					}
-				}
-			}
-		}
-		start = end + 1
+	for fts.step(stmt) == .Row {
+		token := _db_col_text(stmt, 0)
+		if token == "" { continue }
+		name := _db_col_text(stmt, 1)
+		desc := _db_col_text(stmt, 2)
+		version := _db_col_text(stmt, 3)
+		platform := _db_col_text(stmt, 4)
+		if !cask_available_on_current_os(platform) { continue }
+		append(&out, Cask_Search_Result{
+			token   = strings.clone(token),
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
 	}
 
+	// Tap-provided casks via `registry_fts`, joined against the content
+	// table so the `kind` filter is applied in SQL before the LIMIT
+	// (see the formulae proc for why the inline `AND kind MATCH …` is broken).
+	stmt2: ^Statement
+	csql1 := strings.clone_to_cstring(
+		"SELECT r.token, r.name, r.desc, r.version, r.platform " +
+		"FROM registry_fts fts JOIN registry r ON r.rowid = fts.rowid " +
+		"WHERE (fts.token MATCH ? OR fts.name MATCH ? OR fts.desc MATCH ?) " +
+		"AND r.kind = 'cask' LIMIT ?")
+	defer delete(csql1)
+	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
+	defer fts.finalize(stmt2)
+	_db_bind_text(stmt2, 1, fts_q)
+	_db_bind_text(stmt2, 2, fts_q)
+	_db_bind_text(stmt2, 3, fts_q)
+	fts.bind_int(stmt2, 4, i32(sql_limit))
+
+	for fts.step(stmt2) == .Row {
+		token := _db_col_text(stmt2, 0)
+		if token == "" { continue }
+		name := _db_col_text(stmt2, 1)
+		desc := _db_col_text(stmt2, 2)
+		version := _db_col_text(stmt2, 3)
+		platform := _db_col_text(stmt2, 4)
+		if !cask_available_on_current_os(platform) { continue }
+		append(&out, Cask_Search_Result{
+			token   = strings.clone(token),
+			name    = strings.clone(name),
+			desc    = strings.clone(desc),
+			version = strings.clone(version),
+		})
+		if len(out) >= limit { break }
+	}
 	return out[:]
 }
 
 
 
-
 is_core_formula :: proc(name: string) -> bool {
-	mf, ok := kernel.mapped_file_open(FORMULA_SEARCH_INDEX)
-	if !ok {
-		return false
-	}
-	defer kernel.mapped_file_close(&mf)
+	db, ok := _open_search_db()
+	if !ok { return false }
+	defer fts.close(db)
 
-	data := kernel.mapped_file_bytes(&mf)
-	if len(data) == 0 {
-		return false
-	}
+	stmt: ^Statement
+	csql := strings.clone_to_cstring("SELECT 1 FROM formulae WHERE name = ?")
+	defer delete(csql)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
 
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' do end += 1
-		if end > start {
-			line := text[start:end]
-			tab := strings.index_byte(line, '\t')
-			if tab > 0 {
-				f_name := line[:tab]
-				if f_name == name {
-					return true
-				}
-			}
-		}
-		start = end + 1
-	}
-	return false
+	_db_bind_text(stmt, 1, name)
+	return fts.step(stmt) == .Row
 }
 
 is_core_cask :: proc(name: string) -> bool {
-	mf, ok := kernel.mapped_file_open(CASK_SEARCH_INDEX)
-	if !ok {
-		return false
-	}
-	defer kernel.mapped_file_close(&mf)
+	db, ok := _open_search_db()
+	if !ok { return false }
+	defer fts.close(db)
 
-	data := kernel.mapped_file_bytes(&mf)
-	if len(data) == 0 {
-		return false
-	}
+	stmt: ^Statement
+	csql := strings.clone_to_cstring("SELECT 1 FROM casks WHERE token = ?")
+	defer delete(csql)
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return false }
+	defer fts.finalize(stmt)
 
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' do end += 1
-		if end > start {
-			line := text[start:end]
-			tab := strings.index_byte(line, '\t')
-			if tab > 0 {
-				c_name := line[:tab]
-				if c_name == name {
-					return true
-				}
-			}
-		}
-		start = end + 1
+	_db_bind_text(stmt, 1, name)
+	return fts.step(stmt) == .Row
+}
+
+// --- Public helpers for main.odin ---
+
+get_all_formula_names :: proc(allocator := context.allocator) -> []string {
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
+
+	csql := strings.clone_to_cstring(
+		"SELECT name, platform FROM formulae " +
+		"UNION SELECT token, platform FROM registry WHERE kind = 'formula'")
+	defer delete(csql)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
+
+	out := make([dynamic]string, allocator)
+	for fts.step(stmt) == .Row {
+		name := _db_col_text(stmt, 0)
+		platform := _db_col_text(stmt, 1)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&out, strings.clone(name, allocator))
 	}
-	return false
+	return out[:]
+}
+
+search_db_all_formulae :: proc(allocator := context.allocator) -> []Formula_Search_Result {
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
+
+	csql := strings.clone_to_cstring(
+		"SELECT name, desc, version, platform FROM formulae " +
+		"UNION SELECT token, desc, version, platform FROM registry WHERE kind = 'formula'")
+	defer delete(csql)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
+
+	out := make([dynamic]Formula_Search_Result, allocator)
+	for fts.step(stmt) == .Row {
+		name := _db_col_text(stmt, 0)
+		desc := _db_col_text(stmt, 1)
+		version := _db_col_text(stmt, 2)
+		platform := _db_col_text(stmt, 3)
+		if !formula_available_on_current_os(platform) { continue }
+		append(&out, Formula_Search_Result{
+			name = strings.clone(name, allocator),
+			desc = strings.clone(desc, allocator),
+			version = strings.clone(version, allocator),
+		})
+	}
+	return out[:]
+}
+
+search_db_all_casks :: proc(allocator := context.allocator) -> []Cask_Search_Result {
+	db, ok := _open_search_db()
+	if !ok { return nil }
+	defer fts.close(db)
+
+	csql := strings.clone_to_cstring(
+		"SELECT token, name, desc, version, platform FROM casks " +
+		"UNION SELECT token, name, desc, version, platform FROM registry WHERE kind = 'cask'")
+	defer delete(csql)
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok { return nil }
+	defer fts.finalize(stmt)
+
+	out := make([dynamic]Cask_Search_Result, allocator)
+	for fts.step(stmt) == .Row {
+		token := _db_col_text(stmt, 0)
+		name := _db_col_text(stmt, 1)
+		desc := _db_col_text(stmt, 2)
+		version := _db_col_text(stmt, 3)
+		platform := _db_col_text(stmt, 4)
+		if !cask_available_on_current_os(platform) { continue }
+		append(&out, Cask_Search_Result{
+			token = strings.clone(token, allocator),
+			name = strings.clone(name, allocator),
+			desc = strings.clone(desc, allocator),
+			version = strings.clone(version, allocator),
+		})
+	}
+	return out[:]
 }
 
 warm_mixed_cache_parallel :: proc(formula_names, cask_tokens: []string) -> int {

@@ -251,6 +251,122 @@ derive_branch_from_url :: proc(url: string) -> string {
 	return strings.clone(rest[:quote_end], context.allocator)
 }
 
+// derive_branches_batch fires a single curl --parallel for all GitHub URLs
+// and returns a slice of branch names, one per input URL. Non-GitHub URLs
+// get "main" immediately.
+//
+// Ownership: the returned slice and each element string are independently
+// heap-allocated via context.allocator. Callers must `delete()` every
+// element string before deleting the slice itself.
+derive_branches_batch :: proc(urls: []string) -> []string {
+	branches := make([]string, len(urls), context.allocator)
+
+	// Collect indices of GitHub URLs that need parallel probing
+	gh_indices := make([dynamic]int, context.temp_allocator)
+	defer delete(gh_indices)
+	api_urls := make([dynamic]string, context.temp_allocator)
+	defer delete(api_urls)
+	temp_files := make([dynamic]string, context.temp_allocator)
+	defer {
+		for tf in temp_files {
+			if len(tf) > 0 {
+				os.remove(tf)
+				delete(tf)
+			}
+		}
+		delete(temp_files)
+	}
+
+	for url, idx in urls {
+		repo := ""
+		if strings.has_prefix(url, "https://github.com/") {
+			repo = url[len("https://github.com/"):]
+		} else if strings.has_prefix(url, "http://github.com/") {
+			repo = url[len("http://github.com/"):]
+		} else if strings.has_prefix(url, "git@github.com:") {
+			repo = url[len("git@github.com:"):]
+		}
+
+		if len(repo) > 0 {
+			if strings.has_suffix(repo, ".git") {
+				repo = repo[:len(repo) - 4]
+			}
+			api_url := fmt.tprintf("https://api.github.com/repos/%s?ref=default", repo)
+
+			temp_f, terr := os.create_temp_file("", "ubrew_branch_*.json")
+			if terr != nil {
+				// Could not allocate a temp file for this probe — fall back
+				// to "main" immediately and skip the curl batch for this URL
+				// so json doesn't leak to stdout.
+				branches[idx] = strings.clone("main", context.allocator)
+				continue
+			}
+			append(&gh_indices, idx)
+			append(&api_urls, api_url)
+			temp_name := strings.clone(os.name(temp_f), context.allocator)
+			os.close(temp_f)
+			append(&temp_files, temp_name)
+		} else {
+			branches[idx] = strings.clone("main", context.allocator)
+		}
+	}
+
+	if len(api_urls) > 0 {
+		args := make([dynamic]string, context.temp_allocator)
+		defer delete(args)
+		append(&args, "curl")
+		append(&args, "-sfL")
+		append(&args, "--compressed")
+		append(&args, "--no-progress-meter")
+		append(&args, "--connect-timeout")
+		append(&args, "5")
+		append(&args, "--max-time")
+		append(&args, "30")
+		append(&args, "--http2")
+		append(&args, "--parallel")
+
+		for i in 0..<len(api_urls) {
+			if len(temp_files[i]) > 0 {
+				append(&args, "-o")
+				append(&args, temp_files[i])
+			}
+			append(&args, api_urls[i])
+		}
+
+		_ = platform.exec_cmd("curl", args[:])
+		// Ignore curl exit code — we parse each response individually;
+		// failed requests just fall back to "main" below.
+	}
+
+	for i in 0..<len(gh_indices) {
+		idx := gh_indices[i]
+		branch := "main"
+		if i < len(temp_files) && len(temp_files[i]) > 0 {
+			if data, read_err := os.read_entire_file(temp_files[i], context.temp_allocator); read_err == nil {
+				marker := strings.index(string(data), "\"default_branch\"")
+				if marker >= 0 {
+					rest := string(data[marker:])
+					colon_idx := strings.index(rest, ":")
+					if colon_idx >= 0 {
+						rest = rest[colon_idx + 1:]
+						quote_start := strings.index(rest, "\"")
+						if quote_start >= 0 {
+							rest = rest[quote_start + 1:]
+							quote_end := strings.index(rest, "\"")
+							if quote_end >= 0 {
+								branch = rest[:quote_end]
+							}
+						}
+					}
+				}
+			}
+		}
+		branches[idx] = strings.clone(branch, context.allocator)
+	}
+
+	return branches
+}
+
 // tap_from_entry builds a Tap struct from a Read_Tap_Entry, inferring the
 // GitHub URL and branch if not explicitly provided. The returned Tap owns
 // its own copies of the strings, so destroying both the Tap and the source
