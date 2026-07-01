@@ -1378,6 +1378,41 @@ extract_string_array :: proc(obj: json.Object, key: string) -> []string {
     return nil
 }
 
+select_bottle_key :: proc(files_obj: json.Object) -> string {
+	preferred := "x86_64_linux"
+	when ODIN_OS == .Linux {
+		when ODIN_ARCH == .arm64 {
+			preferred = "arm64_linux"
+		} else {
+			preferred = "x86_64_linux"
+		}
+	} else when ODIN_OS == .Darwin {
+		when ODIN_ARCH == .arm64 {
+			keys := []string{"arm64_sequoia", "arm64_sonoma", "arm64_ventura", "arm64_monterey", "arm64_big_sur"}
+			for k in keys {
+				if _, exists := files_obj[k]; exists { return k }
+			}
+			preferred = "arm64_sonoma"
+		} else {
+			keys := []string{"sequoia", "sonoma", "ventura", "monterey", "big_sur"}
+			for k in keys {
+				if _, exists := files_obj[k]; exists { return k }
+			}
+			preferred = "sonoma"
+		}
+	}
+	if _, exists := files_obj[preferred]; exists {
+		return preferred
+	}
+	if _, exists := files_obj["all"]; exists {
+		return "all"
+	}
+	for k, _ in files_obj {
+		return k
+	}
+	return preferred
+}
+
 fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.Error) {
     url := fmt.tprintf("https://formulae.brew.sh/api/formula/%s.json", name)
 
@@ -1461,10 +1496,7 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
             if files_val, ok4 := stable_obj["files"]; ok4 {
                 files_obj := files_val.(json.Object)
 
-                target_key := "x86_64_linux"
-                if _, exists := files_obj[target_key]; !exists {
-                    target_key = "all"
-                }
+                target_key := select_bottle_key(files_obj)
 
                 if target_val, exists := files_obj[target_key]; exists {
                     target_obj := target_val.(json.Object)
@@ -2962,7 +2994,7 @@ cask_available_on_current_os :: proc(platform_tag: string) -> bool {
 	when ODIN_OS == .Linux {
 		return platform_tag == "L"
 	} else when ODIN_OS == .Darwin {
-		return platform_tag == "M"
+		return true // Allow searching/listing Linux casks on Darwin
 	}
 	return true
 }
