@@ -357,12 +357,12 @@ relocate_single_file :: proc(path: string) -> bool {
 		rpath_buf: [2048]u8
 		rpath_args := []string{"patchelf", "--print-rpath", path}
 		rpath, rpath_truncated := platform.exec_cmd_capture("patchelf", rpath_args, rpath_buf[:], true)
+		if rpath_truncated {
+			fmt.eprintf("Error: rpath for %s exceeded buffer\n", path)
+			return false
+		}
 		rpath = strings.trim_space(rpath)
-		// Skip the rpath rewrite if the captured output was truncated —
-		// writing back a clipped rpath would corrupt the binary's RUNPATH.
-		// Long rpaths are rare in practice; the caller can reinstall with
-		// a larger buffer if needed.
-		if !rpath_truncated && (strings.contains(rpath, "@@HOMEBREW_PREFIX@@") || strings.contains(rpath, "@@HOMEBREW_CELLAR@@")) {
+		if strings.contains(rpath, "@@HOMEBREW_PREFIX@@") || strings.contains(rpath, "@@HOMEBREW_CELLAR@@") {
 			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
 			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 			chmod_args := []string{"chmod", "+w", path}
@@ -373,8 +373,6 @@ relocate_single_file :: proc(path: string) -> bool {
 			if !platform.exec_cmd("patchelf", set_args) {
 				return false
 			}
-		} else if rpath_truncated {
-			fmt.eprintf("Warning: rpath for %s exceeded buffer; skipping rpath rewrite\n", path)
 		}
 	} else if is_macho_file(path) {
 		return relocate_macho_file(path)
@@ -429,14 +427,12 @@ relocate_macho_file :: proc(path: string) -> bool {
 		lbuf: [65536]u8
 		otool_args := []string{"otool", "-l", path}
 		load_cmds, truncated := platform.exec_cmd_capture("otool", otool_args, lbuf[:], true)
-		needs_rewrite := truncated
-		if !needs_rewrite {
-			needs_rewrite = strings.contains(load_cmds, "@@HOMEBREW_PREFIX@@") ||
-			                strings.contains(load_cmds, "@@HOMEBREW_CELLAR@@")
-		} else if data, read_err := os.read_entire_file(path, context.temp_allocator); read_err == nil {
-			needs_rewrite = strings.contains(string(data), "@@HOMEBREW_PREFIX@@") ||
-			                strings.contains(string(data), "@@HOMEBREW_CELLAR@@")
+		if truncated {
+			fmt.eprintf("Error: otool output for %s exceeded buffer\n", path)
+			return false
 		}
+		needs_rewrite := strings.contains(load_cmds, "@@HOMEBREW_PREFIX@@") ||
+		                 strings.contains(load_cmds, "@@HOMEBREW_CELLAR@@")
 		if !needs_rewrite {
 			return true
 		}
@@ -974,6 +970,22 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
+	// Relocate patched binary if patchelf exists
+	binary_path := fmt.tprintf("%s/bin/%s", keg_dir, f.name)
+	if os.is_file(binary_path) && elf_has_interp(binary_path) {
+		chmod_args := []string{"chmod", "+w", binary_path}
+		platform.exec_cmd("chmod", chmod_args)
+
+		patch_args := []string{"patchelf", "--set-interpreter", INTERPRETER, binary_path}
+		platform.exec_cmd("patchelf", patch_args)
+	}
+
+	if !relocate_keg_placeholders(keg_dir) {
+		fmt.println("Error: Keg relocation failed.")
+		_ = os.remove_all(keg_dir)
+		return false
+	}
+
 	// Link binaries
 	bin_dir := fmt.tprintf("%s/bin", keg_dir)
 	if os.is_dir(bin_dir) {
@@ -1002,21 +1014,6 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 			fmt.println("Error: Linking binaries failed.")
 			return false
 		}
-	}
-
-	// Relocate patched binary if patchelf exists
-	binary_path := fmt.tprintf("%s/bin/%s", keg_dir, f.name)
-	if os.is_file(binary_path) && elf_has_interp(binary_path) {
-		chmod_args := []string{"chmod", "+w", binary_path}
-		platform.exec_cmd("chmod", chmod_args)
-
-		patch_args := []string{"patchelf", "--set-interpreter", INTERPRETER, binary_path}
-		platform.exec_cmd("patchelf", patch_args)
-	}
-
-	if !relocate_keg_placeholders(keg_dir) {
-		fmt.println("Error: Keg relocation failed.")
-		return false
 	}
 
 	// Create opt symlink
