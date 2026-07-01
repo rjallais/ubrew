@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Verify Formula/nanobrew.rb release URLs return artifacts and SHA256s match.
-# Usage: ./scripts/verify-formula-release.sh [path/to/nanobrew.rb]
+# Verify Formula/ubrew.rb release URLs return artifacts and SHA256s match.
+# Usage: ./scripts/verify-formula-release.sh [path/to/ubrew.rb]
 # Requires: curl, shasum (macOS) or sha256sum (Linux)
 
 set -euo pipefail
 
-FORMULA="${1:-Formula/nanobrew.rb}"
+FORMULA="${1:-Formula/ubrew.rb}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 if [[ ! -f "$FORMULA" ]]; then
-  echo "usage: $0 [Formula/nanobrew.rb]" >&2
+  echo "usage: $0 [Formula/ubrew.rb]" >&2
   exit 1
 fi
 
 strip_quotes() { tr -d "\"'"; }
 
 VERSION=$(awk '/^[[:space:]]*version[[:space:]]/ { print $2; exit }' "$FORMULA" | strip_quotes)
-ARM_URL=$(awk '/nb-arm64-apple-darwin\.tar\.gz/ && /url/ { print $2; exit }' "$FORMULA" | strip_quotes)
-X86_URL=$(awk '/nb-x86_64-apple-darwin\.tar\.gz/ && /url/ { print $2; exit }' "$FORMULA" | strip_quotes)
-ARM_SHA=$(awk '/nb-arm64-apple-darwin\.tar\.gz/ { p=1; next } p && /^[[:space:]]*sha256[[:space:]]/ { print $2; exit }' "$FORMULA" | strip_quotes)
-X86_SHA=$(awk '/nb-x86_64-apple-darwin\.tar\.gz/ { p=1; next } p && /^[[:space:]]*sha256[[:space:]]/ { print $2; exit }' "$FORMULA" | strip_quotes)
+ARM_URL=$(awk '/ubrew-arm64-apple-darwin\.tar\.gz/ && /url/ { print $2; exit }' "$FORMULA" | strip_quotes)
+X86_URL=$(awk '/ubrew-x86_64-apple-darwin\.tar\.gz/ && /url/ { print $2; exit }' "$FORMULA" | strip_quotes)
+ARM_SHA=$(awk '/ubrew-arm64-apple-darwin\.tar\.gz/ { p=1; next } p && /^[[:space:]]*sha256[[:space:]]/ { print $2; exit }' "$FORMULA" | strip_quotes)
+X86_SHA=$(awk '/ubrew-x86_64-apple-darwin\.tar\.gz/ { p=1; next } p && /^[[:space:]]*sha256[[:space:]]/ { print $2; exit }' "$FORMULA" | strip_quotes)
 
 if [[ -z "$VERSION" || -z "$ARM_URL" || -z "$X86_URL" || -z "$ARM_SHA" || -z "$X86_SHA" ]]; then
   echo "FAIL: could not parse version, URLs, or SHA256s from $FORMULA" >&2
