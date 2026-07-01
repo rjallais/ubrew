@@ -104,7 +104,7 @@ A simple example using the base SQLite3 API bindings can be found in [`examples/
 Run it using:
 
 ```sh
-$ odin run examples/c_api
+odin run examples/c_api
 ```
 
 <details>
@@ -175,7 +175,7 @@ A more Odin-like approach using the addon package can be found in [`examples/eas
 Run it using:
 
 ```sh
-$ odin run examples/easy_api
+odin run examples/easy_api
 ```
 <details>
     <summary>Command output</summary>
