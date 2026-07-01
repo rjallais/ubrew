@@ -510,19 +510,18 @@ registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
 		assets_obj, aok := json_object_or_nil(obj, "assets")
 		if !aok { return false }
 
-		de := detect_desktop_env_api()
-		if de == .KDE {
-			if _, exists := assets_obj["linux-kde"]; exists { return true }
-		} else if de == .GNOME {
-			if _, exists := assets_obj["linux-gnome"]; exists { return true }
-		}
-		if _, exists := assets_obj["linux-png"]; exists { return true }
-
 		preferred := registry_preferred_asset_key()
 		// Only consider asset keys for the *current* OS — never
 		// accept a macOS asset on Linux or vice versa.
 		os_keys: []string
 		when ODIN_OS == .Linux {
+			de := detect_desktop_env_api()
+			if de == .KDE {
+				if _, exists := assets_obj["linux-kde"]; exists { return true }
+			} else if de == .GNOME {
+				if _, exists := assets_obj["linux-gnome"]; exists { return true }
+			}
+			if _, exists := assets_obj["linux-png"]; exists { return true }
 			os_keys = []string{preferred, "linux-x86_64", "linux-aarch64"}
 		} else when ODIN_OS == .Darwin {
 			os_keys = []string{preferred, "macos-x86_64", "macos-arm64"}
