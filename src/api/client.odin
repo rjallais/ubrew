@@ -3331,13 +3331,15 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	// returns zero rows when its rowid source also has other MATCH
 	// operators in the same WHERE (the FTS5 planner mixes the two
 	// expressions across columns instead of AND-intersecting).
-	// We isolate `registry_fts` into a separate prepare and look up
-	// the row's `kind` in the regular `registry` content table.
+	// We work around this by joining FTS rowids against the `registry`
+	// content table and filtering on `kind` in SQL, so the LIMIT
+	// only counts formula-kind rows.
 	stmt2: ^Statement
 	csql1 := strings.clone_to_cstring(
-		"SELECT token, name, desc, version, platform FROM registry_fts " +
-		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
-		"LIMIT ?")
+		"SELECT r.token, r.name, r.desc, r.version, r.platform " +
+		"FROM registry_fts fts JOIN registry r ON r.rowid = fts.rowid " +
+		"WHERE (fts.token MATCH ? OR fts.name MATCH ? OR fts.desc MATCH ?) " +
+		"AND r.kind = 'formula' LIMIT ?")
 	defer delete(csql1)
 	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
 	defer fts.finalize(stmt2)
@@ -3349,7 +3351,6 @@ search_index_formulae :: proc(query_lower: string, limit: int) -> []Formula_Sear
 	for fts.step(stmt2) == .Row {
 		token := _db_col_text(stmt2, 0)
 		if token == "" { continue }
-		if !_registry_kind_is(db, token, "formula") { continue }
 		desc := _db_col_text(stmt2, 2)
 		version := _db_col_text(stmt2, 3)
 		platform := _db_col_text(stmt2, 4)
@@ -3409,14 +3410,15 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 		if len(out) >= limit { break }
 	}
 
-	// Tap-provided casks via `registry_fts`, filtered by `kind` in
-	// the regular `registry` content table (see the formulae proc for
-	// why the inline `AND kind MATCH …` is broken).
+	// Tap-provided casks via `registry_fts`, joined against the content
+	// table so the `kind` filter is applied in SQL before the LIMIT
+	// (see the formulae proc for why the inline `AND kind MATCH …` is broken).
 	stmt2: ^Statement
 	csql1 := strings.clone_to_cstring(
-		"SELECT token, name, desc, version, platform FROM registry_fts " +
-		"WHERE token MATCH ? OR name MATCH ? OR desc MATCH ? " +
-		"LIMIT ?")
+		"SELECT r.token, r.name, r.desc, r.version, r.platform " +
+		"FROM registry_fts fts JOIN registry r ON r.rowid = fts.rowid " +
+		"WHERE (fts.token MATCH ? OR fts.name MATCH ? OR fts.desc MATCH ?) " +
+		"AND r.kind = 'cask' LIMIT ?")
 	defer delete(csql1)
 	if fts.prepare_v2(db, csql1, -1, &stmt2, nil) != .Ok { return out[:] }
 	defer fts.finalize(stmt2)
@@ -3428,7 +3430,6 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	for fts.step(stmt2) == .Row {
 		token := _db_col_text(stmt2, 0)
 		if token == "" { continue }
-		if !_registry_kind_is(db, token, "cask") { continue }
 		name := _db_col_text(stmt2, 1)
 		desc := _db_col_text(stmt2, 2)
 		version := _db_col_text(stmt2, 3)
@@ -3445,29 +3446,6 @@ search_index_casks :: proc(query_lower: string, limit: int) -> []Cask_Search_Res
 	return out[:]
 }
 
-// _registry_kind_is returns true iff registry.kind == kind_for for the
-// given token. The kind filter is run against the regular content table
-// rather than inside a virtual-table MATCH predicate (the FTS5 quirk
-// motivating this split). Each call is one prepared/executed query;
-// for large hit sets a small per-search cache could amortise this —
-// not currently a hot path because `append_tap_formulae_matches` in
-// main.odin still hits `registry` directly.
-_registry_kind_is :: proc(db: ^Connection, token: string, kind_for: string) -> bool {
-	stmt: ^Statement
-	csql := strings.clone_to_cstring(
-		"SELECT kind FROM registry WHERE token = ? AND kind = ?")
-	defer delete(csql)
-	if fts.prepare_v2(db, csql, -1, &stmt, nil) != .Ok { return false }
-	defer fts.finalize(stmt)
-	_db_bind_text(stmt, 1, token)
-	_db_bind_text(stmt, 2, kind_for)
-	got := false
-	for fts.step(stmt) == .Row {
-		k := _db_col_text(stmt, 0)
-		if k == kind_for { got = true; break }
-	}
-	return got
-}
 
 
 is_core_formula :: proc(name: string) -> bool {
