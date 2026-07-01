@@ -34,7 +34,13 @@ jobs:
           strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 
       - name: Build ubrew
-        run: odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:speed
+        run: |
+          case "$(uname -s)" in
+            Darwin) ext=dylib ;;
+            *)      ext=so    ;;
+          esac
+          odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:speed
+          cp "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}" .
 
       - name: Verify binary
         run: |

@@ -20,7 +20,7 @@ outputs = ["src/vendor/odin-sqlite3/libsqlite3-fts5.so", "src/vendor/odin-sqlite
 
 [tasks.build]
 description = "Build ubrew with aggressive optimizations for the native CPU (fastest dev build, no LTO)"
-run = "odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native"
+run = "odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native && cp src/vendor/odin-sqlite3/libsqlite3-fts5.so ."
 depends = ["build-libsqlite"]
 sources = ["src/**/*.odin"]
 outputs = ["ubrew"]
@@ -76,7 +76,7 @@ depends = ["build"]
 
 [tasks.clean]
 description = "Clean up compiler build artifacts"
-run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg src/api/sqlite3-fts5.o src/api/sqlite3.o"
+run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg libsqlite3-fts5.so src/api/sqlite3-fts5.o src/api/sqlite3.o"
 
 [tasks.check]
 description = "Type check all Odin source files"
