@@ -28,6 +28,9 @@ match_and_return_capture :: proc(pattern: string, str: string) -> (string, Regex
 		return "", .No_Capture
 	}
 
+	if len(capture.groups) < 2 {
+		return "", .No_Capture
+	}
 
 	return strings.clone(capture.groups[1]), nil
 }
