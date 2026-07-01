@@ -53,6 +53,8 @@ jobs:
           ls -lh ubrew
 
       - name: Pre-test Setup
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo mkdir -p /opt/ubrew
           sudo chown -R $USER /opt/ubrew
@@ -64,4 +66,6 @@ jobs:
         run: odin test src -define:SQLITE3_CUSTOM_FTS5=true
 
       - name: Run smoke tests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash tests/smoke-test.sh ./ubrew
