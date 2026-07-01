@@ -8301,11 +8301,19 @@ run_search :: proc(args_slice: []string) {
 
     // Search using SQLite DB (includes core formulae/casks + upstream registry entries)
     // The DB is built during `ubrew update` — search only reads.
+    // If the DB is missing, trigger a build from cached TSV files so searches
+    // still work on fresh installs (the `ubrew update` path creates those caches).
+    search_db_auto_build :: proc() {
+        if !os.is_file(api.SEARCH_DB_PATH) {
+            api.build_search_db()
+        }
+    }
     if !flags.cask_only {
         for query in pkg_names {
             is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
             if is_regex {
                 results := api.search_db_all_formulae(context.temp_allocator)
+                if results == nil { search_db_auto_build(); results = api.search_db_all_formulae(context.temp_allocator) }
                 for r in results {
                     if (match_query(r.name, query, true) || (flags.desc && match_query(r.desc, query, true))) && !has_formula(matched_formulae, r.name) {
                         append(&matched_formulae, api.Formula_Search_Result{
@@ -8317,6 +8325,7 @@ run_search :: proc(args_slice: []string) {
                 }
             } else {
                 results := api.search_index_formulae(strings.to_lower(query, context.temp_allocator), 100)
+                if results == nil { search_db_auto_build(); results = api.search_index_formulae(strings.to_lower(query, context.temp_allocator), 100) }
                 for r in results {
                     if (flags.desc || strings.contains(strings.to_lower(r.name, context.temp_allocator), strings.to_lower(query, context.temp_allocator))) && !has_formula(matched_formulae, r.name) {
                         append(&matched_formulae, api.Formula_Search_Result{
@@ -8334,6 +8343,7 @@ run_search :: proc(args_slice: []string) {
             is_regex := strings.has_prefix(query, "/") && strings.has_suffix(query, "/")
             if is_regex {
                 results := api.search_db_all_casks(context.temp_allocator)
+                if results == nil { search_db_auto_build(); results = api.search_db_all_casks(context.temp_allocator) }
                 for r in results {
                     if (match_query(r.token, query, true) || match_query(r.name, query, true) || (flags.desc && match_query(r.desc, query, true))) && !has_cask(matched_casks, r.token) {
                         append(&matched_casks, api.Cask_Search_Result{
@@ -8346,6 +8356,7 @@ run_search :: proc(args_slice: []string) {
                 }
             } else {
                 results := api.search_index_casks(strings.to_lower(query, context.temp_allocator), 100)
+                if results == nil { search_db_auto_build(); results = api.search_index_casks(strings.to_lower(query, context.temp_allocator), 100) }
                 for r in results {
                     if (flags.desc || strings.contains(strings.to_lower(r.token, context.temp_allocator), strings.to_lower(query, context.temp_allocator)) || strings.contains(strings.to_lower(r.name, context.temp_allocator), strings.to_lower(query, context.temp_allocator))) && !has_cask(matched_casks, r.token) {
                         append(&matched_casks, api.Cask_Search_Result{
