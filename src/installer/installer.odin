@@ -336,7 +336,7 @@ relocate_keg_binaries :: proc(dir: string, relocated_count: ^int) {
 	}
 }
 
-relocate_single_file :: proc(path: string) {
+relocate_single_file :: proc(path: string) -> bool {
 	// 1. If it's a symlink
 	target, read_link_err := os.read_link(path, context.temp_allocator)
 	if read_link_err == nil {
@@ -344,9 +344,12 @@ relocate_single_file :: proc(path: string) {
 			new_target, _ := strings.replace_all(target, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
 			new_target, _ = strings.replace_all(new_target, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 			os.remove(path)
-			os.symlink(new_target, path)
+			sym_err := os.symlink(new_target, path)
+			if sym_err != nil {
+				return false
+			}
 		}
-		return
+		return true
 	}
 
 	// 2. If it's a regular file
@@ -363,14 +366,18 @@ relocate_single_file :: proc(path: string) {
 			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
 			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 			chmod_args := []string{"chmod", "+w", path}
-			platform.exec_cmd("chmod", chmod_args)
+			if !platform.exec_cmd("chmod", chmod_args) {
+				return false
+			}
 			set_args := []string{"patchelf", "--set-rpath", new_rpath, path}
-			platform.exec_cmd("patchelf", set_args)
+			if !platform.exec_cmd("patchelf", set_args) {
+				return false
+			}
 		} else if rpath_truncated {
 			fmt.eprintf("Warning: rpath for %s exceeded buffer; skipping rpath rewrite\n", path)
 		}
 	} else if is_macho_file(path) {
-		relocate_macho_file(path)
+		return relocate_macho_file(path)
 	} else {
 		data, read_err := os.read_entire_file(path, context.temp_allocator)
 		if read_err == nil && len(data) > 0 {
@@ -379,11 +386,17 @@ relocate_single_file :: proc(path: string) {
 				new_content, _ := strings.replace_all(content, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
 				new_content, _ = strings.replace_all(new_content, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 				chmod_args := []string{"chmod", "+w", path}
-				platform.exec_cmd("chmod", chmod_args)
-				_ = os.write_entire_file_from_string(path, new_content)
+				if !platform.exec_cmd("chmod", chmod_args) {
+					return false
+				}
+				werr := os.write_entire_file_from_string(path, new_content)
+				if werr != nil {
+					return false
+				}
 			}
 		}
 	}
+	return true
 }
 
 // relocate_macho_file rewrites Homebrew bottle Mach-O placeholders
@@ -407,18 +420,17 @@ relocate_single_file :: proc(path: string) {
 //
 // On non-Darwin platforms this is a no-op so the call site in
 // relocate_single_file remains portable.
-relocate_macho_file :: proc(path: string) {
+relocate_macho_file :: proc(path: string) -> bool {
 	when ODIN_OS == .Darwin {
 		// 1. Scan for placeholders. `otool -l` dumps the load-command
 		//    stream; if neither substring is present there is nothing
 		//    to rewrite and we skip both tools. This preserves the
 		//    existing code signature in the common case.
-		lbuf: [16384]u8
+		lbuf: [65536]u8
 		otool_args := []string{"otool", "-l", path}
-		_, truncated := platform.exec_cmd_capture("otool", otool_args, lbuf[:], true)
+		load_cmds, truncated := platform.exec_cmd_capture("otool", otool_args, lbuf[:], true)
 		needs_rewrite := truncated
 		if !needs_rewrite {
-			load_cmds := string(lbuf[:])
 			needs_rewrite = strings.contains(load_cmds, "@@HOMEBREW_PREFIX@@") ||
 			                strings.contains(load_cmds, "@@HOMEBREW_CELLAR@@")
 		} else if data, read_err := os.read_entire_file(path, context.temp_allocator); read_err == nil {
@@ -426,67 +438,93 @@ relocate_macho_file :: proc(path: string) {
 			                strings.contains(string(data), "@@HOMEBREW_CELLAR@@")
 		}
 		if !needs_rewrite {
-			return
+			return true
 		}
 
 		// 2. Bottled Mach-O files are 0o555; install_name_tool
 		//    refuses to write read-only files. Make writable first.
 		chmod_args := []string{"chmod", "+w", path}
-		platform.exec_cmd("chmod", chmod_args)
-
-		// 3. Rewrite each placeholder in the binary's load commands.
-		//    `install_name_tool -rpath` is a literal substring
-		//    replacement against LC_RPATH entries. We issue one
-		//    call per (oldprefix -> newprefix) pair. The two paths
-		//    we need to translate are:
-		//      @@HOMEBREW_PREFIX@@/opt -> PREFIX/opt
-		//      @@HOMEBREW_CELLAR@@/... -> PREFIX/Cellar/...
-		//    The Cellar substitution relies on the placeholders
-		//    only ever appearing as path-prefix substrings in load
-		//    commands (which is how Homebrew bottle.rb writes them),
-		//    so the rewrite is unambiguous.
-		//    Note: install_name_tool exits non-zero on any unfixable
-		//    entry; we log a warning so a broken Mach-O doesn't silently
-		//    land in the keg and surface only at first launch.
-		if !platform.exec_cmd(
-			"install_name_tool",
-			[]string{
-				"-rpath", "@@HOMEBREW_PREFIX@@/opt", PREFIX + "/opt",
-				"-rpath", "@@HOMEBREW_CELLAR@@",     PREFIX + "/Cellar",
-				path,
-			},
-		) {
-			fmt.eprintf("Warning: install_name_tool failed for %s — Mach-O rebuild may not relaunch correctly\n", path)
+		if !platform.exec_cmd("chmod", chmod_args) {
+			return false
 		}
 
-		// 4. Re-sign ad-hoc. install_name_tool strips the ad-hoc
-		//    signature unconditionally — we must restore it for the
-		//    binary to launch on Apple Silicon (and under SIP for
-		//    Intel). `-` means ad-hoc signing, which requires no
-		//    signing identity. If the re-sign fails the binary is now
-		//    unsigned entirely; log it explicitly.
+		// 3. Rewrite each placeholder in the binary's load commands.
+		lines := strings.split(load_cmds, "\n", context.temp_allocator)
+		current_cmd: string
+		for line in lines {
+			trimmed := strings.trim_space(line)
+			if strings.has_prefix(trimmed, "cmd ") {
+				current_cmd = strings.trim_space(trimmed[len("cmd "):])
+			} else if strings.has_prefix(trimmed, "path ") || strings.has_prefix(trimmed, "name ") {
+				parts := strings.fields(trimmed, context.temp_allocator)
+				if len(parts) >= 2 {
+					old_path := parts[1]
+					if strings.contains(old_path, "@@HOMEBREW_PREFIX@@") || strings.contains(old_path, "@@HOMEBREW_CELLAR@@") {
+						new_path, _ := strings.replace_all(old_path, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+						new_path, _ = strings.replace_all(new_path, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+						
+						tool_args := make([dynamic]string, context.temp_allocator)
+						defer delete(tool_args)
+						
+						if current_cmd == "LC_RPATH" {
+							append(&tool_args, "-rpath")
+							append(&tool_args, old_path)
+							append(&tool_args, new_path)
+						} else if current_cmd == "LC_ID_DYLIB" {
+							append(&tool_args, "-id")
+							append(&tool_args, new_path)
+						} else if current_cmd == "LC_LOAD_DYLIB" || current_cmd == "LC_LOAD_WEAK_DYLIB" || current_cmd == "LC_REEXPORT_DYLIB" {
+							append(&tool_args, "-change")
+							append(&tool_args, old_path)
+							append(&tool_args, new_path)
+						}
+						
+						if len(tool_args) > 0 {
+							append(&tool_args, path)
+							if !platform.exec_cmd("install_name_tool", tool_args[:]) {
+								fmt.eprintf("Error: install_name_tool failed for %s with command %s\n", path, current_cmd)
+								return false
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// 4. Re-sign ad-hoc.
 		if !platform.exec_cmd(
 			"codesign",
 			[]string{"--force", "--sign", "-", path},
 		) {
-			fmt.eprintf("Warning: codesign failed for %s — Mach-O is missing ad-hoc signature\n", path)
+			fmt.eprintf("Error: codesign failed for %s\n", path)
+			return false
 		}
 	}
+	return true
 }
 
-relocate_keg_placeholders :: proc(dir: string) {
+relocate_keg_placeholders :: proc(dir: string) -> bool {
 	if fd, fd_err := os.open(dir); fd_err == nil {
 		defer os.close(fd)
 		if infos, read_err := os.read_directory_by_path(dir, -1, context.temp_allocator); read_err == nil {
 			for info in infos {
 				if info.type == .Directory {
-					relocate_keg_placeholders(info.fullpath)
+					if !relocate_keg_placeholders(info.fullpath) {
+						return false
+					}
 				} else {
-					relocate_single_file(info.fullpath)
+					if !relocate_single_file(info.fullpath) {
+						return false
+					}
 				}
 			}
+		} else {
+			return false
 		}
+	} else {
+		return false
 	}
+	return true
 }
 
 install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> bool {
@@ -591,7 +629,10 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		if relocated_bin_count > 0 {
 			fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
 		}
-		relocate_keg_placeholders(keg_dir)
+		if !relocate_keg_placeholders(keg_dir) {
+			fmt.println("Error: Keg relocation failed.")
+			return false
+		}
 	}
 
 	bin_dir := fmt.tprintf("%s/bin", keg_dir)
@@ -973,7 +1014,10 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		platform.exec_cmd("patchelf", patch_args)
 	}
 
-	relocate_keg_placeholders(keg_dir)
+	if !relocate_keg_placeholders(keg_dir) {
+		fmt.println("Error: Keg relocation failed.")
+		return false
+	}
 
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)

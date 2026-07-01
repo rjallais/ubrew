@@ -18,7 +18,7 @@ jobs:
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Build ubrew
-        run: odin build src -out:ubrew -o:speed
+        run: mise run build
 
       - name: Init ubrew
         run: |
@@ -167,7 +167,7 @@ jobs:
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Build Linux binary
-        run: odin build src -out:ubrew -o:speed -target:linux_amd64
+        run: mise run build
 
       - name: Benchmark deb curl
         id: deb_curl

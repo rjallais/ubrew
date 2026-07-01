@@ -47,7 +47,7 @@ test_package_name_safe_invalid :: proc(t: ^testing.T) {
 
 @(test)
 test_extract_quoted_strings_single :: proc(t: ^testing.T) {
-    results := extract_quoted_strings(`  depends_on "openssl@3"`)
+    results := extract_quoted_strings(`  depends_on "openssl@3"`, context.allocator)
     defer delete(results)
     testing.expect_value(t, len(results), 1)
     if len(results) >= 1 {
@@ -57,7 +57,7 @@ test_extract_quoted_strings_single :: proc(t: ^testing.T) {
 
 @(test)
 test_extract_quoted_strings_multiple :: proc(t: ^testing.T) {
-    results := extract_quoted_strings(`  depends_on "readline", "xz", "openssl@3"`)
+    results := extract_quoted_strings(`  depends_on "readline", "xz", "openssl@3"`, context.allocator)
     defer delete(results)
     testing.expect_value(t, len(results), 3)
     if len(results) >= 3 {
@@ -69,7 +69,7 @@ test_extract_quoted_strings_multiple :: proc(t: ^testing.T) {
 
 @(test)
 test_extract_quoted_strings_empty_line :: proc(t: ^testing.T) {
-    results := extract_quoted_strings(`  homepage ""`)
+    results := extract_quoted_strings(`  homepage ""`, context.allocator)
     defer delete(results)
     // An empty quoted string should either return an empty string or nothing
     // depending on implementation. Just verify it doesn't crash.
@@ -78,7 +78,7 @@ test_extract_quoted_strings_empty_line :: proc(t: ^testing.T) {
 
 @(test)
 test_extract_quoted_strings_no_quotes :: proc(t: ^testing.T) {
-    results := extract_quoted_strings(`  bottle :unneeded`)
+    results := extract_quoted_strings(`  bottle :unneeded`, context.allocator)
     defer delete(results)
     testing.expect_value(t, len(results), 0)
 }

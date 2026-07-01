@@ -511,8 +511,8 @@ registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
 		if !aok { return false }
 
 		preferred := registry_preferred_asset_key()
-		// Only consider asset keys for the *current* OS — never
-		// accept a macOS asset on Linux or vice versa.
+		// Only consider asset keys for the *current* OS and arch — never
+		// accept a macOS asset on Linux, or vice versa, or an incompatible arch.
 		os_keys: []string
 		when ODIN_OS == .Linux {
 			de := detect_desktop_env_api()
@@ -522,9 +522,9 @@ registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
 				if _, exists := assets_obj["linux-gnome"]; exists { return true }
 			}
 			if _, exists := assets_obj["linux-png"]; exists { return true }
-			os_keys = []string{preferred, "linux-x86_64", "linux-aarch64"}
+			os_keys = []string{preferred}
 		} else when ODIN_OS == .Darwin {
-			os_keys = []string{preferred, "macos-x86_64", "macos-arm64"}
+			os_keys = []string{preferred}
 		} else {
 			os_keys = []string{preferred}
 		}
@@ -568,9 +568,9 @@ registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string,
                     return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
                 }
             }
-            fallback_keys = []string{preferred, "linux-x86_64", "linux-aarch64"}
+            fallback_keys = []string{preferred}
         } else when ODIN_OS == .Darwin {
-            fallback_keys = []string{preferred, "macos-x86_64", "macos-arm64"}
+            fallback_keys = []string{preferred}
         } else {
             fallback_keys = []string{preferred}
         }
@@ -583,10 +583,18 @@ registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string,
             }
         }
 
-        // Fallback: first available asset
-        for _, v in assets_obj {
-            if ao, ok2 := v.(json.Object); ok2 {
-                return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+        // Fallback: first available asset that matches our OS and arch
+        for k, v in assets_obj {
+            is_valid := k == preferred
+            when ODIN_OS == .Linux {
+                if k == "linux-kde" || k == "linux-gnome" || k == "linux-png" {
+                    is_valid = true
+                }
+            }
+            if is_valid {
+                if ao, ok2 := v.(json.Object); ok2 {
+                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                }
             }
         }
     }
@@ -2262,11 +2270,18 @@ fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []stri
     append(&args, out_file)
     append(&args, url)
 
+    pre_size: i64
+    pre_mtime: time.Time
+    if fi, err := os.stat(out_file, context.temp_allocator); err == nil {
+        pre_size = fi.size
+        pre_mtime = fi.modification_time
+    }
+
     ok := platform.exec_cmd("curl", args[:])
     if !ok { return false }
     fi, fi_err := os.stat(out_file, context.temp_allocator)
     if fi_err != nil || fi.size == 0 { return false }
-    return true
+    return fi.size != pre_size || fi.modification_time != pre_mtime
 }
 
 // fetch_etag_batch downloads multiple URLs sequentially in a single curl
@@ -2282,9 +2297,9 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
     // new content vs. a 304 that left the old file untouched. Size
     // alone misses in-place edits where the upstream JSON keeps the
     // same byte count but changes content (e.g. a description fix).
-    pre_mtimes := make([]time.Time, len(urls), context.temp_allocator)
+    pre_mtimes := make([]time.Time, len(urls), context.allocator)
     defer delete(pre_mtimes)
-    pre_sizes := make([]i64, len(urls), context.temp_allocator)
+    pre_sizes := make([]i64, len(urls), context.allocator)
     defer delete(pre_sizes)
     for i in 0..<len(urls) {
         if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil {

@@ -37,5 +37,6 @@ This file lists the most critical, repo-specific, and non-obvious gotchas that a
 * **Tap Trust**: Third-party taps (not starting with `homebrew/`) are untrusted by default. To tap or query them, they must first be explicitly trusted via `ubrew tap trust <user/repo>`.
 * **CI Environment Prep**: On a clean virtual machine runner (e.g. GitHub Actions), ensure the following are run before any tests:
   1. Set up own folder permissions: `sudo mkdir -p /opt/ubrew && sudo chown -R $USER /opt/ubrew`
-  2. Pre-trust testing taps: `./ubrew tap trust ublue-os/tap` and `./ubrew tap trust justrach/nanobrew`
-  3. Expose ubrew prefix path: `echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH`
+  2. Build the binary (e.g., `mise run build`) to ensure the `./ubrew` executable is generated
+  3. Pre-trust testing taps: `./ubrew tap trust ublue-os/tap` and `./ubrew tap trust justrach/nanobrew`
+  4. Expose ubrew prefix path: `echo "/opt/ubrew/prefix/bin" >> $GITHUB_PATH`

@@ -13,7 +13,11 @@ case "$(uname -s)" in
 esac
 cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 src/api/sqlite3.c -o src/api/sqlite3-fts5.o &&
 cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}" &&
-strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+if [ "$(uname -s)" = "Darwin" ]; then
+  strip -x "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+else
+  strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+fi
 """
 sources = ["src/api/sqlite3.c"]
 outputs = ["src/vendor/odin-sqlite3/libsqlite3-fts5.so", "src/vendor/odin-sqlite3/libsqlite3-fts5.dylib"]
@@ -83,7 +87,7 @@ depends = ["build"]
 
 [tasks.clean]
 description = "Clean up compiler build artifacts"
-run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg libsqlite3-fts5.so src/api/sqlite3-fts5.o src/api/sqlite3.o"
+run = "rm -f ubrew ubrew_portable ubrew_prod ubrew_dbg libsqlite3-fts5.so libsqlite3-fts5.dylib src/api/sqlite3-fts5.o src/api/sqlite3.o"
 
 [tasks.check]
 description = "Type check all Odin source files"

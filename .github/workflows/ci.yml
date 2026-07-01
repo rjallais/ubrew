@@ -31,7 +31,11 @@ jobs:
             *)      ext=so    ;;
           esac
           cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
-          strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            strip -x "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+          else
+            strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
+          fi
 
       - name: Build ubrew
         run: |

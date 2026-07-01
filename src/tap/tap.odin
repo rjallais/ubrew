@@ -278,15 +278,20 @@ derive_branches_batch :: proc(urls: []string) -> []string {
 	}
 
 	for url, idx in urls {
-		if strings.contains(url, "github.com") {
-			api_url, _ := strings.replace_all(url, "https://github.com/", "https://api.github.com/repos/",
-				allocator = context.temp_allocator)
-			api_url, _ = strings.replace_all(api_url, "http://github.com/",
-				"https://api.github.com/repos/", allocator = context.temp_allocator)
-			if strings.has_suffix(api_url, ".git") {
-				api_url = api_url[:len(api_url) - 4]
+		repo := ""
+		if strings.has_prefix(url, "https://github.com/") {
+			repo = url[len("https://github.com/"):]
+		} else if strings.has_prefix(url, "http://github.com/") {
+			repo = url[len("http://github.com/"):]
+		} else if strings.has_prefix(url, "git@github.com:") {
+			repo = url[len("git@github.com:"):]
+		}
+
+		if len(repo) > 0 {
+			if strings.has_suffix(repo, ".git") {
+				repo = repo[:len(repo) - 4]
 			}
-			api_url = strings.concatenate({api_url, "?ref=default"}, context.temp_allocator)
+			api_url := fmt.tprintf("https://api.github.com/repos/%s?ref=default", repo)
 
 			temp_f, terr := os.create_temp_file("", "ubrew_branch_*.json")
 			if terr != nil {
@@ -313,6 +318,10 @@ derive_branches_batch :: proc(urls: []string) -> []string {
 		append(&args, "-sfL")
 		append(&args, "--compressed")
 		append(&args, "--no-progress-meter")
+		append(&args, "--connect-timeout")
+		append(&args, "5")
+		append(&args, "--max-time")
+		append(&args, "30")
 		append(&args, "--http2")
 		append(&args, "--parallel")
 
