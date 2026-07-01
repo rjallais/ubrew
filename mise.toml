@@ -20,7 +20,14 @@ outputs = ["src/vendor/odin-sqlite3/libsqlite3-fts5.so", "src/vendor/odin-sqlite
 
 [tasks.build]
 description = "Build ubrew with aggressive optimizations for the native CPU (fastest dev build, no LTO)"
-run = "odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native && cp src/vendor/odin-sqlite3/libsqlite3-fts5.so ."
+run = '''
+case "$(uname -s)" in
+  Darwin) ext=dylib ;;
+  *)      ext=so    ;;
+esac
+odin build src -out:ubrew -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native
+cp "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}" .
+'''
 depends = ["build-libsqlite"]
 sources = ["src/**/*.odin"]
 outputs = ["ubrew"]
