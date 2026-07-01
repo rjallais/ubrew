@@ -108,11 +108,14 @@ execute :: proc(
 	stmt: ^sqlite3.Statement
 	prepare(db, &stmt, sql, params, location) or_return
 	defer sqlite3.finalize(stmt)
-	for sqlite3.step(stmt) == .Row {
-		// consume all rows
+
+	rc: sqlite3.Result_Code
+	for {
+		rc = sqlite3.step(stmt)
+		if rc != .Row { break }
 	}
 
-	return .Ok
+	return rc == .Done ? .Ok : rc
 }
 
 @(require_results)
