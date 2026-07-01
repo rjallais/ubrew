@@ -544,31 +544,36 @@ registry_has_current_os_asset :: proc(rec_obj: json.Object) -> bool {
 registry_pick_resolved_asset :: proc(resolved_obj: json.Object) -> (url: string, sha256: string) {
     // Preferred path: resolved.assets[platform].{url, sha256}
     if assets_obj, ok := json_object_or_nil(resolved_obj, "assets"); ok {
-        // Desktop environment specific wallpaper selections
-        de := detect_desktop_env_api()
-        if de == .KDE {
-            if v, exists := assets_obj["linux-kde"]; exists {
-                if ao, ok2 := v.(json.Object); ok2 {
-                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-                }
-            }
-        } else if de == .GNOME {
-            if v, exists := assets_obj["linux-gnome"]; exists {
-                if ao, ok2 := v.(json.Object); ok2 {
-                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-                }
-            }
-        }
-
-        // Fallback wallpaper key
-        if v, exists := assets_obj["linux-png"]; exists {
-            if ao, ok2 := v.(json.Object); ok2 {
-                return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
-            }
-        }
-
         preferred := registry_preferred_asset_key()
-        fallback_keys := []string{preferred, "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-arm64"}
+        fallback_keys: []string
+        when ODIN_OS == .Linux {
+            // Desktop environment specific wallpaper selections
+            de := detect_desktop_env_api()
+            if de == .KDE {
+                if v, exists := assets_obj["linux-kde"]; exists {
+                    if ao, ok2 := v.(json.Object); ok2 {
+                        return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                    }
+                }
+            } else if de == .GNOME {
+                if v, exists := assets_obj["linux-gnome"]; exists {
+                    if ao, ok2 := v.(json.Object); ok2 {
+                        return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                    }
+                }
+            }
+            // Fallback wallpaper key
+            if v, exists := assets_obj["linux-png"]; exists {
+                if ao, ok2 := v.(json.Object); ok2 {
+                    return json_string_or_empty(ao, "url"), json_string_or_empty(ao, "sha256")
+                }
+            }
+            fallback_keys = []string{preferred, "linux-x86_64", "linux-aarch64"}
+        } else when ODIN_OS == .Darwin {
+            fallback_keys = []string{preferred, "macos-x86_64", "macos-arm64"}
+        } else {
+            fallback_keys = []string{preferred}
+        }
 
         for k in fallback_keys {
             if v, exists := assets_obj[k]; exists {
