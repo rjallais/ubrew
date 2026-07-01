@@ -61,7 +61,7 @@ read_all_rows :: proc(stmt: ^sqlite3.Statement, out: ^[dynamic]$T) -> sqlite3.Re
 
 	defer delete_field_types(fields)
 
-	field_map: map[string]^Field_Type
+	field_map := make(map[string]^Field_Type, len(fields))
 	defer delete(field_map)
 	for &field in fields {
 		field_map[field.tag] = &field
