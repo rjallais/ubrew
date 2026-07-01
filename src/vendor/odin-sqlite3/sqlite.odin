@@ -310,7 +310,7 @@ foreign sqlite {
 	blob_read :: proc "c" (blob: ^Blob, dest: rawptr, n_bytes: c.int, n_bytes_offset: c.int) -> Result_Code ---
 	blob_write :: proc "c" (blob: ^Blob, source: rawptr, n_bytes: c.int, n_bytes_offset: c.int) -> Result_Code ---
 	blob_reopen :: proc "c" (blob: ^Blob, row_id: c.int64_t) -> Result_Code ---
-	busy_handler :: proc "c" (db: ^Connection, handler: proc "c" (ctx: rawptr, attempt: c.int) -> Result_Code, ctx: rawptr) -> Result_Code ---
+	busy_handler :: proc "c" (db: ^Connection, handler: proc "c" (ctx: rawptr, attempt: c.int) -> c.int, ctx: rawptr) -> Result_Code ---
 	busy_timeout :: proc "c" (db: ^Connection, ms: c.int) -> Result_Code ---
 	@(require_results)
 	column_database_name :: proc "c" (statement: ^Statement, col_idx: c.int) -> cstring ---
@@ -339,8 +339,8 @@ foreign sqlite {
 	column_type :: proc "c" (statement: ^Statement, col_idx: c.int) -> c.int ---
 	column_count :: proc "c" (statement: ^Statement) -> c.int ---
 	column_name :: proc "c" (statement: ^Statement, col_idx: c.int) -> cstring ---
-	commit_hook :: proc "c" (db: ^Connection, cb: proc "c" (ctx: rawptr) -> Result_Code, ctx: rawptr) -> rawptr ---
-	rollback_hook :: proc "c" (db: ^Connection, cb: proc "c" (ctx: rawptr) -> Result_Code, ctx: rawptr) -> rawptr ---
+	commit_hook :: proc "c" (db: ^Connection, cb: proc "c" (ctx: rawptr) -> c.int, ctx: rawptr) -> rawptr ---
+	rollback_hook :: proc "c" (db: ^Connection, cb: proc "c" (ctx: rawptr), ctx: rawptr) -> rawptr ---
 	compileoption_used :: proc "c" (opt_name: cstring) -> c.int ---
 	@(require_results)
 	compileoption_get :: proc "c" (n: c.int) -> cstring ---
