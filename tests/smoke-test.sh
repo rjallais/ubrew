@@ -186,13 +186,20 @@ else
 fi
 
 echo ""
-echo "--- Test: search ublue-os (3rd-party tap formulae + casks) ---"
-SEARCH_UBLUE=$("$NB" search ublue-os 2>&1) || true
-if grep -q "ublue-os/tap" <<<"$SEARCH_UBLUE"; then
-  pass "search ublue-os contains 3rd-party tap results"
+echo "--- Test: search 3rd-party tap (formulae + casks) ---"
+if [ "$(uname -s)" = "Darwin" ]; then
+  SEARCH_TAP=$("$NB" search nanobrew 2>&1) || true
+  EXPECTED_TAP="justrach/nanobrew"
 else
-  fail "search ublue-os output missing 3rd-party tap results"
-  echo "      output: $(echo "$SEARCH_UBLUE" | head -5)"
+  SEARCH_TAP=$("$NB" search ublue-os 2>&1) || true
+  EXPECTED_TAP="ublue-os/tap"
+fi
+
+if grep -q "$EXPECTED_TAP" <<<"$SEARCH_TAP"; then
+  pass "search 3rd-party tap contains results"
+else
+  fail "search 3rd-party tap output missing expected results"
+  echo "      output: $(echo "$SEARCH_TAP" | head -5)"
 fi
 
 echo ""
