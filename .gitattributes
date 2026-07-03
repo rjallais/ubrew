@@ -1,0 +1,2 @@
+# SQLite amalgamation cache — if committed by accident, mark as vendored
+.cache/sqlite-amalgamation/* linguist-vendored
