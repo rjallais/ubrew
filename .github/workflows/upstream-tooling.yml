@@ -233,13 +233,19 @@ jobs:
           odin build src -out:ubrew -o:speed
           cp ubrew /tmp/nb-current
 
-      - name: Build previous ubrew release
+      - name: Download previous ubrew release (Zig era)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mise install zig@latest
-          git worktree add --detach /tmp/ubrew-v0.1.191 v0.1.191
-          cd /tmp/ubrew-v0.1.191
-          zig build
-          cp zig-out/bin/nb /tmp/nb-v0.1.191
+          mkdir -p /tmp/nb-prev
+          gh release download v0.1.191 \
+            --repo justrach/nanobrew \
+            --pattern 'nb-arm64-apple-darwin.tar.gz' \
+            --pattern 'nb-arm64-apple-darwin.tar.gz.sha256' \
+            --dir /tmp/nb-prev
+          (cd /tmp/nb-prev && shasum -a 256 -c nb-arm64-apple-darwin.tar.gz.sha256 --ignore-missing)
+          tar -xzf /tmp/nb-prev/nb-arm64-apple-darwin.tar.gz -C /tmp/nb-prev
+          cp /tmp/nb-prev/nb /tmp/nb-v0.1.191
 
       - name: Download pinned zerobrew binary
         env:

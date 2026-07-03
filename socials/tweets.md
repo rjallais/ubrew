@@ -1,16 +1,16 @@
-# Twitter Thread -- nanobrew v0.1.190: Zig 0.16 + faster everything
+# Twitter Thread -- ubrew v0.1.190: Odin 0.16 + faster everything
 
 ---
 
 **1/**
-nanobrew v0.1.190 is out.
+ubrew v0.1.190 is out.
 
-Zig 0.16.0 compiler, native tar extraction, persistent HTTP, O(1) resolver queue, and 15+ bug fixes.
+Odin compiler, native tar extraction, persistent HTTP, O(1) resolver queue, and 15+ bug fixes.
 
 140x faster than Homebrew on warm installs. 1.4x faster than v0.1.083.
 Both macOS binaries signed and notarized by Apple.
 
-nanobrew.trilok.ai/v0.1.190
+ubrew.trilok.ai/v0.1.190
 
 ---
 
@@ -18,8 +18,8 @@ nanobrew.trilok.ai/v0.1.190
 The numbers (Apple Silicon, macOS, median of 3 runs):
 
 ```
-tree (warm):   Homebrew 2.38s  ->  nb v0.1.083  23ms  ->  nb v0.1.190  17ms
-tree (cold):   Homebrew 3.13s  ->  nb v0.1.083 394ms  ->  nb v0.1.190 356ms
+tree (warm):   Homebrew 2.38s  ->  ubrew v0.1.083  23ms  ->  ubrew v0.1.190  17ms
+tree (cold):   Homebrew 3.13s  ->  ubrew v0.1.083 394ms  ->  ubrew v0.1.190 356ms
 ```
 
 v0.1.190 vs Homebrew: 140x warm, 9x cold
@@ -31,7 +31,7 @@ v0.1.190 vs v0.1.083: 1.4x warm, 1.1x cold
 Eliminated all subprocess calls for tar extraction.
 
 Before: `tar xzf` -- fork, exec, wait. For every package.
-After: native Zig USTAR/GNU tar parser. Zero fork/exec.
+After: native Odin USTAR/GNU tar parser. Zero fork/exec.
 
 File permissions now preserved exactly from the mode bits in the archive header. Before we were guessing: executable bit set = 755, otherwise 644.
 
@@ -50,9 +50,9 @@ HTTP client now reused across all downloads in a batch. GHCR auth token prefetch
 15+ bugs fixed. A few favourites:
 
 - `state.json` was written non-atomically. SIGKILL during install = corrupted DB. Fixed with temp file + rename.
-- `nb outdated` had a use-after-free. Worker threads read freed memory after main returned. Found in ReleaseFast only.
-- `nb cleanup` reported "freed 10.0 MB" regardless of actual bytes freed. Always. Every time.
-- `nb update` was broken for everyone. Tarball contained binary as `nb-arm64-apple-darwin` instead of `nb`. Fixed.
+- `ubrew outdated` had a use-after-free. Worker threads read freed memory after main returned. Found in ReleaseFast only.
+- `ubrew cleanup` reported "freed 10.0 MB" regardless of actual bytes freed. Always. Every time.
+- `ubrew update` was broken for everyone. Tarball contained binary as `ubrew-arm64-apple-darwin` instead of `ubrew`. Fixed.
 
 ---
 
@@ -72,16 +72,16 @@ Try it:
 
 ```bash
 # Fresh install
-curl -fsSL https://nanobrew.trilok.ai | bash
+curl -fsSL https://ubrew.trilok.ai | bash
 
 # Upgrade
-nb update
+ubrew update
 ```
 
 Full release notes with benchmark breakdowns:
-nanobrew.trilok.ai/v0.1.190
+ubrew.trilok.ai/v0.1.190
 
-github.com/justrach/nanobrew
+github.com/rjallais/ubrew
 
 ---
 
