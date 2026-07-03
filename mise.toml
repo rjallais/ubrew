@@ -62,7 +62,7 @@ depends = ["build"]
 
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src src/tap src/api -define:SQLITE3_CUSTOM_FTS5=true"
+run = "odin test src -define:SQLITE3_CUSTOM_FTS5=true && odin test src/api -define:SQLITE3_CUSTOM_FTS5=true && odin test src/tap -define:SQLITE3_CUSTOM_FTS5=true && odin test src/history && odin test src/store && odin test src/installer"
 depends = ["build-libsqlite"]
 
 [tasks.bench-install]

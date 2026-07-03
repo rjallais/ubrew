@@ -2,7 +2,7 @@
 
 ## Reporting Vulnerabilities
 
-If you find a security vulnerability in nanobrew, please email **security@trilok.ai** or open a GitHub issue.
+If you find a security vulnerability in ubrew, please email **security@trilok.ai** or open a GitHub issue.
 
 We take security seriously — in v0.1.073 alone we found and fixed 21 vulnerabilities through adversarial self-auditing.
 
@@ -26,7 +26,7 @@ We take security seriously — in v0.1.073 alone we found and fixed 21 vulnerabi
 - **Silent error swallowing** — package removal and DB writes (#14)
 - **Path traversal** — unsanitized package names in file paths (#13)
 - **Symlink target escapes** — cask binary installation (#28)
-- **HOME env injection** — `nb nuke` trusted $HOME without validation (#29)
+- **HOME env injection** — `ubrew nuke` trusted $HOME without validation (#29)
 - **Cask bin.target traversal** — no validation on symlink targets (#44)
 - **Deb tar absolute paths** — `isPathSafe` defined but not used (#47)
 
@@ -72,7 +72,7 @@ shasum -a 256 -c nb-arm64-apple-darwin.tar.gz.sha256
 tar -xzf nb-arm64-apple-darwin.tar.gz
 
 # 3. Check signature authority + hardened runtime
-codesign -dv --verbose=4 ./nb-arm64-apple-darwin 2>&1 | \
+codesign -dv --verbose=4 ./ubrew-arm64-apple-darwin 2>&1 | \
   grep -E '^(Authority|TeamIdentifier|flags=)'
 # expect:
 #   flags=0x10000(runtime)
@@ -80,7 +80,7 @@ codesign -dv --verbose=4 ./nb-arm64-apple-darwin 2>&1 | \
 #   TeamIdentifier=...
 
 # 4. Verify the signature structurally
-codesign --verify --deep --strict ./nb-arm64-apple-darwin
+codesign --verify --deep --strict ./ubrew-arm64-apple-darwin
 ```
 
 `spctl --assess --type execute` will reject a standalone CLI binary ("does not seem to be an app") even when it is correctly notarized; this is a Gatekeeper policy quirk, not a failure of the signature. The `codesign` checks above are authoritative.
@@ -100,10 +100,10 @@ Linux binaries are not signed; integrity is anchored by the SHA256 sidecars serv
 
 | # | Severity | Issue |
 |---|----------|-------|
-| [#52](https://github.com/justrach/nanobrew/issues/52) | Info | Placeholder walk adds ~24ms per install (correctness tradeoff, won't fix) |
-| [#54](https://github.com/justrach/nanobrew/issues/54) | P2 | SUDO_USER env var not validated before use in chown |
-| [#55](https://github.com/justrach/nanobrew/issues/55) | P3 | Cask download not SHA256 verified before extraction |
-| [#56](https://github.com/justrach/nanobrew/issues/56) | P3 | No HTTPS certificate pinning — accepted risk; standard for package managers (brew, apt, npm rely on CA verification, not pinning) |
+| [#52](https://github.com/rjallais/ubrew/issues/52) | Info | Placeholder walk adds ~24ms per install (correctness tradeoff, won't fix) |
+| [#54](https://github.com/rjallais/ubrew/issues/54) | P2 | SUDO_USER env var not validated before use in chown |
+| [#55](https://github.com/rjallais/ubrew/issues/55) | P3 | Cask download not SHA256 verified before extraction |
+| [#56](https://github.com/rjallais/ubrew/issues/56) | P3 | No HTTPS certificate pinning — accepted risk; standard for package managers (brew, apt, npm rely on CA verification, not pinning) |
 
 ## Audit history
 

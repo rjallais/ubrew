@@ -1,8 +1,15 @@
 # Native Bottle Pipeline — design doc
 
+> **Note:** This design document was authored during the Zig era and references
+> the original Zig source layout (e.g. `src/upstream/registry.zig`, `src/net/fetch.zig`,
+> `src/linker/linker.zig`). The project has since been rewritten in Odin with a
+> restructured source tree, so individual `.zig` file paths below are historical.
+> Brand and product names have been updated to `ubrew`.
+
+
 Status: **draft**, scoping only — no implementation in this doc.
 Author: post-v0.1.193 audit pass, 2026-05-10.
-Tracks: a future "nanobrew without Homebrew" milestone (no GH issue yet — open one when this doc lands).
+Tracks: a future "ubrew without Homebrew" milestone (no GH issue yet — open one when this doc lands).
 
 ---
 
@@ -11,12 +18,12 @@ Tracks: a future "nanobrew without Homebrew" milestone (no GH issue yet — open
 Today, `nb install <formula>` materializes bottles from
 `ghcr.io/v2/homebrew/core/<name>/blobs/sha256:<digest>`. The metadata
 arrives via the Homebrew formula API; the binaries arrive from
-Homebrew's GHCR org. Nanobrew's claim of being "native and fast" is
+Homebrew's GHCR org. Ubrew's claim of being "native and fast" is
 true for the *runtime* (Zig pipeline, mmap, COW copy, native fetch
 since v0.1.193), but the *supply chain* is still Homebrew end-to-end.
 
 The goal is a credible, gradual path to **bottles built and hosted by
-nanobrew**, with no daily dependence on Homebrew's infrastructure.
+ubrew**, with no daily dependence on Homebrew's infrastructure.
 
 Non-goals:
 
@@ -39,11 +46,11 @@ Before designing anything new, the existing pieces this plan rides on:
 |---|---|---|
 | Upstream registry runtime | `src/upstream/registry.zig` (1416 lines) | Resolves a package token to `(url, sha256, deps)` from a typed record; tries `homebrew_bottle`, `github_release`, `vendor_url`, `homebrew_api` (fallback) in order. |
 | Embedded registry snapshot | `src/upstream/registry_default.json` (18,380 lines) | 256 formula + 103 cask records. Loaded with `@embedFile`. |
-| Hosted registry channel | `registry/upstream.json` on `main` branch | Stable channel; released binaries fetch this without needing an update. Beta channel via `NANOBREW_UPSTREAM_REGISTRY_URL`. |
-| Per-token cache | `/opt/nanobrew/cache/api/upstream-formula-<token>.json` | Avoids reparsing the full registry on warm installs. |
+| Hosted registry channel | `registry/upstream.json` on `main` branch | Stable channel; released binaries fetch this without needing an update. Beta channel via `UBREW_UPSTREAM_REGISTRY_URL`. |
+| Per-token cache | `/opt/ubrew/cache/api/upstream-formula-<token>.json` | Avoids reparsing the full registry on warm installs. |
 | Native fetch | `src/net/fetch.zig` | Bottle download with redirect following, SHA verification, gzip auto-decompress. After v0.1.193 also handles UA-gated CDNs (#258). |
-| Store-relocated cache | `/opt/nanobrew/store-relocated/<sha256>/` | Already-relocated keg snapshots, keyed by source SHA. Reused across machines if you copy the dir. |
-| Worker | `worker/src/index.js` at `nanobrew.trilok.ai` | Cloudflare Worker serving the install script. **No bottle proxying yet.** |
+| Store-relocated cache | `/opt/ubrew/store-relocated/<sha256>/` | Already-relocated keg snapshots, keyed by source SHA. Reused across machines if you copy the dir. |
+| Worker | `worker/src/index.js` at `ubrew.trilok.ai` | Cloudflare Worker serving the install script. **No bottle proxying yet.** |
 
 The thing the design needs to do is plug into the existing
 `registry.zig` resolver order — not replace it.
@@ -54,7 +61,7 @@ The thing the design needs to do is plug into the existing
 
 ### Phase 1 — bottle proxy + URL ownership
 
-**Goal:** all bottle downloads flow through a `*.nanobrew.<domain>`
+**Goal:** all bottle downloads flow through a `*.ubrew.<domain>`
 URL, even though the bytes still come from Homebrew's GHCR. Zero
 build infrastructure required. First-class telemetry and CDN
 ownership.
@@ -62,22 +69,22 @@ ownership.
 **Concrete pieces:**
 
 1. New worker route on the existing `worker/` deployment:
-   `bottles.nanobrew.trilok.ai/v1/<formula>/<sha256>` (or similar).
+   `bottles.ubrew.trilok.ai/v1/<formula>/<sha256>` (or similar).
    On request, fetches `ghcr.io/v2/homebrew/core/<formula>/blobs/sha256:<sha>`,
    streams to client, caches in Cloudflare R2 keyed by `<sha>`.
 2. New resolver class in `src/upstream/registry.zig`:
-   `nanobrew_bottle` that produces a `bottles.nanobrew.<domain>` URL
+   `ubrew_bottle` that produces a `bottles.ubrew.<domain>` URL
    from `(formula, sha256, version, platform_keys)`. Same SHA
    verification path as today.
-3. Generator script `scripts/generate-nanobrew-bottle-records.mjs`
+3. Generator script `scripts/generate-ubrew-bottle-records.mjs`
    that takes the existing `homebrew_bottle` records and emits
-   `nanobrew_bottle` records with rewritten URLs. SHAs unchanged
+   `ubrew_bottle` records with rewritten URLs. SHAs unchanged
    (same bytes, different host).
 4. Resolver order in `registry.zig` becomes:
-   `nanobrew_bottle` → `github_release` → `vendor_url` → `homebrew_bottle` → `homebrew_api`.
-   So registries that ship `nanobrew_bottle` records use them; everything
+   `ubrew_bottle` → `github_release` → `vendor_url` → `homebrew_bottle` → `homebrew_api`.
+   So registries that ship `ubrew_bottle` records use them; everything
    else stays on the existing fallbacks.
-5. Beta registry on `NANOBREW_UPSTREAM_REGISTRY_URL=...beta.json`
+5. Beta registry on `UBREW_UPSTREAM_REGISTRY_URL=...beta.json`
    for soaking. Once green, promote to `registry/upstream.json` on
    main.
 
@@ -86,7 +93,7 @@ ownership.
 - We learn how much bandwidth the long tail actually uses (telemetry
   per package).
 - ghcr.io can change auth, rate limit, deprecate, or disappear
-  without breaking nanobrew users; we just point the worker
+  without breaking ubrew users; we just point the worker
   somewhere else.
 - We can later swap individual `<sha>` blobs in R2 with self-built
   bottles — the URL stays the same, so old `nb` versions in the
@@ -116,7 +123,7 @@ ownership.
 ### Phase 2 — self-built bottles for top-N
 
 **Goal:** for a small, curated set of packages, the bottle is built
-by nanobrew CI on nanobrew's runners and uploaded to nanobrew's R2.
+by ubrew CI on ubrew's runners and uploaded to ubrew's R2.
 No Homebrew bytes in the path. Proves the pipeline end-to-end.
 
 **Curated starter set (~10 packages):** `tree`, `jq`, `wget`,
@@ -139,8 +146,8 @@ they are:
    `elf/relocate.zig` expect today. The relocator already handles
    `@@HOMEBREW_PREFIX@@` placeholders; we adopt the same convention so
    no install-time code changes.
-3. Phase 1's `nanobrew_bottle` resolver class stays the same. The
-   record now points to `bottles.nanobrew.<domain>/v1/built/<formula>/<sha>`
+3. Phase 1's `ubrew_bottle` resolver class stays the same. The
+   record now points to `bottles.ubrew.<domain>/v1/built/<formula>/<sha>`
    (different prefix from the proxy path).
 4. Beta soak on the same beta registry channel, then promote.
 
@@ -154,13 +161,13 @@ they are:
 - **Linux libc target** — Homebrew Linux uses glibc and pins a
   specific Ubuntu LTS as the build host. We should match exactly so
   bottles work on the same range of distros. Or commit to a separate
-  range (e.g. musl-only via Zig's cross-compile, like our own
-  `nb-x86_64-linux` builds) and document it.
+  range (e.g. musl-only via Odin's cross-compile, like our own
+  `ubrew` Linux builds) and document it.
 - **Source-archive caching** — upstream tarballs disappear (yt-dlp
   releases, GitHub deletions). Worth caching them in R2 too,
   separately from built bottles.
 - **Build determinism** — Homebrew's bottles aren't bit-for-bit
-  reproducible across runs. We can do better with a fixed Zig
+  reproducible across runs. We can do better with a fixed Odin
   toolchain, but this is its own rabbit hole.
 
 **Effort estimate:** 3–6 weeks for the first 10 packages, including
@@ -198,10 +205,10 @@ sooner.
 - **Homebrew etiquette.** A bottle proxy that hammers `ghcr.io`
   could attract attention. Mitigation: aggressive R2 caching means
   each (formula, sha) tuple is fetched at most once per cache
-  generation. Set proper `User-Agent: nanobrew/<ver>` so they can
+  generation. Set proper `User-Agent: ubrew/<ver>` so they can
   identify and contact us if it becomes a problem.
 - **Drift between proxied and built bottles.** Phase 1 and Phase 2
-  bottles share the `nanobrew_bottle` resolver class. The SHAs
+  bottles share the `ubrew_bottle` resolver class. The SHAs
   must differ (Homebrew bytes vs our bytes), which means we either
   need a discriminator in the record (proxy vs built) or always
   re-derive the SHA from our built artifact and trust the resolver
@@ -240,8 +247,8 @@ For the record, options I considered and rejected:
 - File a tracking issue: "native bottle pipeline (phases 1–3)".
 - File a phase 1 issue with the worker route + resolver class +
   generator script as concrete sub-tasks.
-- Decide on a domain (`bottles.nanobrew.dev`?
-  `bottles.nanobrew.trilok.ai`?) and provision the R2 bucket.
+- Decide on a domain (`bottles.ubrew.dev`?
+  `bottles.ubrew.trilok.ai`?) and provision the R2 bucket.
 - Sanity-check phase 1 traffic projections from existing telemetry,
   if any. If the long tail of installs is sparse, even Phase 1's
   R2 footprint is essentially free.

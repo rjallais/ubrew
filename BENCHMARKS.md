@@ -5,13 +5,13 @@ All benchmarks run on Apple Silicon (M-series), macOS, with a stable internet co
 **Tools compared:**
 - [Homebrew](https://brew.sh/) (Ruby) — the standard macOS package manager
 - [Zerobrew](https://github.com/lucasgelfond/zerobrew) v0.1.0 (Rust) — a 5-20x faster Homebrew alternative
-- **nanobrew** (Zig) — this project
+- **ubrew** (Odin) — this project
 
 ## Results
 
 ### Single package, no dependencies (`tree`)
 
-| | Homebrew | Zerobrew | nanobrew | Speedup vs brew |
+| | Homebrew | Zerobrew | ubrew | Speedup vs brew |
 |---|---|---|---|---|
 | **Cold install** | 8.99s | 5.86s | **1.19s** | **7.6x** |
 | **Warm install** | 2.25s | 0.35s | **0.19s** | **11.8x** |
@@ -20,7 +20,7 @@ All benchmarks run on Apple Silicon (M-series), macOS, with a stable internet co
 
 wget depends on: libunistring, ca-certificates, gettext, openssl@3, libidn2
 
-| | Homebrew | Zerobrew | nanobrew | Speedup vs brew |
+| | Homebrew | Zerobrew | ubrew | Speedup vs brew |
 |---|---|---|---|---|
 | **Cold install** | 16.84s | failed* | **11.26s** | **1.5x** |
 | **Warm install** | 2.43s | failed* | **0.58s** | **4.2x** |
@@ -47,7 +47,7 @@ Total: 8.99s
 
 Homebrew spends most of its time in Ruby overhead — loading configs, running cleanup hooks, and post-install checks.
 
-### nanobrew (`nb install tree`, cold)
+### ubrew (`ubrew install tree`, cold)
 
 ```
 Total: 1.19s
@@ -58,9 +58,9 @@ Total: 1.19s
   - Link + DB write:                 ~0.04s
 ```
 
-nanobrew has near-zero overhead. No interpreter startup, no cleanup passes, no config loading.
+ubrew has near-zero overhead. No interpreter startup, no cleanup passes, no config loading.
 
-### nanobrew (`nb install tree`, warm)
+### ubrew (`ubrew install tree`, warm)
 
 ```
 Total: 0.19s
@@ -87,12 +87,12 @@ Each benchmark was run with:
 ```bash
 # Cold install benchmark
 brew uninstall tree 2>/dev/null
-rm -rf /opt/nanobrew/store/* /opt/nanobrew/cache/blobs/*
-time nb install tree
+rm -rf /opt/ubrew/store/* /opt/ubrew/cache/blobs/*
+time ubrew install tree
 
 # Warm install benchmark
-nb remove tree
-time nb install tree
+ubrew remove tree
+time ubrew install tree
 
 # Compare with Homebrew
 brew uninstall tree 2>/dev/null
@@ -101,7 +101,7 @@ time brew install tree
 
 ## Download pipeline improvements (PR #212, #215)
 
-Measured on Apple Silicon macOS, `nb install wget` (5 packages), 5 warm runs / 3 cold runs each.
+Measured on Apple Silicon macOS, `ubrew install wget` (5 packages), 5 warm runs / 3 cold runs each.
 Baseline: commit `5a945d9` (arena allocator, one client per download, shell `tar xzf`).
 Current: persistent HTTP client per worker, pre-fetched GHCR token, native tar extraction.
 
@@ -121,11 +121,11 @@ Set `NB_BENCH=1` to print per-download timings to stderr:
 
 ```
 ==> Downloading + installing 5 packages...
-[nb-bench] dl f8f1b459...: 647ms
-[nb-bench] dl bae6d6d8...: 663ms
-[nb-bench] dl 03be72d2...: 690ms
-[nb-bench] dl 1f984003...: 826ms
-[nb-bench] dl 6f302907...: 1009ms
+[ubrew-bench] dl f8f1b459...: 647ms
+[ubrew-bench] dl bae6d6d8...: 663ms
+[ubrew-bench] dl 03be72d2...: 690ms
+[ubrew-bench] dl 1f984003...: 826ms
+[ubrew-bench] dl 6f302907...: 1009ms
     [2518ms]                  <- wall clock (5 parallel downloads)
 ```
 
@@ -154,14 +154,14 @@ with the new `mise.toml` aggressive flags
 
 `brew` is not installed on this Linux host (and `/opt/ubrew/prefix/bin/brew` is
 a symlink to ubrew, so it cannot be benchmarked as a separate tool). Only
-`ubrew` vs `nanobrew (nb)` numbers are reported below.
+`ubrew` vs `ubrew (ubrew)` numbers are reported below.
 
 ### Scenario: `install dash-shell` (warm; bottle relocated-store cache hit)
 
 | tool | median | notes |
 |---|---|---|
 | ubrew | 9 ms   | hit `store-relocated/<sha>/`; COW materialize + relink |
-| nb    | 73 ms  | hits its own relocated store cache |
+| ubrew    | 73 ms  | hits its own relocated store cache |
 
 The `info dash` → `dash-shell` alias resolution is exercised on every run;
 ubrew correctly resolves the oldname and installs the dash-shell bottle.
@@ -171,29 +171,29 @@ ubrew correctly resolves the oldname and installs the dash-shell bottle.
 | tool | median | notes |
 |---|---|---|
 | ubrew | 271 ms | API fetch + bottle download + tar extract + patchelf relocate + relink + receipt write |
-| nb    | 354 ms | dep resolution + bottle download + SIMD extract + COW |
+| ubrew    | 354 ms | dep resolution + bottle download + SIMD extract + COW |
 
-ubrew is **~1.3x faster** than nb on a fully cold install.
+ubrew is **~1.3x faster** than ubrew on a fully cold install.
 
 ### Scenario: `update` (14 taps, 2 GitHub API list refreshes)
 
-| tool | median | speedup vs nb |
+| tool | median | speedup vs ubrew |
 |---|---|---|
-| ubrew | 1,201 ms | 0.25x (4x slower than nb) |
-| nb    | 301 ms   | 1.0x        |
+| ubrew | 1,201 ms | 0.25x (4x slower than ubrew) |
+| ubrew    | 301 ms   | 1.0x        |
 
 **Before this round of optimizations**, `ubrew update` was **11,497 ms**
-median (~40x slower than nb). The wall-time dropped to **1,201 ms** after
+median (~40x slower than ubrew). The wall-time dropped to **1,201 ms** after
 parallelizing the per-tap GitHub API fetches — a **9.6x speedup**. The
-remaining gap to nb is the cold TCP+TLS+HTTP handshake per tap; nb reuses
+remaining gap to ubrew is the cold TCP+TLS+HTTP handshake per tap; ubrew reuses
 a single persistent connection across taps.
 
 ### Scenario: `upgrade` (all installed packages; nothing to upgrade)
 
-| tool | median | speedup vs nb |
+| tool | median | speedup vs ubrew |
 |---|---|---|
-| ubrew | 565 ms | 0.23x (4.3x slower than nb) |
-| nb    | 131 ms | 1.0x        |
+| ubrew | 565 ms | 0.23x (4.3x slower than ubrew) |
+| ubrew    | 131 ms | 1.0x        |
 
 **Before this round of optimizations**, `ubrew upgrade` was **463 ms**
 median. After switching the per-package remote-version resolution to
@@ -201,8 +201,8 @@ per-formula API calls (and discovering the cached `formula.json` dump on
 `formulae.brew.sh` is now 30MB with 10k+ formulae that makes the
 `json_field_string_raw` scan O(N²) — see "Bug fixes" below), the
 wall-time is **~565 ms** for 55 installed packages. The remaining gap
-to nb is the cost of N per-package HTTPS round-trips (~30ms each on a
-warm connection); nb uses a memory-mapped DB index for instant lookups.
+to ubrew is the cost of N per-package HTTPS round-trips (~30ms each on a
+warm connection); ubrew uses a memory-mapped DB index for instant lookups.
 
 ### Changes
 
@@ -251,7 +251,7 @@ warm connection); nb uses a memory-mapped DB index for instant lookups.
 
 ### Results summary
 
-| task | before | after | speedup | vs nb (after) |
+| task | before | after | speedup | vs ubrew (after) |
 |---|---|---|---|---|
 | `install dash-shell` (warm)  | 7 ms    | 9 ms    | 0.78x   | **8x faster** |
 | `install dash-shell` (cold)  | (n/a)   | 271 ms  | n/a     | **1.3x faster** |
@@ -260,7 +260,7 @@ warm connection); nb uses a memory-mapped DB index for instant lookups.
 | Binary size (debug → release) | 1.79 MB | 0.81 MB | 2.2x smaller | n/a |
 | Build time (clean) | ~6s | ~13s (aggressive + lto equivalent) | 0.5x slower | n/a |
 
-(`install tree` warm median was 6ms vs nb 4ms — nb has slightly less
+(`install tree` warm median was 6ms vs ubrew 4ms — ubrew has slightly less
 per-package overhead on a noop reinstall, but ubrew wins on cold install
 and matches on warm install for `dash-shell`.)
 
@@ -274,7 +274,7 @@ hit the disk.
 
 ### Final results (median of 3 runs each)
 
-| task | Round 4 | Round 5 P1 | speedup | nb |
+| task | Round 4 | Round 5 P1 | speedup | ubrew |
 |---|---|---|---|---|
 | `install tree` (warm, store hit) | 6 ms | **5 ms** | 1.2x | 4 ms |
 | `install dash-shell` (cold API cache, warm store) | 271 ms | **8-9 ms** | **~30x** | 354 ms |
@@ -292,7 +292,7 @@ canonical mapping in `/opt/ubrew/cache/api/oldnames.json`.
 
 ### Cross-tool comparison (Round 5 P1)
 
-| task | ubrew | nb | wax | bru | stout | zb |
+| task | ubrew | ubrew | wax | bru | stout | zb |
 |---|---|---|---|---|---|---|
 | `info dash-shell` (warm) | 75-91 ms | **57 ms** | 143 ms | 79 ms | 121 ms | 17 ms |
 | `search dash` (warm)     | 201-230 ms | 304 ms | 184 ms | 394 ms | **8 ms** | **4 ms** |
@@ -339,22 +339,22 @@ canonical mapping in `/opt/ubrew/cache/api/oldnames.json`.
 - 2 pre-existing failures: `install perl` leaves
   `@@HOMEBREW_*@@` placeholders in the perl binary's interpreter
   (×2 tests).
-- 1 pre-existing failure: `search nanobrew` fails when no tap
+- 1 pre-existing failure: `search ubrew` fails when no tap
   cache exists (sequential 14-tap GitHub API fetch hits rate limit).
 
-### Remaining gaps to nb (Round 5 P1)
+### Remaining gaps to ubrew (Round 5 P1)
 
-| task | ubrew | nb | gap | root cause |
+| task | ubrew | ubrew | gap | root cause |
 |---|---|---|---|---|
-| `update` warm | 894 ms | 301 ms | 3.0x | still N API round-trips; nb has persistent connection pool |
-| `upgrade` warm | 304 ms | 199 ms | 1.5x | still N per-formula API hits (warm cache mitigates); nb has mmap'd DB |
+| `update` warm | 894 ms | 301 ms | 3.0x | still N API round-trips; ubrew has persistent connection pool |
+| `upgrade` warm | 304 ms | 199 ms | 1.5x | still N per-formula API hits (warm cache mitigates); ubrew has mmap'd DB |
 | `info dash` | 80 ms | 57 ms | 1.4x | resolve_formula_alias network call; cache oldname mapping |
-| `search dash` | 215 ms | 304 ms | 0.7x | ubrew **wins** (1.4x faster than nb) |
+| `search dash` | 215 ms | 304 ms | 0.7x | ubrew **wins** (1.4x faster than ubrew) |
 | `install` warm | 5 ms | 4 ms | 1.25x | competitive |
-| `install` cold | 8 ms | 354 ms | 44x | ubrew **wins** (1.3x faster than nb) |
+| `install` cold | 8 ms | 354 ms | 44x | ubrew **wins** (1.3x faster than ubrew) |
 
 **ubrew wins**: `install` cold (1.3× faster), `search` (1.4× faster
-than nb), `upgrade` is now within 1.5× of nb (was 4.3×).
+than ubrew), `upgrade` is now within 1.5× of ubrew (was 4.3×).
 
 ## Round 5 (Phase 2) — Compact TSV search index
 
@@ -377,12 +377,12 @@ JSON dumps at `update` time. Each line is one record:
 
 ### Final results (median of 5 warm runs, no `update` between)
 
-| task | Phase 1 (JSON) | **Phase 2 (TSV)** | speedup | nb | stout | zb |
+| task | Phase 1 (JSON) | **Phase 2 (TSV)** | speedup | ubrew (R5 P1) | stout | zb |
 |---|---|---|---|---|---|---|
 | `search dash` (warm) | 200 ms | **40 ms** | **5×** | 230 ms | 7 ms | 5 ms |
 | `search dash` (cold, no index) | n/a | 150 ms | n/a | n/a | n/a | n/a |
 
-`ubrew search` is now **5.7× faster than nb** and competitive with the
+`ubrew search` (Phase 2 TSV) is now **5.7× faster than Phase 1 JSON** and competitive with the
 top performers. The remaining 6-8× gap to stout/zb is the per-line
 substring scan vs SQLite FTS5 (Phase 3 territory).
 
@@ -459,7 +459,7 @@ is considered fresh and `build_search_index()` returns immediately.
 ### Smoke test status (P2)
 
 - **23/25 pass** (was 22/25 at P1).
-- The `search nanobrew` test now passes — the warm TSV index covers
+- The `search ubrew` test now passes — the warm TSV index covers
   the homebrew/core formulae and the 14 tap formulae are loaded
   separately via the GitHub Contents API cached listing.
 - 2 pre-existing failures: `install perl` leaves `@@HOMEBREW_*@@`
@@ -467,12 +467,12 @@ is considered fresh and `build_search_index()` returns immediately.
 
 
 
-### Cross-tool comparison (Round 4 baseline): ubrew vs nanobrew vs wax vs bru vs stout vs zb
+### Cross-tool comparison (Round 4 baseline): ubrew (R4) vs ubrew (R3) vs wax vs bru vs stout vs zb
 
 Single-user benchmark on the same Intel Core i7-8550U, same network,
 median of 3 runs each. See `bench/bench_pkgmgr_all.sh` for the driver.
 
-| task | ubrew | nb | wax | bru | stout | zb |
+| task | ubrew (R4) | ubrew (R3) | wax | bru | stout | zb |
 |---|---|---|---|---|---|---|
 | `info dash-shell` (warm) | **3 ms** | 57 ms | 143 ms | 79 ms | 121 ms | 17 ms |
 | `search dash` (warm)     | 176 ms | 304 ms | 184 ms | 394 ms | **8 ms** | **4 ms** |
@@ -485,9 +485,9 @@ installing; bru installs but the bottle's `@@HOMEBREW_PREFIX@@`
 interpreter patch isn't applied so the binary won't run.
 
 **Where ubrew wins:** `info` (3ms — mmap'd registry), `install` warm
-(2ms — COW store + relink), `install` cold (1.3× faster than nb).
+(2ms — COW store + relink), `install` cold (1.3× faster than ubrew).
 
-**Where ubrew loses:** `update` is 4× slower than nb (cold TLS per tap,
+**Where ubrew loses:** `update` is 4× slower than ubrew (cold TLS per tap,
 no persistent connection), `upgrade` is 4.3× slower (no mmap'd DB index
 for version lookups; per-formula API hits the formula list one package
 at a time).
@@ -541,10 +541,10 @@ The 129ms on cached reinstall is almost entirely the `c_rehash` post-install scr
 
 ```bash
 # Measure recall speedup
-nb remove openssl@3
-NB_BENCH=1 nb install openssl@3   # first: seeds store-relocated/<sha256>/
-nb remove openssl@3
-NB_BENCH=1 nb install openssl@3   # second: hits cache, skips all relocation
+ubrew remove openssl@3
+NB_BENCH=1 ubrew install openssl@3   # first: seeds store-relocated/<sha256>/
+ubrew remove openssl@3
+NB_BENCH=1 ubrew install openssl@3   # second: hits cache, skips all relocation
 ```
 
 ## Round 5 (Phase 12) — Cross-Tool `update` Benchmark Comparison
@@ -558,7 +558,7 @@ Following the implementation of parallelized API list refreshing and payload com
 | **ubrew** (This) | **2.846 s** | **810.0 ms** ± 448.7 ms | **538.3 ms** | **1.328 s** | **3.51× Faster (Mean)**. Cold run went from 7.3s down to 1.3s (**5.51× Faster**). |
 | **stout** | 1.042 s | 1.034 s ± 183.0 ms | 856.0 ms | 1.223 s | **ubrew is now 1.28x faster than stout**. |
 | **brew** (Homebrew) | 789.6 ms | 506.5 ms ± 25.5 ms | 483.9 ms | 534.1 ms | ubrew is competitive with official Homebrew. |
-| **nb** (Nanobrew) | 674.4 ms | 545.3 ms ± 384.9 ms | 304.8 ms | 989.3 ms | ubrew is competitive with Nanobrew. |
+| **ubrew** (Ubrew) | 674.4 ms | 545.3 ms ± 384.9 ms | 304.8 ms | 989.3 ms | ubrew is competitive with Ubrew. |
 | **wax** | 868.1 ms | 398.8 ms ± 226.2 ms | 258.9 ms | 659.8 ms | - |
 | **zb** (Zerobrew) | 88.4 ms | 98.0 ms ± 48.1 ms | 43.9 ms | 135.7 ms | - |
 | **bru** (Kombucha) | 84.5 ms | 73.0 ms ± 21.5 ms | 53.0 ms | 95.7 ms | - |
@@ -566,4 +566,4 @@ Following the implementation of parallelized API list refreshing and payload com
 ### Key Findings
 1. **Cold-Update Slashed by 5.51×**: The first cold cache run dropped from 7.347s to 1.328s via single-connection multiplexed parallel download phase.
 2. **Deterministic execution**: Standard deviation reduced to 448.7ms (down from 3.898s) due to payload reduction eliminating network variance.
-3. **Warm/Cached Efficiency**: Warm check executes in 538.3ms, which is fully competitive with official Homebrew and Nanobrew.
+3. **Warm/Cached Efficiency**: Warm check executes in 538.3ms, which is fully competitive with official Homebrew and Ubrew.

@@ -66,7 +66,7 @@ ubrew's `--deb` mode is a full apt-get replacement: fetches APT package indices,
 **What makes it fast:**
 - **NBIX binary index cache** — 70K packages deserialized in 32ms (vs 3s HTTP + 72MB gzip decompress + text parse)
 - **8-thread parallel .deb downloads** with HTTP connection reuse
-- **8-thread parallel extraction** — concurrent ar/gzip/tar parsing via native Zig tar
+- **8-thread parallel extraction** — concurrent ar/gzip/tar parsing via native Odin tar
 - **Arena allocator** — single `deinit()` frees all 70K parsed packages
 
 ## Install

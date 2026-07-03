@@ -1,12 +1,19 @@
 # Extended Keg Linking — Design Spec
 
+> **Note:** This design document was authored during the Zig era and references
+> the original Zig source layout (e.g. `src/upstream/registry.zig`, `src/net/fetch.zig`,
+> `src/linker/linker.zig`). The project has since been rewritten in Odin with a
+> restructured source tree, so individual `.zig` file paths below are historical.
+> Brand and product names have been updated to `ubrew`.
+
+
 ## Goal
 
 Fix #164 (libraries not symlinked) and #102 (packages not accessible) by extending `linkKeg` to symlink `lib/`, `include/`, `share/` into the prefix, and upgrading all conflict handling from silent skip to skip-with-warning.
 
 ## Current State
 
-`linkKeg` in `src/linker/linker.zig` only symlinks `bin/` and `sbin/` entries into `prefix/bin/`, plus a single `opt/<name>` directory symlink. `lib/`, `include/`, `share/` are never symlinked. The Mach-O relocator rewrites dylib paths to `/opt/nanobrew/prefix/lib/...` but no symlinks exist there. `prefix/lib/`, `prefix/include/`, `prefix/share/` directories aren't even created by `nb init`.
+`linkKeg` in `src/linker/linker.zig` only symlinks `bin/` and `sbin/` entries into `prefix/bin/`, plus a single `opt/<name>` directory symlink. `lib/`, `include/`, `share/` are never symlinked. The Mach-O relocator rewrites dylib paths to `/opt/ubrew/prefix/lib/...` but no symlinks exist there. `prefix/lib/`, `prefix/include/`, `prefix/share/` directories aren't even created by `ubrew init`.
 
 Existing conflict handling: if `symLinkAbsolute` fails (e.g., file exists), it prints a warning via `deprecatedWriter` but the `openDirAbsolute` on `bin/` itself is `catch {}` — completely silent if the directory doesn't exist.
 
