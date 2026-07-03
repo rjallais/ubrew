@@ -76,7 +76,7 @@ scripts/bench-upstream-install.mjs --tokens <token-a>,<token-b> --iterations 1 -
   --upstream-registry-cache /opt/ubrew/cache/api/upstream-registry-beta-local.json
 ```
 
-The promotion gate is the last stop before stable. A record or resolver class passes only when coverage has been rerun, all top-100 additions have a documented classification, deterministic verification is present, fallback behavior is tested, generated records are reproducible, `odin test src`, `odin test src`, and `odin test src` pass, beta `ubrew info` smoke passes, cold install benchmarks are recorded, and a beta/prerelease soak has not found regressions. Use `scripts/upstream-promotion-check.mjs` to make the coverage, registry, `no_check`, and benchmark parts explicit:
+The promotion gate is the last stop before stable. A record or resolver class passes only when coverage has been rerun, all top-100 additions have a documented classification, deterministic verification is present, fallback behavior is tested, generated records are reproducible, `odin test src`, `odin test src/api`, `odin test src/tap`, `odin test src/history`, `odin test src/store`, and `odin test src/installer` pass, beta `ubrew info` smoke passes, cold install benchmarks are recorded, and a beta/prerelease soak has not found regressions. Use `scripts/upstream-promotion-check.mjs` to make the coverage, registry, `no_check`, and benchmark parts explicit:
 
 ```sh
 scripts/upstream-coverage-report.mjs --top 100 --json > /tmp/upstream-before.json

@@ -162,7 +162,7 @@ they are:
   specific Ubuntu LTS as the build host. We should match exactly so
   bottles work on the same range of distros. Or commit to a separate
   range (e.g. musl-only via Odin's cross-compile, like our own
-  `nb-x86_64-linux` builds) and document it.
+  `ubrew` Linux builds) and document it.
 - **Source-archive caching** — upstream tarballs disappear (yt-dlp
   releases, GitHub deletions). Worth caching them in R2 too,
   separately from built bottles.

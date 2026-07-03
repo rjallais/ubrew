@@ -68,6 +68,6 @@ test_registry_preferred_asset_key_not_empty :: proc(t: ^testing.T) {
 test_registry_preferred_asset_key_contains_os :: proc(t: ^testing.T) {
     key := registry_preferred_asset_key()
     testing.expectf(t,
-        strings.contains(key, "linux") || strings.contains(key, "darwin") || strings.contains(key, "windows"),
-        "expected key %q to contain OS name (linux/darwin/windows)", key)
+        strings.contains(key, "linux") || strings.contains(key, "macos") || strings.contains(key, "windows"),
+        "expected key %q to contain OS name (linux/macos/windows)", key)
 }

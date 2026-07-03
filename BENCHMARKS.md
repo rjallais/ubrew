@@ -377,12 +377,12 @@ JSON dumps at `update` time. Each line is one record:
 
 ### Final results (median of 5 warm runs, no `update` between)
 
-| task | Phase 1 (JSON) | **Phase 2 (TSV)** | speedup | ubrew | stout | zb |
+| task | Phase 1 (JSON) | **Phase 2 (TSV)** | speedup | ubrew (R5 P1) | stout | zb |
 |---|---|---|---|---|---|---|
 | `search dash` (warm) | 200 ms | **40 ms** | **5×** | 230 ms | 7 ms | 5 ms |
 | `search dash` (cold, no index) | n/a | 150 ms | n/a | n/a | n/a | n/a |
 
-`ubrew search` is now **5.7× faster than ubrew** and competitive with the
+`ubrew search` (Phase 2 TSV) is now **5.7× faster than Phase 1 JSON** and competitive with the
 top performers. The remaining 6-8× gap to stout/zb is the per-line
 substring scan vs SQLite FTS5 (Phase 3 territory).
 
@@ -467,12 +467,12 @@ is considered fresh and `build_search_index()` returns immediately.
 
 
 
-### Cross-tool comparison (Round 4 baseline): ubrew vs ubrew vs wax vs bru vs stout vs zb
+### Cross-tool comparison (Round 4 baseline): ubrew (R4) vs ubrew (R3) vs wax vs bru vs stout vs zb
 
 Single-user benchmark on the same Intel Core i7-8550U, same network,
 median of 3 runs each. See `bench/bench_pkgmgr_all.sh` for the driver.
 
-| task | ubrew | ubrew | wax | bru | stout | zb |
+| task | ubrew (R4) | ubrew (R3) | wax | bru | stout | zb |
 |---|---|---|---|---|---|---|
 | `info dash-shell` (warm) | **3 ms** | 57 ms | 143 ms | 79 ms | 121 ms | 17 ms |
 | `search dash` (warm)     | 176 ms | 304 ms | 184 ms | 394 ms | **8 ms** | **4 ms** |

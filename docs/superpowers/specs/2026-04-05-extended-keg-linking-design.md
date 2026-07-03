@@ -13,7 +13,7 @@ Fix #164 (libraries not symlinked) and #102 (packages not accessible) by extendi
 
 ## Current State
 
-`linkKeg` in `src/linker/linker.zig` only symlinks `bin/` and `sbin/` entries into `prefix/bin/`, plus a single `opt/<name>` directory symlink. `lib/`, `include/`, `share/` are never symlinked. The Mach-O relocator rewrites dylib paths to `/opt/ubrew/prefix/lib/...` but no symlinks exist there. `prefix/lib/`, `prefix/include/`, `prefix/share/` directories aren't even created by `nb init`.
+`linkKeg` in `src/linker/linker.zig` only symlinks `bin/` and `sbin/` entries into `prefix/bin/`, plus a single `opt/<name>` directory symlink. `lib/`, `include/`, `share/` are never symlinked. The Mach-O relocator rewrites dylib paths to `/opt/ubrew/prefix/lib/...` but no symlinks exist there. `prefix/lib/`, `prefix/include/`, `prefix/share/` directories aren't even created by `ubrew init`.
 
 Existing conflict handling: if `symLinkAbsolute` fails (e.g., file exists), it prints a warning via `deprecatedWriter` but the `openDirAbsolute` on `bin/` itself is `catch {}` — completely silent if the directory doesn't exist.
 
