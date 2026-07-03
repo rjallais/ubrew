@@ -80,7 +80,7 @@ test_is_safe_to_remove_dir_allows_subdirs :: proc(t: ^testing.T) {
 @(test)
 test_expand_home_unchanged :: proc(t: ^testing.T) {
     result := expand_home("/opt/ubrew/store", context.temp_allocator)
-    defer delete(result)
+    defer delete(result, context.temp_allocator)
     testing.expect_value(t, result, "/opt/ubrew/store")
 }
 
@@ -88,7 +88,7 @@ test_expand_home_unchanged :: proc(t: ^testing.T) {
 test_expand_home_tilde_expanded :: proc(t: ^testing.T) {
     home := os.get_env("HOME", context.temp_allocator)
     result := expand_home("~/test", context.temp_allocator)
-    defer delete(result)
+    defer delete(result, context.temp_allocator)
     expected := fmt.tprintf("%s/test", home)
     testing.expectf(t, result == expected,
         "expected ~/test -> %q, got %q", expected, result)
