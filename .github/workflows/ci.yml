@@ -23,7 +23,15 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
+      - name: Cache SQLite amalgamation
+        id: cache-sqlite
+        uses: actions/cache@d43266a234efe0dbc038f772ec6281753518c1b1 # v4
+        with:
+          path: .cache/sqlite-amalgamation
+          key: sqlite-3.49.1-${{ runner.os }}
+
       - name: Build libsqlite3-fts5 (via mise task)
+        if: steps.cache-sqlite.outputs.cache-hit != 'true'
         run: mise run build-libsqlite
 
       - name: Build ubrew
