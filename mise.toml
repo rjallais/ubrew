@@ -22,6 +22,17 @@ if [ ! -f "$CACHE/sqlite3.c" ]; then
   curl -fsSL "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip" -o /tmp/sqlite-amalg.zip
   unzip -o -j /tmp/sqlite-amalg.zip "sqlite-amalgamation-3490100/sqlite3.c" "sqlite-amalgamation-3490100/sqlite3.h" -d "$CACHE"
   rm -f /tmp/sqlite-amalg.zip
+  echo "Verifying SHA3-256 of sqlite3.c..."
+  EXPECTED="22eab05c842463a3705c63922f12f68531200185ced510ed6aed2065ca44e816"
+  ACTUAL=$(openssl dgst -sha3-256 "$CACHE/sqlite3.c" 2>/dev/null | awk '{print $NF}') || ACTUAL=""
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "ERROR: SHA3-256 mismatch for sqlite3.c"
+    echo "  Expected: $EXPECTED"
+    echo "  Actual:   $ACTUAL"
+    rm -rf "$CACHE"
+    exit 1
+  fi
+  echo "Checksum verified."
   echo "Cached to $CACHE/"
 fi
 
