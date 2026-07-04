@@ -31,7 +31,6 @@ jobs:
           key: sqlite-3.49.1-${{ runner.os }}
 
       - name: Build libsqlite3-fts5 (via mise task)
-        if: steps.cache-sqlite.outputs.cache-hit != 'true'
         run: mise run build-libsqlite
 
       - name: Build ubrew
