@@ -23,19 +23,15 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
-      - name: Build libsqlite3-fts5 (FTS5-enabled shared library)
-        run: |
-          cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 src/api/sqlite3.c -o src/api/sqlite3-fts5.o
-          case "$(uname -s)" in
-            Darwin) ext=dylib ;;
-            *)      ext=so    ;;
-          esac
-          cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
-          if [ "$(uname -s)" = "Darwin" ]; then
-            strip -x "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
-          else
-            strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
-          fi
+      - name: Cache SQLite amalgamation
+        id: cache-sqlite
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .cache/sqlite-amalgamation
+          key: sqlite-3.49.1-${{ runner.os }}
+
+      - name: Build libsqlite3-fts5 (via mise task)
+        run: mise run build-libsqlite
 
       - name: Build ubrew
         run: |

@@ -5,21 +5,46 @@ odin = "dev-2026-06"
 UBREW_TELEMETRY = "0" # Disable telemetry in development environments
 
 [tasks.build-libsqlite]
-description = "One-time build of libsqlite3-fts5 from the amalgamation (only needed when sqlite3.c changes)"
-run = """
+description = "One-time build of libsqlite3-fts5 from the SQLite amalgamation (downloaded if not cached)"
+run = """\
+set -eu
+
 case "$(uname -s)" in
   Darwin) ext=dylib ;;
   *)      ext=so    ;;
 esac
-cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 src/api/sqlite3.c -o src/api/sqlite3-fts5.o &&
-cc -shared src/api/sqlite3-fts5.o -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}" &&
+
+CACHE=".cache/sqlite-amalgamation"
+mkdir -p "$CACHE"
+
+if [ ! -f "$CACHE/sqlite3.c" ]; then
+  echo "Downloading SQLite amalgamation 3.49.1..."
+  curl -fsSL "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip" -o /tmp/sqlite-amalg.zip
+  unzip -o -j /tmp/sqlite-amalg.zip "sqlite-amalgamation-3490100/sqlite3.c" "sqlite-amalgamation-3490100/sqlite3.h" -d "$CACHE"
+  rm -f /tmp/sqlite-amalg.zip
+  echo "Verifying SHA3-256 of sqlite3.c..."
+  EXPECTED="22eab05c842463a3705c63922f12f68531200185ced510ed6aed2065ca44e816"
+  ACTUAL=$(openssl dgst -sha3-256 "$CACHE/sqlite3.c" 2>/dev/null | awk '{print $NF}') || ACTUAL=""
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "ERROR: SHA3-256 mismatch for sqlite3.c"
+    echo "  Expected: $EXPECTED"
+    echo "  Actual:   $ACTUAL"
+    rm -rf "$CACHE"
+    exit 1
+  fi
+  echo "Checksum verified."
+  echo "Cached to $CACHE/"
+fi
+
+cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 "$CACHE/sqlite3.c" -o "$CACHE/sqlite3-fts5.o"
+cc -shared "$CACHE/sqlite3-fts5.o" -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 if [ "$(uname -s)" = "Darwin" ]; then
   strip -x "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 else
   strip "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 fi
+rm -f "$CACHE/sqlite3-fts5.o"
 """
-sources = ["src/api/sqlite3.c"]
 outputs = ["src/vendor/odin-sqlite3/libsqlite3-fts5.so", "src/vendor/odin-sqlite3/libsqlite3-fts5.dylib"]
 
 [tasks.build]

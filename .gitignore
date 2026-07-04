@@ -27,3 +27,6 @@ src.bin
 uBrew
 codedb.snapshot
 ubrew_fts5
+
+# SQLite amalgamation cache (downloaded at build time)
+.cache/sqlite-amalgamation/
