@@ -7,7 +7,7 @@ UBREW_TELEMETRY = "0" # Disable telemetry in development environments
 [tasks.build-libsqlite]
 description = "One-time build of libsqlite3-fts5 from the SQLite amalgamation (downloaded if not cached)"
 run = """\
-set -euo pipefail
+set -eu
 
 case "$(uname -s)" in
   Darwin) ext=dylib ;;
