@@ -28,7 +28,7 @@ jobs:
           CACHE=".cache/sqlite-amalgamation"
           mkdir -p "$CACHE"
           if [ ! -f "$CACHE/sqlite3.c" ]; then
-            curl -sL "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip" -o /tmp/sqlite-amalg.zip
+            curl -fsSL "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip" -o /tmp/sqlite-amalg.zip
             unzip -o -j /tmp/sqlite-amalg.zip \
               "sqlite-amalgamation-3490100/sqlite3.c" \
               "sqlite-amalgamation-3490100/sqlite3.h" -d "$CACHE"
