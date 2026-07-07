@@ -3920,7 +3920,10 @@ run_nuke :: proc(args: []string) {
     fmt.println("\n\x1b[31;1m  WARNING: This will completely remove ubrew and all installed packages.\x1b[0m\n")
     fmt.println("  The following will be deleted:")
 	fmt.println(" - /opt/ubrew (all packages, cache, and staged binaries)")
-	fmt.println(" - ~/.local/bin/ubrew (ubrew binary, if exists)\n")
+	fmt.println(" - ~/.local/bin/ubrew (ubrew binary, if exists)")
+	fmt.printf(" - %s (formulae installed by ubrew)\n", installer.CELLAR_DIR)
+	fmt.printf(" - %s (casks installed by ubrew)\n\n", installer.CASKROOM_DIR)
+	fmt.println("  \x1b[33;1mNote: Cellar and Caskroom are shared with Homebrew. Removing them\n  will also remove any Homebrew-managed packages.\x1b[0m\n")
 
     if !force {
         fmt.print("  Type \x1b[1myes\x1b[0m to confirm: ")
@@ -3957,6 +3960,33 @@ run_nuke :: proc(args: []string) {
         if os.is_file(ubrew_bin_path) {
             os.remove(ubrew_bin_path)
         }
+    }
+
+    // 3. Remove Cellar and Caskroom (shared with Homebrew — require extra confirmation)
+    remove_shared := false
+    if !force {
+        fmt.printf("  The Cellar (%s) and Caskroom (%s) are shared with Homebrew.\n", installer.CELLAR_DIR, installer.CASKROOM_DIR)
+        fmt.print("  Remove them too? This will destroy ALL Homebrew packages. Type \x1b[1myes\x1b[0m to confirm: ")
+        buf2: [64]u8
+        n2, _ := os.read(os.stdin, buf2[:])
+        input2 := strings.trim_space(string(buf2[:n2]))
+        remove_shared = input2 == "yes"
+    }
+    if remove_shared {
+        fmt.printf("  Removing %s...\n", installer.CELLAR_DIR)
+        cmd_rm_cellar := fmt.tprintf("rm -rf %s", installer.CELLAR_DIR)
+        cmd_rm_cellar_cstr := strings.clone_to_cstring(cmd_rm_cellar, context.temp_allocator)
+        if libc.system(cmd_rm_cellar_cstr) != 0 {
+            fmt.println("  Warning: failed to remove Cellar")
+        }
+        fmt.printf("  Removing %s...\n", installer.CASKROOM_DIR)
+        cmd_rm_caskroom := fmt.tprintf("rm -rf %s", installer.CASKROOM_DIR)
+        cmd_rm_caskroom_cstr := strings.clone_to_cstring(cmd_rm_caskroom, context.temp_allocator)
+        if libc.system(cmd_rm_caskroom_cstr) != 0 {
+            fmt.println("  Warning: failed to remove Caskroom")
+        }
+    } else {
+        fmt.printf("  Skipped (formulae/casks remain in %s and %s)\n", installer.CELLAR_DIR, installer.CASKROOM_DIR)
     }
 
     fmt.println("\n\x1b[32;1m  ubrew has been removed.\x1b[0m\n")
