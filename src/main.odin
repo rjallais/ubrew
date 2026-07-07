@@ -3255,12 +3255,49 @@ run_where :: proc(args: []string) {
 
     pattern := strings.to_lower(args[0], context.temp_allocator)
     matches := 0
-    roots := []string{installer.CELLAR_DIR, installer.CASKROOM_DIR, installer.PREFIX + "/bin"}
-    for root in roots {
+
+    // The Cellar and Caskroom are shared with Homebrew and can contain
+    // hundreds of unrelated packages. Walking them with os.walker_walk
+    // would traverse every file of every package — extremely slow.
+    // Instead, list the top-level package directories and only descend
+    // into those whose name matches the user's pattern.
+    shared_roots := []string{installer.CELLAR_DIR, installer.CASKROOM_DIR}
+    for root in shared_roots {
         if !os.is_dir(root) {
             continue
         }
-        w := os.walker_create(root)
+        entries, derr := os.read_directory_by_path(root, -1, context.temp_allocator)
+        if derr != nil {
+            continue
+        }
+        for entry in entries {
+            if !os.is_dir(entry.fullpath) {
+                continue
+            }
+            pkg_name_lower := strings.to_lower(entry.name, context.temp_allocator)
+            if !strings.contains(pkg_name_lower, pattern) {
+                continue
+            }
+            // Match the package directory itself, plus its contents.
+            pkg_dir := fmt.tprintf("%s/%s", root, entry.name)
+            fmt.println(pkg_dir)
+            matches += 1
+            w := os.walker_create(pkg_dir)
+            defer os.walker_destroy(&w)
+            for info in os.walker_walk(&w) {
+                hay := strings.to_lower(info.fullpath, context.temp_allocator)
+                if strings.contains(hay, pattern) {
+                    fmt.println(info.fullpath)
+                    matches += 1
+                }
+            }
+        }
+    }
+
+    // The prefix bin directory is small and flat — walk it directly.
+    bin_root := installer.PREFIX + "/bin"
+    if os.is_dir(bin_root) {
+        w := os.walker_create(bin_root)
         defer os.walker_destroy(&w)
         for info in os.walker_walk(&w) {
             hay := strings.to_lower(info.fullpath, context.temp_allocator)
