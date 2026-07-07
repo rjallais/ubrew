@@ -77,8 +77,8 @@ ensure_ubrew_dirs :: proc() -> bool {
         installer.UBREW_ROOT + "/cache/blobs",
         installer.UBREW_ROOT + "/cache/tmp",
         installer.PREFIX,
-        installer.PREFIX + "/Cellar",
-        installer.PREFIX + "/Caskroom",
+        installer.CELLAR_DIR,
+        installer.CASKROOM_DIR,
         installer.PREFIX + "/bin",
         installer.PREFIX + "/opt",
         installer.PREFIX + "/lib",
@@ -282,7 +282,7 @@ run_list :: proc(args: []string) {
 
 			is_cask := opt_cask
 			if !opt_cask && !opt_formula {
-				caskroom_path := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, short_name)
+				caskroom_path := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, short_name)
 				if os.is_dir(caskroom_path) {
 					is_cask = true
 				} else {
@@ -294,7 +294,7 @@ run_list :: proc(args: []string) {
 				if opt_pinned {
 					continue
 				}
-				caskroom_path := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, short_name)
+				caskroom_path := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, short_name)
 				if !os.is_dir(caskroom_path) {
 					fmt.eprintf("Error: No such cask: %s\n", target)
 					os.exit(1)
@@ -328,7 +328,7 @@ run_list :: proc(args: []string) {
 				if opt_pinned && !is_pinned(pins, short_name) {
 					continue
 				}
-				cellar_path := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short_name)
+				cellar_path := fmt.tprintf("%s/%s", installer.CELLAR_DIR, short_name)
 				if !os.is_dir(cellar_path) {
 					fmt.eprintf("Error: No such keg: %s\n", cellar_path)
 					os.exit(1)
@@ -365,11 +365,11 @@ run_list :: proc(args: []string) {
 		is_cask_mode := opt_cask || (!opt_formula && !opt_cask)
 
 		if is_formula_mode {
-			cellar := fmt.tprintf("%s/Cellar", installer.PREFIX)
+			cellar := installer.CELLAR_DIR
 			if os.is_dir(cellar) do append(&dirs, cellar)
 		}
 		if is_cask_mode {
-			caskroom := fmt.tprintf("%s/Caskroom", installer.PREFIX)
+			caskroom := installer.CASKROOM_DIR
 			if os.is_dir(caskroom) do append(&dirs, caskroom)
 		}
 
@@ -417,7 +417,7 @@ run_list :: proc(args: []string) {
 
 	items := make([dynamic]List_Item, context.temp_allocator)
 
-	cellar := fmt.tprintf("%s/Cellar", installer.PREFIX)
+	cellar := installer.CELLAR_DIR
 	if is_formula_mode && os.is_dir(cellar) {
 		infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator)
 		if err == nil {
@@ -463,7 +463,7 @@ run_list :: proc(args: []string) {
 		}
 	}
 
-	caskroom := fmt.tprintf("%s/Caskroom", installer.PREFIX)
+	caskroom := installer.CASKROOM_DIR
 	if is_cask_mode && os.is_dir(caskroom) {
 		if infos, err := os.read_directory_by_path(caskroom, -1, context.temp_allocator); err == nil {
 			for info in infos {
@@ -821,7 +821,7 @@ bundle_install_entries :: proc(entries: []Brewfile_Entry, upgrade_active: bool) 
 				tap.tap_trust(e.name)
 			}
 		} else if e.kind == "brew" {
-			cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, e.name)
+			cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, e.name)
 			if !os.is_dir(cellar_dir) {
 				fmt.printf("Installing %s...\n", e.name)
 				if !install_formula_by_name(e.name, false) {
@@ -834,7 +834,7 @@ bundle_install_entries :: proc(entries: []Brewfile_Entry, upgrade_active: bool) 
 				}
 			}
 		} else if e.kind == "cask" {
-			caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, e.name)
+			caskroom_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, e.name)
 			if !os.is_dir(caskroom_dir) {
 				fmt.printf("Installing cask %s...\n", e.name)
 				if !install_cask_by_token(e.name) {
@@ -1649,7 +1649,7 @@ run_migrate :: proc() {
     // by the smoke test: output containing a "Migrated...formulae" line.
     formulae := 0
     casks := 0
-    cellar := installer.PREFIX + "/Cellar"
+    cellar := installer.CELLAR_DIR
     if infos, err := os.read_directory_by_path(cellar, -1, context.allocator); err == nil {
         defer os.file_info_slice_delete(infos, context.allocator)
         for info in infos {
@@ -1658,7 +1658,7 @@ run_migrate :: proc() {
             }
         }
     }
-    caskroom := installer.PREFIX + "/Caskroom"
+    caskroom := installer.CASKROOM_DIR
     if infos, err := os.read_directory_by_path(caskroom, -1, context.allocator); err == nil {
         defer os.file_info_slice_delete(infos, context.allocator)
         for info in infos {
@@ -1844,12 +1844,12 @@ run_deps :: proc(args: []string) {
     }
 
     is_installed_pkg :: proc(name: string) -> bool {
-        cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
         if os.is_dir(cellar_dir) {
             return true
         }
         flat := installer.flatten_token(name)
-        caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat)
+        caskroom_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
         if os.is_dir(caskroom_dir) {
             return true
         }
@@ -1857,7 +1857,7 @@ run_deps :: proc(args: []string) {
     }
 
     get_runtime_deps :: proc(name: string) -> ([]string, bool) {
-        cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
         if !os.is_dir(cellar_dir) {
             return nil, false
         }
@@ -2343,7 +2343,7 @@ run_deps :: proc(args: []string) {
 
 unlink_formula_bins :: proc(name: string) -> int {
     bin_dir := installer.PREFIX + "/bin"
-    formula_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+    formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
     infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator)
     if err != nil {
         return 0
@@ -2415,9 +2415,9 @@ run_remove :: proc(args: []string) {
 					resolved_token = strings.clone(c.token, context.temp_allocator)
 					api.destroy_cask(c)
 				}
-				formula_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, t)
+				formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, t)
 				flat_name := installer.flatten_token(resolved_token)
-				cask_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name)
+				cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat_name)
 				if !os.is_dir(cask_dir) || os.is_dir(formula_dir) {
 					is_formula = true
 				}
@@ -2474,9 +2474,9 @@ run_remove :: proc(args: []string) {
 			api.destroy_cask(c)
 		}
 
-		formula_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, t)
+		formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, t)
 		flat_name := installer.flatten_token(resolved_token)
-		cask_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name)
+		cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat_name)
 
 		is_cask := false
 		if cask_only {
@@ -2507,7 +2507,7 @@ run_remove :: proc(args: []string) {
 
 remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
 	flat := installer.flatten_token(cask_token)
-	caskroom_cask_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat)
+	caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 	if !os.is_dir(caskroom_cask_dir) {
 		if !force {
 			fmt.printf("ubrew: '%s' is not installed\n", cask_token)
@@ -2533,7 +2533,7 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
         return false
     }
 
-    formula_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+    formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
     if !os.is_dir(formula_dir) {
         if !missing_ok {
             fmt.printf("ubrew: '%s' is not installed\n", name)
@@ -2586,7 +2586,7 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
     print_formula(f)
 
     if f.version != "" && !strings.contains(f.name, "/") {
-        keg_dir := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, f.name, f.version)
+        keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
         if os.is_dir(keg_dir) {
             if force {
                 remove_formula(f.name, true)
@@ -2599,7 +2599,7 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
 
     is_upgrade := false
     old_version := ""
-    cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, f.name)
+    cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)
     if os.is_dir(cellar_dir) {
         is_upgrade = true
         if keg_path, ok := exec_formula_latest_keg(f.name); ok {
@@ -2650,7 +2650,7 @@ install_cask_by_token :: proc(cask_token: string, force: bool = false) -> bool {
     defer api.destroy_cask(c)
 
     flat := installer.flatten_token(c.token)
-    caskroom_cask_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat)
+    caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
     if os.is_dir(caskroom_cask_dir) {
         if force {
             remove_cask_by_token(cask_token, true)
@@ -2983,7 +2983,7 @@ run_install :: proc(args: []string) {
 
 		is_installed := false
 		if f.version != "" && !strings.contains(f.name, "/") {
-			keg_dir := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, f.name, f.version)
+			keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
 			if os.is_dir(keg_dir) {
 				is_installed = true
 			}
@@ -3032,7 +3032,7 @@ run_install :: proc(args: []string) {
 		}
 
 		flat := installer.flatten_token(c.token)
-		caskroom_cask_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat)
+		caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 		is_installed := os.is_dir(caskroom_cask_dir)
 
 		job := Install_Cask_Job {
@@ -3231,7 +3231,7 @@ run_where :: proc(args: []string) {
 
     pattern := strings.to_lower(args[0], context.temp_allocator)
     matches := 0
-    roots := []string{installer.PREFIX + "/Cellar", installer.PREFIX + "/Caskroom", installer.PREFIX + "/bin"}
+    roots := []string{installer.CELLAR_DIR, installer.CASKROOM_DIR, installer.PREFIX + "/bin"}
     for root in roots {
         if !os.is_dir(root) {
             continue
@@ -3264,8 +3264,8 @@ check_directories :: proc(warnings: ^[dynamic]string) {
 		installer.UBREW_ROOT + "/cache",
 		installer.UBREW_ROOT + "/store",
 		installer.PREFIX,
-		installer.PREFIX + "/Cellar",
-		installer.PREFIX + "/Caskroom",
+		installer.CELLAR_DIR,
+		installer.CASKROOM_DIR,
 		installer.PREFIX + "/bin",
 	}
 	for dir in dirs {
@@ -3802,7 +3802,7 @@ run_cleanup :: proc(args: []string) {
 
     cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
 
-    cellar := installer.PREFIX + "/Cellar"
+    cellar := installer.CELLAR_DIR
     if os.is_dir(cellar) {
         if cellar_infos, cellar_err := os.read_directory_by_path(cellar, -1, context.temp_allocator); cellar_err == nil {
             for info in cellar_infos {
@@ -4247,7 +4247,7 @@ print_cask :: proc(c: cask.Cask) {
 		}
 	}
 
-	caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, c.token)
+	caskroom_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, c.token)
 	if os.is_dir(caskroom_dir) {
 		if f_infos, err := os.read_directory_by_path(caskroom_dir, -1, context.temp_allocator); err == nil {
 			latest_version := ""
@@ -4285,7 +4285,7 @@ print_formula :: proc(f: formula.Formula) {
 	}
 	fmt.println("========================================")
 
-	cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, f.name)
+	cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)
 	if os.is_dir(cellar_dir) {
 		if f_infos, err := os.read_directory_by_path(cellar_dir, -1, context.temp_allocator); err == nil {
 			latest_version := ""
@@ -4416,7 +4416,7 @@ Upgrade_Item :: struct {
  
  list_installed_formulae :: proc() -> [dynamic]Installed_Pkg {
  	pkgs := make([dynamic]Installed_Pkg, context.allocator)
- 	cellar := installer.PREFIX + "/Cellar"
+ 	cellar := installer.CELLAR_DIR
  	if fd, err := os.open(cellar); err == nil {
  		defer os.close(fd)
  		if infos, rerr := os.read_directory_by_path(cellar, -1, context.temp_allocator); rerr == nil {
@@ -4459,7 +4459,7 @@ Upgrade_Item :: struct {
  
  list_installed_casks :: proc() -> [dynamic]Installed_Pkg {
  	pkgs := make([dynamic]Installed_Pkg, context.allocator)
- 	caskroom := installer.PREFIX + "/Caskroom"
+ 	caskroom := installer.CASKROOM_DIR
  	if fd, err := os.open(caskroom); err == nil {
  		defer os.close(fd)
  		if infos, rerr := os.read_directory_by_path(caskroom, -1, context.temp_allocator); rerr == nil {
@@ -4616,8 +4616,8 @@ run_outdated :: proc(args: []string) {
 
 	outdated_items := make([dynamic]Outdated_Item, context.temp_allocator)
 
-	cellar_dir := installer.PREFIX + "/Cellar"
-	caskroom_dir := installer.PREFIX + "/Caskroom"
+	cellar_dir := installer.CELLAR_DIR
+	caskroom_dir := installer.CASKROOM_DIR
 
 	if !cask_only {
 		for pkg in installed_formulae {
@@ -5495,7 +5495,7 @@ run_upgrade :: proc(args: []string) {
 		} else {
 			on_request := true
 			if len(pkg_names) == 0 {
-				old_keg_dir := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, pkg.name, pkg.old_version)
+				old_keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, pkg.name, pkg.old_version)
 				if receipt, ok := installer.read_install_receipt(old_keg_dir, context.temp_allocator); ok {
 					on_request = receipt.installed_on_request
 				}
@@ -5508,7 +5508,7 @@ run_upgrade :: proc(args: []string) {
 			}
 			if pkg.old_version != "" && pkg.old_version != pkg.new_version {
 				unlink_formula_bins(pkg.name)
-				old_keg_dir := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, pkg.name, pkg.old_version)
+				old_keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, pkg.name, pkg.old_version)
 				_ = os.remove_all(old_keg_dir)
 			}
 		}
@@ -5611,7 +5611,7 @@ autoremove_scan :: proc(pkgs: []Installed_Pkg, pins: [dynamic]string) -> [dynami
         delete(deps_map)
     }
     for p in pkgs {
-        keg := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, p.name, p.version)
+        keg := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, p.name, p.version)
         keg_for[p.name] = keg
         receipt, has_receipt := installer.read_install_receipt(keg)
         if !has_receipt {
@@ -5835,8 +5835,8 @@ run_pin :: proc(args: []string) {
         }
         flat_name := installer.flatten_token(name)
 
-        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short_name))
-        is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/%s", installer.CELLAR_DIR, short_name))
+        is_installed_cask := os.is_dir(fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat_name))
 
         valid_install := false
         if flags.formula_only {
@@ -5940,8 +5940,8 @@ run_unpin :: proc(args: []string) {
         }
         flat_name := installer.flatten_token(name)
 
-        is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short_name))
-        is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, flat_name))
+        is_installed_formula := os.is_dir(fmt.tprintf("%s/%s", installer.CELLAR_DIR, short_name))
+        is_installed_cask := os.is_dir(fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat_name))
 
         valid_install := false
         if flags.formula_only {
@@ -5975,8 +5975,8 @@ run_unpin :: proc(args: []string) {
             }
             flat_name := installer.flatten_token(name)
             if p == name || p == short_name || p == flat_name {
-                is_installed_formula := os.is_dir(fmt.tprintf("%s/Cellar/%s", installer.PREFIX, p))
-                is_installed_cask := os.is_dir(fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, p))
+                is_installed_formula := os.is_dir(fmt.tprintf("%s/%s", installer.CELLAR_DIR, p))
+                is_installed_cask := os.is_dir(fmt.tprintf("%s/%s", installer.CASKROOM_DIR, p))
 
                 valid_unpin := false
                 if flags.formula_only {
@@ -6221,7 +6221,7 @@ run_link :: proc(args: []string) {
             }
         }
 
-        rack := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        rack := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
         if !os.is_dir(rack) {
             fmt.printf("ubrew: '%s' is not installed\n", name)
             failed = true
@@ -6280,7 +6280,7 @@ run_link :: proc(args: []string) {
             continue
         }
 
-        keg_root := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, version_to_link)
+        keg_root := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, name, version_to_link)
         keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator)
         if keg_err != nil {
             fmt.printf("ubrew: cannot read %s: %v\n", keg_root, keg_err)
@@ -6321,7 +6321,7 @@ run_link :: proc(args: []string) {
 
             // Recreate the opt/<name> symlink to point at the latest/linked keg
             opt_dst := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
-            opt_src := fmt.tprintf("%s/Cellar/%s/%s", installer.PREFIX, name, version_to_link)
+            opt_src := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, name, version_to_link)
             _ = os.remove(opt_dst)
             if serr := os.symlink(opt_src, opt_dst); serr != nil {
                 fmt.printf("ubrew: failed linking %s -> %s: %v\n", opt_dst, opt_src, serr)
@@ -6379,7 +6379,7 @@ run_unlink :: proc(args: []string) {
                 unlink_dir_contents(dst_path, name, dry_run, unlinked, failed)
             } else {
                 if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
-                    prefix := fmt.tprintf("/Cellar/%s/", name)
+                    prefix := fmt.tprintf(installer.CELLAR_DIR + "/%s/", name)
                     if strings.contains(target, prefix) {
                         if dry_run {
                             fmt.printf("Would unlink: %s\n", dst_path)
@@ -6409,7 +6409,7 @@ run_unlink :: proc(args: []string) {
         unlinked_count := 0
         local_failed := 0
 
-        rack := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, name)
+        rack := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
         if !os.is_dir(rack) {
             fmt.printf("ubrew: '%s' is not installed\n", name)
             failed = true
@@ -6594,7 +6594,7 @@ run_list_names :: proc(kind: string) {
     names := make([dynamic]string, context.temp_allocator)
 
     if kind == "formula" {
-        cellar := installer.PREFIX + "/Cellar"
+        cellar := installer.CELLAR_DIR
         if infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator); err == nil {
             for info in infos {
                 if info.type == .Directory && !seen[info.name] {
@@ -6604,7 +6604,7 @@ run_list_names :: proc(kind: string) {
             }
         }
     } else {
-        caskroom := installer.PREFIX + "/Caskroom"
+        caskroom := installer.CASKROOM_DIR
         if infos, err := os.read_directory_by_path(caskroom, -1, context.temp_allocator); err == nil {
             for info in infos {
                 if info.type == .Directory && !seen[info.name] {
@@ -6732,7 +6732,7 @@ run_formulae :: proc(args: []string) {
 
     // 3. Installed formulae: safety net. If a formula was installed then
     //    dropped from the index, we still want it listed.
-    cellar := installer.PREFIX + "/Cellar"
+    cellar := installer.CELLAR_DIR
     if infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator); err == nil {
         for info in infos {
             if info.type == .Directory {
@@ -7256,7 +7256,7 @@ exec_formula_name :: proc(name: string) -> string {
 
 exec_formula_latest_keg :: proc(name: string) -> (string, bool) {
     short := exec_formula_name(name)
-    cellar := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, short)
+    cellar := fmt.tprintf("%s/%s", installer.CELLAR_DIR, short)
     // `read_directory_by_path` returns its backing slice from a temp
     // arena (not the heap), so `file_info_slice_delete` would
     // call `free()` on a temp-allocated pointer and crash with
@@ -7591,21 +7591,21 @@ run_path_query :: proc(which: string, args: []string) {
             fmt.printf("%s/opt/%s\n", installer.PREFIX, name)
         }
     case "--cellar":
-        if len(args) == 0 {
-            fmt.printf("%s/Cellar\n", installer.PREFIX)
-            return
-        }
-        for name in args {
-            fmt.printf("%s/Cellar/%s\n", installer.PREFIX, name)
-        }
+    	if len(args) == 0 {
+    		fmt.printf("%s\n", installer.CELLAR_DIR)
+    		return
+    	}
+    	for name in args {
+    		fmt.printf("%s/%s\n", installer.CELLAR_DIR, name)
+    	}
     case "--caskroom":
-        if len(args) == 0 {
-            fmt.printf("%s/Caskroom\n", installer.PREFIX)
-            return
-        }
-        for name in args {
-            fmt.printf("%s/Caskroom/%s\n", installer.PREFIX, name)
-        }
+    	if len(args) == 0 {
+    		fmt.printf("%s\n", installer.CASKROOM_DIR)
+    		return
+    	}
+    	for name in args {
+    		fmt.printf("%s/%s\n", installer.CASKROOM_DIR, name)
+    	}
     case "--cache":
         fmt.printf("%s/cache\n", installer.UBREW_ROOT)
     case "--repo", "--repository":
@@ -7632,26 +7632,26 @@ run_shellenv :: proc(args: []string) {
     bin := fmt.tprintf("%s/bin", installer.PREFIX)
     switch shell {
     case "bash", "zsh", "sh":
-        fmt.printf("export PATH=\"%s:${PATH:-}\"\n", bin)
+        fmt.printf("export PATH=\"%s:$PATH\"\n", bin)
         fmt.printf("export UBREW_PREFIX=\"%s\"\n", installer.PREFIX)
-        fmt.printf("export UBREW_CELLAR=\"%s/Cellar\"\n", installer.PREFIX)
+        fmt.printf("export UBREW_CELLAR=\"%s\"\n", installer.CELLAR_DIR)
     case "fish":
         fmt.printf("set -gx PATH \"%s\" $PATH\n", bin)
         fmt.printf("set -gx UBREW_PREFIX \"%s\"\n", installer.PREFIX)
-        fmt.printf("set -gx UBREW_CELLAR \"%s/Cellar\"\n", installer.PREFIX)
+        fmt.printf("set -gx UBREW_CELLAR \"%s\"\n", installer.CELLAR_DIR)
     case "csh", "tcsh":
         fmt.printf("setenv PATH \"%s:$PATH\"\n", bin)
         fmt.printf("setenv UBREW_PREFIX \"%s\"\n", installer.PREFIX)
-        fmt.printf("setenv UBREW_CELLAR \"%s/Cellar\"\n", installer.PREFIX)
+        fmt.printf("setenv UBREW_CELLAR \"%s\"\n", installer.CELLAR_DIR)
     case "pwsh":
         fmt.printf("$env:PATH = \"%s:$env:PATH\"\n", bin)
         fmt.printf("$env:UBREW_PREFIX = \"%s\"\n", installer.PREFIX)
-        fmt.printf("$env:UBREW_CELLAR = \"%s/Cellar\"\n", installer.PREFIX)
+        fmt.printf("$env:UBREW_CELLAR = \"%s\"\n", installer.CELLAR_DIR)
     case "nu":
         fmt.println("# Add to your config.nu:")
         fmt.printf("$env.PATH = ($env.PATH | split row (char esep) | prepend '%s')\n", bin)
         fmt.printf("$env.UBREW_PREFIX = '%s'\n", installer.PREFIX)
-        fmt.printf("$env.UBREW_CELLAR = '%s/Cellar'\n", installer.PREFIX)
+        fmt.printf("$env.UBREW_CELLAR = '%s'\n", installer.CELLAR_DIR)
     case:
         fmt.printf("ubrew: unsupported shell '%s' (try bash|zsh|fish|csh|tcsh|pwsh|nu)\n", shell)
         os.exit(1)
@@ -8418,7 +8418,7 @@ run_gc :: proc(args: []string) {
             fmt.println("")
             fmt.println("Remove unreferenced entries from the COW bottle store at")
             fmt.println("/opt/ubrew/store-relocated. A store entry is unreferenced when")
-            fmt.println("no installed formula in /opt/ubrew/prefix/Cellar has the same")
+            fmt.println("no installed formula in the Cellar has the same")
             fmt.println("name as the entry's embedded .brew/<name>.rb.")
             fmt.println("")
             fmt.println("With --dry-run (alias -n), print what would be removed without")
@@ -8438,7 +8438,7 @@ run_gc :: proc(args: []string) {
     installed_names := make([dynamic]string, context.temp_allocator)
     defer delete(installed_names)
 
-    if infos, derr := os.read_directory_by_path(installer.PREFIX + "/Cellar", -1, context.temp_allocator); derr == nil {
+    if infos, derr := os.read_directory_by_path(installer.CELLAR_DIR, -1, context.temp_allocator); derr == nil {
         for info in infos {
             if info.type != .Directory { continue }
             if info.name == "." || info.name == ".." { continue }
@@ -9015,7 +9015,7 @@ run_info :: proc(args: []string) {
 			if len(formulae) > 0 {
 				fmt.println("Installed Formulae:")
 				for f in formulae {
-					cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, f)
+					cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f)
 					latest_version := ""
 					if f_infos, err := os.read_directory_by_path(cellar_dir, -1, context.temp_allocator); err == nil {
 						for info in f_infos {
@@ -9047,7 +9047,7 @@ run_info :: proc(args: []string) {
 				if len(formulae) > 0 do fmt.println("")
 				fmt.println("Installed Casks:")
 				for c in casks {
-					caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, c)
+					caskroom_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, c)
 					latest_version := ""
 					if f_infos, err := os.read_directory_by_path(caskroom_dir, -1, context.temp_allocator); err == nil {
 						for info in f_infos {
@@ -9207,7 +9207,7 @@ run_info :: proc(args: []string) {
 			total_f_files := 0
 			total_f_size: i64 = 0
 			for f in formulae {
-				cellar_dir := fmt.tprintf("%s/Cellar/%s", installer.PREFIX, f)
+				cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f)
 				files_count, total_size := get_dir_size(cellar_dir)
 				total_f_files += files_count
 				total_f_size += total_size
@@ -9216,7 +9216,7 @@ run_info :: proc(args: []string) {
 			total_c_files := 0
 			total_c_size: i64 = 0
 			for c in casks {
-				caskroom_dir := fmt.tprintf("%s/Caskroom/%s", installer.PREFIX, c)
+				caskroom_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, c)
 				files_count, total_size := get_dir_size(caskroom_dir)
 				total_c_files += files_count
 				total_c_size += total_size
@@ -9351,7 +9351,7 @@ run_info :: proc(args: []string) {
 
 get_installed_formulae :: proc(allocator := context.temp_allocator) -> []string {
 	list := make([dynamic]string, allocator)
-	cellar := installer.PREFIX + "/Cellar"
+	cellar := installer.CELLAR_DIR
 	if !os.is_dir(cellar) {
 		return nil
 	}
@@ -9367,7 +9367,7 @@ get_installed_formulae :: proc(allocator := context.temp_allocator) -> []string 
 
 get_installed_casks :: proc(allocator := context.temp_allocator) -> []string {
 	list := make([dynamic]string, allocator)
-	caskroom := installer.PREFIX + "/Caskroom"
+	caskroom := installer.CASKROOM_DIR
 	if !os.is_dir(caskroom) {
 		return nil
 	}

@@ -7,7 +7,7 @@ import "../platform"
 
 STORE_DIR :: "/opt/ubrew/store"
 STORE_RELOCATED_DIR :: "/opt/ubrew/store-relocated"
-CELLAR_DIR :: "/opt/ubrew/prefix/Cellar"
+CELLAR_DIR :: "/home/linuxbrew/.linuxbrew/Cellar"
 
 store_entry_path :: proc(sha256: string, buf: []u8) -> string {
 	if !is_valid_sha256(sha256) {
