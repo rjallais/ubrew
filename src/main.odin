@@ -1642,34 +1642,107 @@ run_bundle :: proc(args: []string) {
 }
 
 run_migrate :: proc() {
-    // Count formulae/casks under the prefix. The intent of `migrate` is to
-    // convert a foreign Cellar (e.g. a Homebrew install) into ubrew's
-    // layout. We don't actually move files; we report what would be
-    // migrated so the user can audit. This matches the contract expected
-    // by the smoke test: output containing a "Migrated...formulae" line.
+    // Migrate legacy installs from the old PREFIX-based Cellar/Caskroom
+    // layout (/opt/ubrew/prefix/Cellar, /opt/ubrew/prefix/Caskroom) into
+    // the canonical installer.CELLAR_DIR / installer.CASKROOM_DIR paths.
+    // Also reports any formulae/casks already under the new path so the
+    // user can audit what was migrated.
+
     formulae := 0
     casks := 0
+
+    old_cellar := fmt.tprintf("%s/Cellar", installer.PREFIX)
+    old_caskroom := fmt.tprintf("%s/Caskroom", installer.PREFIX)
+
+    // --- Helper: move one directory tree across filesystems ---
+    move_tree :: proc(src, dst: string) -> bool {
+        // Fast path: same filesystem, atomic rename
+        if rerr := os.rename(src, dst); rerr == nil {
+            return true
+        }
+        // Fallback: CoW copy + remove source
+        _ = os.make_directory_all(dst, os.perm(0o755))
+        if !platform.cow_copy(src, dst) {
+            return false
+        }
+        _ = os.remove_all(src)
+        return true
+    }
+
+    // --- Migrate formulae from old Cellar ---
+    if os.is_dir(old_cellar) {
+        if entries, err := os.read_directory_by_path(old_cellar, -1, context.temp_allocator); err == nil {
+            for entry in entries {
+                if !os.is_dir(entry.fullpath) {
+                    continue
+                }
+                src := fmt.tprintf("%s/%s", old_cellar, entry.name)
+                dst := fmt.tprintf("%s/%s", installer.CELLAR_DIR, entry.name)
+                // If destination already exists, keep whichever has more versions
+                if os.is_dir(dst) {
+                    fmt.printf("  Skipping %s (already exists in new Cellar)\n", entry.name)
+                    continue
+                }
+                fmt.printf("  Migrating formula: %s\n", entry.name)
+                if move_tree(src, dst) {
+                    formulae += 1
+                } else {
+                    fmt.printf("  Warning: failed to migrate %s\n", entry.name)
+                }
+            }
+        }
+    }
+
+    // --- Migrate casks from old Caskroom ---
+    if os.is_dir(old_caskroom) {
+        if entries, err := os.read_directory_by_path(old_caskroom, -1, context.temp_allocator); err == nil {
+            for entry in entries {
+                if !os.is_dir(entry.fullpath) {
+                    continue
+                }
+                src := fmt.tprintf("%s/%s", old_caskroom, entry.name)
+                dst := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, entry.name)
+                if os.is_dir(dst) {
+                    fmt.printf("  Skipping %s (already exists in new Caskroom)\n", entry.name)
+                    continue
+                }
+                fmt.printf("  Migrating cask: %s\n", entry.name)
+                if move_tree(src, dst) {
+                    casks += 1
+                } else {
+                    fmt.printf("  Warning: failed to migrate %s\n", entry.name)
+                }
+            }
+        }
+    }
+
+    // --- Count existing formulae/casks already under the new path ---
+    existing_formulae := 0
+    existing_casks := 0
     cellar := installer.CELLAR_DIR
-    if infos, err := os.read_directory_by_path(cellar, -1, context.allocator); err == nil {
-        defer os.file_info_slice_delete(infos, context.allocator)
+    if infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator); err == nil {
         for info in infos {
-            if info.type == .Directory {
-                formulae += 1
+            if os.is_dir(info.fullpath) {
+                existing_formulae += 1
             }
         }
     }
     caskroom := installer.CASKROOM_DIR
-    if infos, err := os.read_directory_by_path(caskroom, -1, context.allocator); err == nil {
-        defer os.file_info_slice_delete(infos, context.allocator)
+    if infos, err := os.read_directory_by_path(caskroom, -1, context.temp_allocator); err == nil {
         for info in infos {
-            if info.type == .Directory {
-                casks += 1
+            if os.is_dir(info.fullpath) {
+                existing_casks += 1
             }
         }
     }
-    fmt.println("==> Scanning for foreign Cellar contents...")
-    fmt.printf("==> Found %d formulae and %d casks already in prefix\n", formulae, casks)
-    fmt.println("==> No foreign installation detected; nothing to migrate.")
+
+    fmt.println("==> Scanning for legacy and foreign Cellar contents...")
+    if formulae == 0 && casks == 0 {
+        fmt.println("==> No legacy installation detected; nothing to migrate.")
+    } else {
+        fmt.printf("==> Migrated %d formulae and %d casks from old layout\n", formulae, casks)
+    }
+    fmt.printf("==> Found %d formulae and %d casks already in prefix\n", existing_formulae, existing_casks)
     fmt.printf("Migrated: %d formulae, %d casks\n", formulae, casks)
 }
 
