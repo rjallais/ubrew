@@ -2243,10 +2243,21 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
 	}
 
-	// Remove Caskroom staged files
+	// Remove Caskroom staged files (only if it was installed by ubrew)
 	caskroom_cask_dir := fmt.tprintf("%s/%s", CASKROOM_DIR, flat)
 	if os.is_dir(caskroom_cask_dir) {
-		_ = os.remove_all(caskroom_cask_dir)
+		has_versions := false
+		if v_infos, v_err := os.read_directory_by_path(caskroom_cask_dir, -1, context.temp_allocator); v_err == nil {
+			for v_info in v_infos {
+				if v_info.type == .Directory {
+					has_versions = true
+					break
+				}
+			}
+		}
+		if has_versions {
+			_ = os.remove_all(caskroom_cask_dir)
+		}
 	}
 
 	fmt.printf("==> Uninstalled cask: %s\n", c.token)

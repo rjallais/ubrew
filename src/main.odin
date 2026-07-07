@@ -2519,6 +2519,22 @@ remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
 	fmt.printf("==> Resolving cask metadata for: %s\n", cask_token)
 	c, err := api.fetch_cask(cask_token)
 	if err != nil {
+		// Offline fallback — verify the Caskroom directory has version
+		// subdirectories (i.e. it looks like a genuine cask install)
+		// before removing from the shared Caskroom.
+		has_versions := false
+		if v_infos, v_err := os.read_directory_by_path(caskroom_cask_dir, -1, context.temp_allocator); v_err == nil {
+			for v_info in v_infos {
+				if v_info.type == .Directory {
+					has_versions = true
+					break
+				}
+			}
+		}
+		if !has_versions {
+			fmt.printf("ubrew: '%s' does not appear to be a ubrew-managed cask; skipping fallback removal\n", cask_token)
+			return false
+		}
 		_ = os.remove_all(caskroom_cask_dir)
 		fmt.printf("==> Removed %s from Caskroom (offline fallback)\n", cask_token)
 		return true
@@ -2539,6 +2555,14 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
             fmt.printf("ubrew: '%s' is not installed\n", name)
         }
         return missing_ok
+    }
+
+    // Only allow removal of formulae that ubrew has a history record for,
+    // so we never touch packages installed by Homebrew in the shared Cellar.
+    _, formula_entries := history.load(context.temp_allocator)
+    if !(name in formula_entries) {
+        fmt.printf("ubrew: '%s' appears to be managed by Homebrew; use 'brew remove' instead\n", name)
+        return false
     }
 
     ver := "unknown"
