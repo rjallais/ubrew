@@ -3802,12 +3802,18 @@ run_cleanup :: proc(args: []string) {
 
     cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
 
+    _, h_entries := history.load(context.temp_allocator)
+
     cellar := installer.CELLAR_DIR
     if os.is_dir(cellar) {
         if cellar_infos, cellar_err := os.read_directory_by_path(cellar, -1, context.temp_allocator); cellar_err == nil {
             for info in cellar_infos {
                 if info.type != .Directory do continue
                 formula_name := info.name
+
+                // Only prune formulae that ubrew has a history record for, so we
+                // never delete old versions of packages installed by Homebrew.
+                if !(formula_name in h_entries) do continue
 
                 if len(pkg_names) > 0 {
                     matched := false
