@@ -62,8 +62,10 @@ CACHE_DIR :: UBREW_ROOT + "/cache"
 // Point Cellar and Caskroom to the official Homebrew paths so both
 // package managers share the same installation directories, avoiding
 // duplication and keeping brew list / ubrew list in sync.
-CELLAR_DIR  :: "/home/linuxbrew/.linuxbrew/Cellar"
-CASKROOM_DIR :: "/home/linuxbrew/.linuxbrew/Caskroom"
+// The canonical definitions live in the `platform` package so that
+// `store` and `installer` share a single source of truth.
+CELLAR_DIR  :: platform.CELLAR_DIR
+CASKROOM_DIR :: platform.CASKROOM_DIR
 
 ensure_dir :: proc(path: string) -> bool {
 	if err := os.make_directory_all(path, os.perm(0o755)); err != nil {

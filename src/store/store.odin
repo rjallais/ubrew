@@ -7,7 +7,9 @@ import "../platform"
 
 STORE_DIR :: "/opt/ubrew/store"
 STORE_RELOCATED_DIR :: "/opt/ubrew/store-relocated"
-CELLAR_DIR :: "/home/linuxbrew/.linuxbrew/Cellar"
+// Single source of truth: the canonical Cellar path lives in the
+// `platform` package, shared with `installer`.
+CELLAR_DIR :: platform.CELLAR_DIR
 
 store_entry_path :: proc(sha256: string, buf: []u8) -> string {
 	if !is_valid_sha256(sha256) {
