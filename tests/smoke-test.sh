@@ -101,9 +101,9 @@ else
   else
     echo "      prefix/bin/aws: missing"
   fi
-  if [ -e /opt/ubrew/prefix/Cellar/awscli ]; then
-    AWS_LIBEXEC=$(find /opt/ubrew/prefix/Cellar/awscli -path '*/libexec/bin/aws' | head -n 1)
-    AWS_PY=$(find /opt/ubrew/prefix/Cellar/awscli -path '*/libexec/bin/python' | head -n 1)
+  if [ -e "$CELLAR_DIR/awscli" ]; then
+    AWS_LIBEXEC=$(find "$CELLAR_DIR/awscli" -path '*/libexec/bin/aws' | head -n 1)
+    AWS_PY=$(find "$CELLAR_DIR/awscli" -path '*/libexec/bin/python' | head -n 1)
     if [ -n "$AWS_LIBEXEC" ]; then
       echo "      libexec aws: $(ls -l "$AWS_LIBEXEC")"
       echo "      libexec aws shebang: $(head -n 1 "$AWS_LIBEXEC" 2>/dev/null || echo 'unreadable')"
@@ -121,8 +121,10 @@ PY
 fi
 
 echo ""
+CELLAR_DIR=$("$NB" --cellar)
+CASKROOM_DIR=$("$NB" --caskroom)
+
 echo "--- Test: no @@HOMEBREW_CELLAR@@ or @@HOMEBREW_PREFIX@@ placeholders in Cellar ---"
-CELLAR_DIR="/opt/ubrew/prefix/Cellar"
 if [ -d "$CELLAR_DIR" ]; then
   PLACEHOLDER_HITS=$(grep -rl '@@HOMEBREW_CELLAR@@\|@@HOMEBREW_PREFIX@@' "$CELLAR_DIR" 2>/dev/null | head -5) || true
   if [ -z "$PLACEHOLDER_HITS" ]; then
@@ -137,12 +139,11 @@ fi
 
 echo ""
 echo "--- Test: installed binaries have correct dynamic linker (not @@HOMEBREW_PREFIX@@) ---"
-UBREW_CELLAR="/opt/ubrew/prefix/Cellar"
-if [ -d "$UBREW_CELLAR" ]; then
+if [ -d "$CELLAR_DIR" ]; then
   # Check the PT_INTERP segment specifically via patchelf --print-interpreter,
   # since the binary may legitimately contain @-strings as RPATH or constant data.
   BAD_INTERP=""
-  for bin in $(find "$UBREW_CELLAR" -type f -executable 2>/dev/null); do
+  for bin in $(find "$CELLAR_DIR" -type f -executable 2>/dev/null); do
     interp=$(patchelf --print-interpreter "$bin" 2>/dev/null || true)
     if [[ "$interp" == *"@@HOMEBREW_PREFIX@@"* ]]; then
       BAD_INTERP="$BAD_INTERP $bin"
@@ -155,7 +156,7 @@ if [ -d "$UBREW_CELLAR" ]; then
     echo "$BAD_INTERP" | sed 's/^/      /'
   fi
 else
-  fail "ubrew Cellar directory not found at $UBREW_CELLAR"
+  fail "ubrew Cellar directory not found at $CELLAR_DIR"
 fi
 
 # ===================================================================
@@ -339,8 +340,8 @@ fi
 # ===================================================================
 echo ""
 echo "--- Test: pin and unpin ---"
-mkdir -p /opt/ubrew/prefix/Cellar/wget
-mkdir -p /opt/ubrew/prefix/Caskroom/firefox
+mkdir -p "$CELLAR_DIR/wget"
+mkdir -p "$CASKROOM_DIR/firefox"
 
 # Test formula pin
 PIN_OUT1=$("$NB" pin wget 2>&1) || true
@@ -395,7 +396,7 @@ if perl -e 'print "ok"' 2>&1 | grep -q "^ok$"; then
 else
   fail "perl install or execution failed — tar fallback may have regressed"
   echo "      which perl: $(command -v perl || echo 'not found')"
-  if [ -e /opt/ubrew/prefix/Cellar/perl ]; then
+  if [ -e "$CELLAR_DIR/perl" ]; then
     echo "      Cellar/perl present"
   else
     echo "      Cellar/perl missing — extract likely failed"
