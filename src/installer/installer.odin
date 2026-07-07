@@ -593,7 +593,11 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		}
 
 		formula_cellar_dir := fmt.tprintf("%s/%s", cellar_dir, f.name)
-		_ = os.remove_all(formula_cellar_dir)
+		// Only remove the exact version keg we are about to install, not the
+		// entire formula directory — the Cellar is shared with Homebrew and
+		// other version kegs must be preserved.
+		keg_dir := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
+		_ = os.remove_all(keg_dir)
 
 		fmt.printf("==> Unpacking to: %s\n", cellar_dir)
 		ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
