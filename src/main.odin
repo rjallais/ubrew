@@ -1946,6 +1946,14 @@ run_deps :: proc(args: []string) {
             if latest_keg != "" {
                 keg_dir := fmt.tprintf("%s/%s", cellar_dir, latest_keg)
                 if receipt, ok := installer.read_install_receipt(keg_dir, context.temp_allocator); ok {
+                    // Homebrew's INSTALL_RECEIPT.json uses an array of objects
+                    // for runtime_dependencies, but ubrew's parser only reads
+                    // strings — so a Homebrew receipt yields an empty list.
+                    // Treat an empty list as "not found" so the caller falls
+                    // back to the formula API.
+                    if len(receipt.runtime_dependencies) == 0 {
+                        return nil, false
+                    }
                     res := make([]string, len(receipt.runtime_dependencies), context.temp_allocator)
                     for d, idx in receipt.runtime_dependencies {
                         res[idx] = strings.clone(d, context.temp_allocator)
