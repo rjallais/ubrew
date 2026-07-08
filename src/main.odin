@@ -7489,6 +7489,9 @@ is_ubrew_owned :: proc(keg_dir: string) -> bool {
     if err != nil {
         return false
     }
+    // No `delete(data)` — the buffer came from the temp arena (see AGENTS.md
+    // "Temp Arena Directory Walks"). Manual `delete` on a temp-allocated
+    // buffer crashes with `free(): invalid pointer`.
     defer delete(data)
 
     s := strings.trim_space(string(data))
