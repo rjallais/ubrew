@@ -15,8 +15,8 @@ class Ubrew < Formula
   end
 
   on_linux do
-    url "https://github.com/rjallais/ubrew/archive/1ea1d82192b9e02031a54bd3a6e716cae0f8378d.tar.gz"
-    sha256 "e1853061890a2f43327681b1a2918c1437d45113be2aded1bdbb7e8492e52e58"
+    url "https://github.com/rjallais/ubrew/archive/3ee4795b455b0622579367fab1f796524bf95ee9.tar.gz"
+    sha256 "3f6418fe041f2e1b94e625fa038b4381e0504aeeea725886d984684b4ac28cb0"
 
     depends_on "odin" => :build
     depends_on "patchelf" => :build
