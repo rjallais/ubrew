@@ -2362,8 +2362,33 @@ read_install_receipt :: proc(keg_dir: string, allocator := context.allocator) ->
 		if arr, is_arr := deps_val.(json.Array); is_arr {
 			deps := make([dynamic]string, allocator)
 			for d in arr {
-				if s, is_str := d.(json.String); is_str {
-					append(&deps, strings.clone(s, allocator))
+				#partial switch v in d {
+				case json.String:
+					// ubrew-written receipts use plain strings.
+					append(&deps, strings.clone(v, allocator))
+				case json.Object:
+					// Homebrew's receipts use objects with a
+					// "full_name" key (keg-only name like
+					// "openssl@3"). Fall back to "name" or
+					// "package_name" if full_name is absent.
+					if fn, has_fn := v["full_name"]; has_fn {
+						if s, is_s := fn.(json.String); is_s {
+							append(&deps, strings.clone(s, allocator))
+							continue
+						}
+					}
+					if n, has_n := v["name"]; has_n {
+						if s, is_s := n.(json.String); is_s {
+							append(&deps, strings.clone(s, allocator))
+							continue
+						}
+					}
+					if pn, has_pn := v["package_name"]; has_pn {
+						if s, is_s := pn.(json.String); is_s {
+							append(&deps, strings.clone(s, allocator))
+							continue
+						}
+					}
 				}
 			}
 			r.runtime_dependencies = deps[:]
