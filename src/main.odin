@@ -5265,7 +5265,10 @@ run_update :: proc(args: []string) {
 			}
 		}
 		if rebuild_index {
-			api.build_search_index()
+			f_ok, c_ok := api.build_search_index()
+			if !f_ok || !c_ok {
+				fmt.println("Warning: failed to build search index (formula.json or cask.json may be missing)")
+			}
 		}
 
 		// Post-process Formula listings for each tap
