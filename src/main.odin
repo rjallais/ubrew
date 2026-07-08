@@ -2638,16 +2638,15 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
         return missing_ok
     }
 
-    // Only allow removal of formulae that ubrew has a history record for,
-    // so we never touch packages installed by Homebrew in the shared Cellar.
-    _, formula_entries := history.load(context.temp_allocator)
-    if !(name in formula_entries) {
-        fmt.printf("ubrew: '%s' appears to be managed by Homebrew; use 'brew remove' instead\n", name)
-        return false
-    }
+    // Cellar is shared with Homebrew, so we don't gate on ubrew history —
+    // any keg (ubrew or Homebrew) is fair game. We still record the
+    // uninstall to ubrew history below IF the package was previously
+    // tracked by ubrew.
+    ubrew_owns := false
 
     ver := "unknown"
     if keg_path, ok := exec_formula_latest_keg(name); ok {
+        ubrew_owns = is_ubrew_owned(keg_path)
         if idx := strings.last_index(keg_path, "/"); idx >= 0 {
             ver = strings.clone(keg_path[idx+1:], context.temp_allocator)
         }
@@ -2661,10 +2660,12 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
         return false
     }
 
-    h_names, h_entries := history.load(context.allocator)
-    defer history.destroy(&h_names, &h_entries)
-    history.record_uninstall(&h_names, &h_entries, name, ver)
-    history.save(h_names, h_entries)
+    if ubrew_owns {
+        h_names, h_entries := history.load(context.allocator)
+        defer history.destroy(&h_names, &h_entries)
+        history.record_uninstall(&h_names, &h_entries, name, ver)
+        history.save(h_names, h_entries)
+    }
 
     fmt.printf("==> Removed %s", name)
     if removed_links > 0 {
@@ -3953,8 +3954,13 @@ run_cleanup :: proc(args: []string) {
                 if info.type != .Directory do continue
                 formula_name := info.name
 
-                // Only prune formulae that ubrew has a history record for, so we
-                // never delete old versions of packages installed by Homebrew.
+                // Cellar is shared with Homebrew. Ubrew only prunes old
+                // versions of formulae it has a history record for — we
+                // never delete versions maintained by Homebrew on its
+                // own. The latest-version and pinned-version guards
+                // already prevent us from breaking anything either
+                // tool cares about; this gate is purely "don't touch a
+                // package Homebrew is managing alone."
                 if !(formula_name in h_entries) do continue
 
                 if len(pkg_names) > 0 {
@@ -7466,6 +7472,43 @@ exec_formula_latest_keg :: proc(name: string) -> (string, bool) {
 exec_formula_installed :: proc(name: string) -> bool {
     _, ok := exec_formula_latest_keg(name)
     return ok
+}
+
+// is_ubrew_owned reports whether the keg at keg_dir was installed by
+// ubrew. The Cellar is shared with Homebrew, so the same directory
+// could hold either: ubrew writes a stripped-down receipt (no
+// "homebrew_version" field), while Homebrew's receipts always start
+// with "homebrew_version". So we peek at the first JSON top-level key
+// on disk as a fingerprint — no need to fully parse.
+//
+// Returns false for the (rare) keg that has no receipt at all; safer
+// for callers that use this to gate "should we touch ubrew's book".
+is_ubrew_owned :: proc(keg_dir: string) -> bool {
+    path := fmt.tprintf("%s/INSTALL_RECEIPT.json", keg_dir)
+    data, err := os.read_entire_file(path, context.temp_allocator)
+    if err != nil {
+        return false
+    }
+    defer delete(data)
+
+    s := strings.trim_space(string(data))
+    // Skip the leading '{' if present (always present for receipts).
+    if len(s) > 0 && s[0] == '{' {
+        s = s[1:]
+    }
+    // Walk to the first key token: optional whitespace, then quotes,
+    // then identifier chars. We compare against "homebrew_version".
+    idx := strings.index(s, "\"")
+    if idx < 0 {
+        return false
+    }
+    rest := s[idx+1:]
+    end := strings.index(rest, "\"")
+    if end < 0 {
+        return false
+    }
+    first_key := rest[:end]
+    return first_key != "homebrew_version"
 }
 
 exec_collect_deps :: proc(name: string, visited: ^map[string]bool) -> [dynamic]string {
