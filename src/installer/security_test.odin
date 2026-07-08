@@ -61,7 +61,7 @@ test_is_safe_to_remove_dir_allows_subdirs :: proc(t: ^testing.T) {
     safe := []string{
         "/opt/ubrew/cache/blobs",
         "/opt/ubrew/store",
-        "/opt/ubrew/prefix/Cellar/pkg/0.1.0",
+        "/home/linuxbrew/.linuxbrew/Cellar/pkg/0.1.0",
         "/tmp/some-pkg",
     }
     for path in safe {

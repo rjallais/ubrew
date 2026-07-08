@@ -59,7 +59,13 @@ is_safe_to_remove_dir :: proc(path: string) -> bool {
 UBREW_ROOT :: "/opt/ubrew"
 PREFIX :: UBREW_ROOT + "/prefix"
 CACHE_DIR :: UBREW_ROOT + "/cache"
-CASKROOM_DIR :: PREFIX + "/Caskroom"
+// Point Cellar and Caskroom to the official Homebrew paths so both
+// package managers share the same installation directories, avoiding
+// duplication and keeping brew list / ubrew list in sync.
+// The canonical definitions live in the `platform` package so that
+// `store` and `installer` share a single source of truth.
+CELLAR_DIR  :: platform.CELLAR_DIR
+CASKROOM_DIR :: platform.CASKROOM_DIR
 
 ensure_dir :: proc(path: string) -> bool {
 	if err := os.make_directory_all(path, os.perm(0o755)); err != nil {
@@ -341,7 +347,7 @@ relocate_single_file :: proc(path: string) -> bool {
 	target, read_link_err := os.read_link(path, context.temp_allocator)
 	if read_link_err == nil {
 		if strings.contains(target, "@@HOMEBREW_PREFIX@@") || strings.contains(target, "@@HOMEBREW_CELLAR@@") {
-			new_target, _ := strings.replace_all(target, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+			new_target, _ := strings.replace_all(target, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
 			new_target, _ = strings.replace_all(new_target, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 			os.remove(path)
 			sym_err := os.symlink(new_target, path)
@@ -363,7 +369,7 @@ relocate_single_file :: proc(path: string) -> bool {
 		}
 		rpath = strings.trim_space(rpath)
 		if strings.contains(rpath, "@@HOMEBREW_PREFIX@@") || strings.contains(rpath, "@@HOMEBREW_CELLAR@@") {
-			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
 			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 			chmod_args := []string{"chmod", "+w", path}
 			if !platform.exec_cmd("chmod", chmod_args) {
@@ -381,7 +387,7 @@ relocate_single_file :: proc(path: string) -> bool {
 		if read_err == nil && len(data) > 0 {
 			content := string(data)
 			if strings.contains(content, "@@HOMEBREW_PREFIX@@") || strings.contains(content, "@@HOMEBREW_CELLAR@@") {
-				new_content, _ := strings.replace_all(content, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+				new_content, _ := strings.replace_all(content, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
 				new_content, _ = strings.replace_all(new_content, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 				chmod_args := []string{"chmod", "+w", path}
 				if !platform.exec_cmd("chmod", chmod_args) {
@@ -456,7 +462,7 @@ relocate_macho_file :: proc(path: string) -> bool {
 				if len(parts) >= 2 {
 					old_path := parts[1]
 					if strings.contains(old_path, "@@HOMEBREW_PREFIX@@") || strings.contains(old_path, "@@HOMEBREW_CELLAR@@") {
-						new_path, _ := strings.replace_all(old_path, "@@HOMEBREW_CELLAR@@", PREFIX + "/Cellar", context.temp_allocator)
+						new_path, _ := strings.replace_all(old_path, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
 						new_path, _ = strings.replace_all(new_path, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
 						
 						tool_args := make([dynamic]string, context.temp_allocator)
@@ -531,13 +537,13 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	if !ensure_dir(CACHE_DIR) || !ensure_dir(PREFIX + "/Cellar") || !ensure_dir(PREFIX + "/bin") {
-		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew is writable by your user.")
+	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(PREFIX + "/bin") {
+		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew and the Cellar are writable by your user.")
 		return false
 	}
 
 	sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
-	cellar_dir := PREFIX + "/Cellar"
+	cellar_dir := CELLAR_DIR
 	keg_dir := fmt.tprintf("%s/%s/%s", cellar_dir, f.name, f.version)
 
 	materialized := false
@@ -587,7 +593,11 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		}
 
 		formula_cellar_dir := fmt.tprintf("%s/%s", cellar_dir, f.name)
-		_ = os.remove_all(formula_cellar_dir)
+		// Only remove the exact version keg we are about to install, not the
+		// entire formula directory — the Cellar is shared with Homebrew and
+		// other version kegs must be preserved.
+		keg_dir := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
+		_ = os.remove_all(keg_dir)
 
 		fmt.printf("==> Unpacking to: %s\n", cellar_dir)
 		ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
@@ -665,7 +675,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	_ = os.make_directory_all(opt_dir, os.perm(0o755))
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
-	opt_target := fmt.tprintf("../Cellar/%s/%s", f.name, f.version)
+	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
 	_ = os.symlink(opt_target, opt_link)
 
 	// Write install receipt so `autoremove` can distinguish requested
@@ -763,8 +773,8 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	if !ensure_dir(CACHE_DIR) || !ensure_dir(PREFIX + "/Cellar") || !ensure_dir(PREFIX + "/bin") {
-		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew is writable by your user.")
+	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(PREFIX + "/bin") {
+		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew and the Cellar are writable by your user.")
 		return false
 	}
 
@@ -862,7 +872,7 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	build_sys := detect_build_system(src_root)
 	fmt.printf("==> Detected build system: %v\n", build_sys)
 
-	cellar_dir := PREFIX + "/Cellar"
+	cellar_dir := CELLAR_DIR
 	keg_dir := fmt.tprintf("%s/%s/%s", cellar_dir, f.name, f.version)
 	_ = os.remove_all(keg_dir)
 	_ = os.make_directory_all(keg_dir, os.perm(0o755))
@@ -1021,7 +1031,7 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	_ = os.make_directory_all(opt_dir, os.perm(0o755))
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
-	opt_target := fmt.tprintf("../Cellar/%s/%s", f.name, f.version)
+	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
 	_ = os.symlink(opt_target, opt_link)
 
 	// Write install receipt so `autoremove` can distinguish requested
@@ -2239,10 +2249,21 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
 	}
 
-	// Remove Caskroom staged files
+	// Remove Caskroom staged files (only if it was installed by ubrew)
 	caskroom_cask_dir := fmt.tprintf("%s/%s", CASKROOM_DIR, flat)
 	if os.is_dir(caskroom_cask_dir) {
-		_ = os.remove_all(caskroom_cask_dir)
+		has_versions := false
+		if v_infos, v_err := os.read_directory_by_path(caskroom_cask_dir, -1, context.temp_allocator); v_err == nil {
+			for v_info in v_infos {
+				if v_info.type == .Directory {
+					has_versions = true
+					break
+				}
+			}
+		}
+		if has_versions {
+			_ = os.remove_all(caskroom_cask_dir)
+		}
 	}
 
 	fmt.printf("==> Uninstalled cask: %s\n", c.token)
