@@ -5,8 +5,17 @@ import "core:os"
 import "core:strings"
 import "../platform"
 
-TAPS_DB_PATH :: "/opt/ubrew/db/taps.txt"
-TAPS_CACHE_DIR :: "/opt/ubrew/cache/taps"
+// Runtime tap paths. Re-bound by init_paths() after platform.init_paths().
+TAPS_DB_PATH:       string = "/opt/ubrew/db/taps.txt"
+TAPS_CACHE_DIR:     string = "/opt/ubrew/cache/taps"
+TRUSTED_TAPS_FILE:  string = "/opt/ubrew/db/trusted_taps.txt"
+
+init_paths :: proc() {
+	root := platform.get_ubrew_root()
+	TAPS_DB_PATH       = fmt.aprintf("%s/db/taps.txt", root)
+	TAPS_CACHE_DIR     = fmt.aprintf("%s/cache/taps", root)
+	TRUSTED_TAPS_FILE  = fmt.aprintf("%s/db/trusted_taps.txt", root)
+}
 
 // Tap represents a tapped 3rd-party Homebrew tap repository.
 Tap :: struct {
@@ -38,40 +47,78 @@ destroy_read_tap_entry :: proc(e: Read_Tap_Entry) {
 // taps added without a URL).
 read_taps :: proc() -> (taps: [dynamic]Read_Tap_Entry) {
 	taps = make([dynamic]Read_Tap_Entry, context.allocator)
-	if !os.is_file(TAPS_DB_PATH) {
-		return taps
-	}
-	data, read_err := os.read_entire_file(TAPS_DB_PATH, context.allocator)
-	if read_err != nil {
-		return taps
-	}
-	defer delete(data)
+	if os.is_file(TAPS_DB_PATH) {
+		if data, read_err := os.read_entire_file(TAPS_DB_PATH, context.allocator); read_err == nil {
+			defer delete(data)
 
-	lines := strings.split(string(data), "\n", context.temp_allocator)
-	for line in lines {
-		trimmed := strings.trim_space(line)
-		if len(trimmed) == 0 {
-			continue
-		}
-		// Format: "name" or "name<TAB>url"
-		parts := strings.split(trimmed, "\t", context.temp_allocator)
-		name := strings.trim_space(parts[0])
-		url := ""
-		if len(parts) > 1 {
-			url = strings.trim_space(parts[1])
-		}
-		if len(name) > 0 {
-			append(&taps, Read_Tap_Entry{
-				name = strings.clone(name, context.allocator),
-				url  = strings.clone(url, context.allocator),
-			})
+			lines := strings.split(string(data), "\n", context.temp_allocator)
+			for line in lines {
+				trimmed := strings.trim_space(line)
+				if len(trimmed) == 0 {
+					continue
+				}
+				// Format: "name" or "name<TAB>url"
+				parts := strings.split(trimmed, "\t", context.temp_allocator)
+				name := strings.trim_space(parts[0])
+				url := ""
+				if len(parts) > 1 {
+					url = strings.trim_space(parts[1])
+				}
+				if len(name) > 0 {
+					append(&taps, Read_Tap_Entry{
+						name = strings.clone(name, context.allocator),
+						url  = strings.clone(url, context.allocator),
+					})
+				}
+			}
 		}
 	}
+
+	// Discover local Homebrew taps at $HOMEBREW_PREFIX/Homebrew/Library/Taps/user/repo
+	hb_prefix := platform.get_homebrew_prefix()
+	taps_dir := fmt.tprintf("%s/Homebrew/Library/Taps", hb_prefix)
+	if os.is_dir(taps_dir) {
+		if user_infos, u_err := os.read_directory_by_path(taps_dir, -1, context.allocator); u_err == nil {
+			defer os.file_info_slice_delete(user_infos, context.allocator)
+			for u_info in user_infos {
+				if u_info.type != .Directory do continue
+				user_dir := u_info.fullpath
+				user_name := u_info.name
+				if repo_infos, r_err := os.read_directory_by_path(user_dir, -1, context.allocator); r_err == nil {
+					defer os.file_info_slice_delete(repo_infos, context.allocator)
+					for r_info in repo_infos {
+						if r_info.type != .Directory do continue
+						repo_folder := r_info.name
+						clean_repo := repo_folder
+						if strings.has_prefix(repo_folder, "homebrew-") {
+							clean_repo = repo_folder[9:]
+						}
+						tap_name := fmt.tprintf("%s/%s", user_name, clean_repo)
+						already := false
+						for t in taps {
+							if t.name == tap_name {
+								already = true
+								break
+							}
+						}
+						if !already {
+							append(&taps, Read_Tap_Entry{
+								name = strings.clone(tap_name, context.allocator),
+								url  = "",
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return taps
 }
 
 write_taps :: proc(taps: [dynamic]Read_Tap_Entry) -> bool {
-	_ = os.make_directory_all("/opt/ubrew/db", os.perm(0o755))
+	db_dir := fmt.tprintf("%s/db", platform.get_ubrew_root())
+	_ = os.make_directory_all(db_dir, os.perm(0o755))
 
 	b := strings.builder_make(context.temp_allocator)
 	for t in taps {
@@ -189,66 +236,71 @@ derive_branch_from_url :: proc(url: string) -> string {
 		return strings.clone("main", context.allocator)
 	}
 
-	// Convert https://github.com/user/repo[.git] -> api url.
-	// Use context.temp_allocator for intermediate strings so they are
-	// reclaimed at scope exit.
-	api_url, _ := strings.replace_all(url, "https://github.com/", "https://api.github.com/repos/", allocator = context.temp_allocator)
-	api_url, _ = strings.replace_all(api_url, "http://github.com/", "https://api.github.com/repos/", allocator = context.temp_allocator)
-	if strings.has_suffix(api_url, ".git") {
-		api_url = api_url[:len(api_url) - 4]
-	}
-	api_url = strings.concatenate({api_url, "?ref=default"}, context.temp_allocator)
-
-	temp_f, terr := os.create_temp_file("", "ubrew_tap_branch_*.json")
-	if terr != nil {
-		return strings.clone("main", context.allocator)
-	}
-	// `os.name` returns a string view into the File struct; cloning here
-	// keeps the path valid after we close the handle.
-	temp_file := strings.clone(os.name(temp_f), context.allocator)
-	defer delete(temp_file)
-	defer os.remove(temp_file)
-	os.close(temp_f)
-
-	cmd_args := []string{
-		"curl",
-		"-sfL",
-		"--no-progress-meter",
-		"-H", "Accept: application/vnd.github+json",
-		api_url,
-		"-o", temp_file,
-	}
-	if !platform.exec_cmd("curl", cmd_args) {
-		return strings.clone("main", context.allocator)
+	repo := ""
+	if strings.has_prefix(url, "https://github.com/") {
+		repo = url[len("https://github.com/"):]
+	} else if strings.has_prefix(url, "http://github.com/") {
+		repo = url[len("http://github.com/"):]
+	} else if strings.has_prefix(url, "git@github.com:") {
+		repo = url[len("git@github.com:"):]
 	}
 
-	data, read_err := os.read_entire_file(temp_file, context.allocator)
-	if read_err != nil {
+	if len(repo) == 0 {
 		return strings.clone("main", context.allocator)
 	}
-	defer delete(data)
+	if strings.has_suffix(repo, ".git") {
+		repo = repo[:len(repo) - 4]
+	}
 
-	// Look for "default_branch":"<name>" in the response.
-	marker := strings.index(string(data), "\"default_branch\"")
-	if marker < 0 {
-		return strings.clone("main", context.allocator)
+	repo_candidates := make([dynamic]string, context.temp_allocator)
+	defer delete(repo_candidates)
+	append(&repo_candidates, repo)
+
+	if slash := strings.index(repo, "/"); slash >= 0 {
+		user := repo[:slash]
+		r := repo[slash + 1:]
+		if !strings.has_prefix(r, "homebrew-") {
+			append(&repo_candidates, fmt.tprintf("%s/homebrew-%s", user, r))
+		}
 	}
-	rest := string(data[marker:])
-	colon_idx := strings.index(rest, ":")
-	if colon_idx < 0 {
-		return strings.clone("main", context.allocator)
+
+	for candidate in repo_candidates {
+		api_url := fmt.tprintf("https://api.github.com/repos/%s?ref=default", candidate)
+
+		temp_f, terr := os.create_temp_file("", "ubrew_tap_branch_*.json")
+		if terr != nil do continue
+		temp_file := strings.clone(os.name(temp_f), context.temp_allocator)
+		os.close(temp_f)
+		defer os.remove(temp_file)
+
+		cmd_args := []string{
+			"curl",
+			"-sfL",
+			"--no-progress-meter",
+			"-H", "Accept: application/vnd.github+json",
+			api_url,
+			"-o", temp_file,
+		}
+		if !platform.exec_cmd("curl", cmd_args) do continue
+
+		data, read_err := os.read_entire_file(temp_file, context.temp_allocator)
+		if read_err != nil || len(data) == 0 do continue
+
+		marker := strings.index(string(data), "\"default_branch\"")
+		if marker < 0 do continue
+		rest := string(data[marker:])
+		colon_idx := strings.index(rest, ":")
+		if colon_idx < 0 do continue
+		rest = rest[colon_idx + 1:]
+		quote_start := strings.index(rest, "\"")
+		if quote_start < 0 do continue
+		rest = rest[quote_start + 1:]
+		quote_end := strings.index(rest, "\"")
+		if quote_end < 0 do continue
+		return strings.clone(rest[:quote_end], context.allocator)
 	}
-	rest = rest[colon_idx + 1:]
-	quote_start := strings.index(rest, "\"")
-	if quote_start < 0 {
-		return strings.clone("main", context.allocator)
-	}
-	rest = rest[quote_start + 1:]
-	quote_end := strings.index(rest, "\"")
-	if quote_end < 0 {
-		return strings.clone("main", context.allocator)
-	}
-	return strings.clone(rest[:quote_end], context.allocator)
+
+	return strings.clone("main", context.allocator)
 }
 
 // derive_branches_batch fires a single curl --parallel for all GitHub URLs
@@ -481,38 +533,51 @@ fetch_formula_ruby :: proc(t: Tap, formula_name: string) -> (contents: string, o
 	return "", false
 }
 
-TRUSTED_TAPS_FILE :: "/opt/ubrew/db/trusted_taps.txt"
-
 trusted_taps_load :: proc() -> ([dynamic]string, bool) {
 	names := make([dynamic]string, context.allocator)
-	data, rerr := os.read_entire_file(TRUSTED_TAPS_FILE, context.allocator)
-	if rerr != nil {
-		return names, true
-	}
-	if len(data) == 0 {
-		return names, false
-	}
-	defer delete(data)
-	text := string(data)
-	start := 0
-	for start < len(text) {
-		end := start
-		for end < len(text) && text[end] != '\n' {
-			end += 1
-		}
-		if end > start {
-			line := strings.trim_space(text[start:end])
-			if len(line) > 0 {
-				append(&names, strings.clone(line, context.allocator))
+
+	load_file :: proc(path: string, names: ^[dynamic]string) {
+		data, rerr := os.read_entire_file(path, context.allocator)
+		if rerr != nil || len(data) == 0 do return
+		defer delete(data)
+		text := string(data)
+		start := 0
+		for start < len(text) {
+			end := start
+			for end < len(text) && text[end] != '\n' {
+				end += 1
 			}
+			if end > start {
+				line := strings.trim_space(text[start:end])
+				if len(line) > 0 && !strings.has_prefix(line, "#") {
+					already := false
+					for n in names^ {
+						if n == line {
+							already = true
+							break
+						}
+					}
+					if !already {
+						append(names, strings.clone(line, context.allocator))
+					}
+				}
+			}
+			start = end + 1
 		}
-		start = end + 1
 	}
+
+	load_file(TRUSTED_TAPS_FILE, &names)
+
+	hb_prefix := platform.get_homebrew_prefix()
+	hb_trusted_path := fmt.tprintf("%s/etc/homebrew/trusted_taps", hb_prefix)
+	load_file(hb_trusted_path, &names)
+
 	return names, false
 }
 
 trusted_taps_save :: proc(names: [dynamic]string) {
-	_ = os.make_directory_all("/opt/ubrew/db", os.perm(0o755))
+	db_dir := fmt.tprintf("%s/db", platform.get_ubrew_root())
+	_ = os.make_directory_all(db_dir, os.perm(0o755))
 	buf: strings.Builder
 	strings.builder_init(&buf)
 	for name in names {
@@ -528,8 +593,17 @@ tap_is_trusted :: proc(name: string) -> bool {
 	if strings.has_prefix(name, "homebrew/") {
 		return true
 	}
+	no_require := os.get_env("HOMEBREW_NO_REQUIRE_TAP_TRUST", context.temp_allocator)
+	if no_require == "1" || strings.to_lower(no_require, context.temp_allocator) == "true" || strings.to_lower(no_require, context.temp_allocator) == "yes" {
+		return true
+	}
 	names, _ := trusted_taps_load()
-	defer delete(names)
+	defer {
+		for n in names {
+			delete(n)
+		}
+		delete(names)
+	}
 	for n in names {
 		if n == name {
 			return true
@@ -552,7 +626,8 @@ tap_trust :: proc(name: string) -> bool {
 			return true
 		}
 	}
-	_ = os.make_directory_all("/opt/ubrew/db", os.perm(0o755))
+	db_dir := fmt.tprintf("%s/db", platform.get_ubrew_root())
+	_ = os.make_directory_all(db_dir, os.perm(0o755))
 	append(&names, strings.clone(name, context.allocator))
 	trusted_taps_save(names)
 	return true
@@ -597,8 +672,61 @@ prompt_and_trust_tap :: proc(name: string) -> bool {
 	return false
 }
 
+// print_untrusted_taps_warning prints a Homebrew-style batch warning when any
+// tapped repositories are not trusted. Returns true if a warning was printed.
+// Honors HOMEBREW_NO_REQUIRE_TAP_TRUST (no warning when trust checks disabled).
+print_untrusted_taps_warning :: proc() -> bool {
+	no_require := os.get_env("HOMEBREW_NO_REQUIRE_TAP_TRUST", context.temp_allocator)
+	lower := strings.to_lower(no_require, context.temp_allocator)
+	if no_require == "1" || lower == "true" || lower == "yes" {
+		return false
+	}
+
+	taps := read_taps()
+	defer {
+		for t in taps {
+			destroy_read_tap_entry(t)
+		}
+		delete(taps)
+	}
+
+	untrusted := make([dynamic]string, context.temp_allocator)
+	defer delete(untrusted)
+	for t in taps {
+		if !tap_is_trusted(t.name) {
+			append(&untrusted, strings.clone(t.name, context.temp_allocator))
+		}
+	}
+
+	if len(untrusted) == 0 {
+		return false
+	}
+
+	fmt.println("Warning: The following taps are not trusted:")
+	for name in untrusted {
+		fmt.printf("  %s\n", name)
+	}
+	fmt.println("")
+	fmt.println("ubrew is currently ignoring formulae, casks and commands from these taps because tap trust is required.")
+	fmt.println("")
+
+	fmt.println("Untap them with:")
+	untap_args := strings.join(untrusted[:], " ", context.temp_allocator)
+	fmt.printf("  ubrew untap %s\n", untap_args)
+
+	fmt.println("Trust whole taps with:")
+	trust_args := strings.join(untrusted[:], " ", context.temp_allocator)
+	fmt.printf("  ubrew tap trust %s\n", trust_args)
+
+	fmt.println("To disable trust checks:")
+	fmt.println("  export HOMEBREW_NO_REQUIRE_TAP_TRUST=1")
+	fmt.println("For more information, see:")
+	fmt.println("  https://docs.brew.sh/Tap-Trust")
+	return true
+}
+
 tap_cask_cache_path :: proc(t: Tap, cask_name: string) -> string {
-	return fmt.tprintf("%s/cache/taps/%s/Casks/%s.rb", "/opt/ubrew", t.name, cask_name)
+	return fmt.tprintf("%s/%s/Casks/%s.rb", TAPS_CACHE_DIR, t.name, cask_name)
 }
 
 fetch_cask_ruby :: proc(t: Tap, cask_name: string) -> (string, bool) {
