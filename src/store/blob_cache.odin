@@ -3,7 +3,15 @@ package store
 import "core:os"
 import "core:fmt"
 
-BLOBS_DIR :: "/opt/ubrew/cache/blobs"
+BLOBS_DIR := "/opt/ubrew/cache/blobs"
+
+init_blob_paths :: proc() {
+	p := os.get_env("UBREW_ROOT", context.temp_allocator)
+	if p == "" {
+		p = "/opt/ubrew"
+	}
+	BLOBS_DIR = fmt.aprintf("%s/cache/blobs", p)
+}
 
 blob_path :: proc(sha256: string, buf: []u8) -> string {
 	assert(len(buf) >= len(BLOBS_DIR) + 1 + len(sha256), "Buffer too small for blob path")

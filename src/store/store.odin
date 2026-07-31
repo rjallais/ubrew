@@ -5,11 +5,17 @@ import "core:fmt"
 import "core:strings"
 import "../platform"
 
-STORE_DIR :: "/opt/ubrew/store"
-STORE_RELOCATED_DIR :: "/opt/ubrew/store-relocated"
-// Single source of truth: the canonical Cellar path lives in the
-// `platform` package, shared with `installer`.
-CELLAR_DIR :: platform.CELLAR_DIR
+// Compile-time defaults. Runtime overrides come from init_paths().
+STORE_DIR           := "/opt/ubrew/store"
+STORE_RELOCATED_DIR := "/opt/ubrew/store-relocated"
+CELLAR_DIR          := platform.DEFAULT_HOMEBREW_PREFIX + "/Cellar"
+
+init_paths :: proc() {
+	root := platform.get_ubrew_root()
+	STORE_DIR           = fmt.aprintf("%s/store", root)
+	STORE_RELOCATED_DIR = fmt.aprintf("%s/store-relocated", root)
+	CELLAR_DIR          = strings.clone(platform.get_cellar_dir(), context.allocator)
+}
 
 store_entry_path :: proc(sha256: string, buf: []u8) -> string {
 	if !is_valid_sha256(sha256) {

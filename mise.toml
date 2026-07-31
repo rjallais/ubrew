@@ -1,5 +1,5 @@
 [tools]
-odin = "dev-2026-06"
+odin = "dev-2026-07a"
 
 [env]
 UBREW_TELEMETRY = "0" # Disable telemetry in development environments
@@ -69,8 +69,8 @@ sources = ["src/**/*.odin"]
 outputs = ["ubrew_portable"]
 
 [tasks.build-prod]
-description = "Build ubrew for production: aggressive opts + LTO + release linker (requires lld+lto:thin; slowest build, fastest binary)"
-run = "odin build src -out:ubrew_prod -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native -linker:lld -lto:thin -reloc-mode:pic -use-single-module"
+description = "Build ubrew for production: aggressive native microarch opts + disabled assertions (slowest build, fastest binary)"
+run = "odin build src -out:ubrew_prod -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native"
 depends = ["build-libsqlite"]
 sources = ["src/**/*.odin"]
 outputs = ["ubrew_prod"]

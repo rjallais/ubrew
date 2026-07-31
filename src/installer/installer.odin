@@ -8,6 +8,7 @@ import "core:strings"
 import "core:crypto/hash"
 import "core:encoding/hex"
 import "core:encoding/json"
+import "core:time"
 import "../cask"
 import "../formula"
 import "../kernel"
@@ -56,16 +57,25 @@ is_safe_to_remove_dir :: proc(path: string) -> bool {
 	return true
 }
 
+// Compile-time path constants (the historical layout).
 UBREW_ROOT :: "/opt/ubrew"
-PREFIX :: UBREW_ROOT + "/prefix"
-CACHE_DIR :: UBREW_ROOT + "/cache"
-// Point Cellar and Caskroom to the official Homebrew paths so both
-// package managers share the same installation directories, avoiding
-// duplication and keeping brew list / ubrew list in sync.
-// The canonical definitions live in the `platform` package so that
-// `store` and `installer` share a single source of truth.
-CELLAR_DIR  :: platform.CELLAR_DIR
-CASKROOM_DIR :: platform.CASKROOM_DIR
+PREFIX     :: "/opt/ubrew/prefix"
+CACHE_DIR  :: "/opt/ubrew/cache"
+
+// Runtime-resolved Cellar / Caskroom / bin paths. Set by init_paths().
+// Defaults match the Homebrew layout so both tools stay in sync by default.
+CELLAR_DIR:   string = platform.CELLAR_DIR
+CASKROOM_DIR: string = platform.CASKROOM_DIR
+BIN_DIR:      string = platform.BIN_DIR
+
+// init_paths rebinds CELLAR_DIR / CASKROOM_DIR / BIN_DIR from the
+// environment. Must be called once at process start (main does this).
+init_paths :: proc() {
+	platform.init_paths()
+	CELLAR_DIR   = platform.cellar_dir
+	CASKROOM_DIR = platform.caskroom_dir
+	BIN_DIR      = platform.bin_dir
+}
 
 ensure_dir :: proc(path: string) -> bool {
 	if err := os.make_directory_all(path, os.perm(0o755)); err != nil {
@@ -697,6 +707,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		receipt.runtime_dependencies = deps[:]
 	}
 	_ = write_install_receipt(keg_dir, receipt)
+	_ = write_homebrew_tab(keg_dir, f, true, on_request)
 
 	if !materialized && store.is_valid_sha256(sha) {
 		_ = store.store_ensure_dir()
@@ -1053,6 +1064,7 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		receipt.runtime_dependencies = deps[:]
 	}
 	_ = write_install_receipt(keg_dir, receipt)
+	_ = write_homebrew_tab(keg_dir, f, false, on_request)
 
 	fmt.printf("==> Successful installation of %s into %s!\n", f.name, keg_dir)
 	return true
@@ -1258,7 +1270,47 @@ download_or_cache :: proc(url: string, sha256: string, dl_path: string) -> bool 
 	return true
 }
 
+// cask_host_supported checks whether the cask targets a format compatible
+// with the current host (Linux). macOS-specific download formats (.dmg,
+// .pkg) are rejected before any download or artifact processing happens,
+// avoiding wasted bandwidth and failed installation.
+cask_host_supported :: proc(c: cask.Cask) -> bool {
+	when ODIN_OS == .Linux {
+		url_lower := strings.to_lower(c.url, context.temp_allocator)
+		if strings.has_suffix(url_lower, ".dmg") || strings.has_suffix(url_lower, ".pkg") {
+			fmt.eprintf("Error: Cask '%s' downloads a macOS-only format (%s) which is not supported on Linux.\n",
+				c.token, c.url[strings.last_index_byte(c.url, '.'):])
+			return false
+		}
+
+		has_supported_artifact := false
+		has_mac_app := false
+		for art in c.artifacts {
+			#partial switch a in art {
+			case cask.Font_Artifact, cask.Wallpaper_Artifact, cask.AppImage_Artifact, cask.Binary_Artifact, cask.Generic_Artifact:
+				has_supported_artifact = true
+			case cask.App_Artifact:
+				has_mac_app = true
+			}
+		}
+
+		if !has_supported_artifact {
+			if has_mac_app {
+				fmt.eprintf("Error: Cask '%s' targets macOS (.app bundle) and is not supported on Linux.\n", c.token)
+			} else {
+				fmt.eprintf("Error: Cask '%s' contains no supported Linux artifacts (requires binary, font, wallpaper, or AppImage).\n", c.token)
+			}
+			return false
+		}
+	}
+	return true
+}
+
 install_cask :: proc(c: cask.Cask) -> bool {
+	if !cask_host_supported(c) {
+		return false
+	}
+
 	for art in c.artifacts {
 		if _, ok := art.(cask.Font_Artifact); ok {
 			return install_font_cask(c)
@@ -1299,7 +1351,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		return false
 	}
 
-	bin_dir := fmt.tprintf("%s/.local/bin", home_dir)
+	bin_dir := BIN_DIR
 	_ = os.make_directory_all(bin_dir, os.perm(0o755))
 
 	cache_dir := CACHE_DIR
@@ -1311,21 +1363,6 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		ver = "latest"
 	}
 	ver_flat, _ := strings.replace_all(ver, "/", "-", context.temp_allocator)
-
-	// Determine extension/type from URL
-	ext := ""
-	url := c.url
-	if strings.has_suffix(url, ".zip") {
-		ext = ".zip"
-	} else if strings.has_suffix(url, ".tar.gz") || strings.has_suffix(url, ".tgz") {
-		ext = ".tar.gz"
-	} else if strings.has_suffix(url, ".tar.bz2") || strings.has_suffix(url, ".tbz2") {
-		ext = ".tar.bz2"
-	} else if strings.has_suffix(url, ".tar.xz") || strings.has_suffix(url, ".txz") {
-		ext = ".tar.xz"
-	} else if strings.has_suffix(url, ".tar.zst") || strings.has_suffix(url, ".tar.zstd") {
-		ext = ".tar.zst"
-	}
 
 	dl_path := cask_download_path(c)
 	fmt.printf("==> Downloading binary cask: %s\n", c.token)
@@ -1341,76 +1378,19 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	_ = os.remove_all(extract_dir)
 	_ = os.make_directory_all(extract_dir, os.perm(0o755))
 
-	if ext == "" {
-		// Probe the downloaded file to detect archive type via file magic
-		probe_args := []string{"file", "--brief", dl_path}
-		probe_buf: [512]u8
-		probe_out, _ := platform.exec_cmd_capture("file", probe_args, probe_buf[:])
-		probe_lower := strings.to_lower(probe_out, context.temp_allocator)
-
-		if strings.contains(probe_lower, "gzip") {
-			ext = ".tar.gz"
-		} else if strings.contains(probe_lower, "xz") {
-			ext = ".tar.xz"
-		} else if strings.contains(probe_lower, "bzip2") {
-			ext = ".tar.bz2"
-		} else if strings.contains(probe_lower, "zstandard") || strings.contains(probe_lower, "zstd") {
-			ext = ".tar.zst"
-		} else if strings.contains(probe_lower, "zip archive") {
-			ext = ".zip"
-		}
-	}
-
-	if ext == "" {
-		// Single standalone binary
-		// Stage into Caskroom
-		stage_dst := fmt.tprintf("%s/%s", extract_dir, os.base(url))
+	format := detect_package_format(dl_path)
+	if format == .Unknown {
+		// Single standalone binary stage
+		stage_dst := fmt.tprintf("%s/%s", extract_dir, os.base(c.url))
 		if err := os.copy_file(stage_dst, dl_path); err != nil {
 			fmt.printf("Error: failed staging binary to Caskroom: %v\n", err)
 			return false
 		}
 	} else {
-		// Archive — extract to Caskroom
 		fmt.printf("==> Extracting to: %s\n", extract_dir)
-		if ext == ".zip" {
-			cmd_ex := fmt.tprintf("unzip -q \"%s\" -d \"%s\"", dl_path, extract_dir)
-			cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-			if libc.system(cmd_ex_cstr) != 0 {
-				fmt.println("Error: unzip failed.")
-				return false
-			}
-		} else if ext == ".tar.gz" {
-			cmd_ex := fmt.tprintf("tar -xzf \"%s\" -C \"%s\"", dl_path, extract_dir)
-			cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-			if libc.system(cmd_ex_cstr) != 0 {
-				fmt.println("Error: tar extraction failed.")
-				return false
-			}
-		} else if ext == ".tar.bz2" {
-			cmd_ex := fmt.tprintf("tar -xjf \"%s\" -C \"%s\"", dl_path, extract_dir)
-			cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-			if libc.system(cmd_ex_cstr) != 0 {
-				fmt.println("Error: tar extraction failed.")
-				return false
-			}
-		} else if ext == ".tar.xz" {
-			cmd_ex := fmt.tprintf("tar -xJf \"%s\" -C \"%s\"", dl_path, extract_dir)
-			cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-			if libc.system(cmd_ex_cstr) != 0 {
-				fmt.println("Error: tar extraction failed.")
-				return false
-			}
-		} else if ext == ".tar.zst" {
-			cmd_ex := fmt.tprintf("tar --use-compress-program=unzstd -xf \"%s\" -C \"%s\" 2>/dev/null", dl_path, extract_dir)
-			cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-			if libc.system(cmd_ex_cstr) != 0 {
-				cmd_ex_plain := fmt.tprintf("tar -xf \"%s\" -C \"%s\"", dl_path, extract_dir)
-				cmd_ex_plain_cstr := strings.clone_to_cstring(cmd_ex_plain, context.temp_allocator)
-				if libc.system(cmd_ex_plain_cstr) != 0 {
-					fmt.println("Error: zstd tar extraction failed.")
-					return false
-				}
-			}
+		if !extract_package(dl_path, extract_dir, format) {
+			fmt.printf("Error: Extraction failed for package format (%v).\n", format)
+			return false
 		}
 	}
 
@@ -1423,7 +1403,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 				src_rel = resolve_arch_placeholders(ba.target)
 			}
 			if src_rel == "" {
-				src_rel = os.base(url)
+				src_rel = os.base(c.url)
 			}
 			target_name := resolve_arch_placeholders(ba.target)
 			if target_name == "" {
@@ -1963,7 +1943,7 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 		return false
 	}
 
-	appimage_dir := fmt.tprintf("%s/.local/bin", home_dir)
+	appimage_dir := BIN_DIR
 	_ = os.make_directory_all(appimage_dir, os.perm(0o755))
 
 	cache_dir := CACHE_DIR
@@ -2180,7 +2160,7 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	if is_appimage {
-		appimage_dir := fmt.tprintf("%s/.local/bin", home_dir)
+		appimage_dir := BIN_DIR
 		for art in c.artifacts {
 			#partial switch a in art {
 			case cask.AppImage_Artifact:
@@ -2210,7 +2190,7 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	if is_binary {
-		bin_dir := fmt.tprintf("%s/.local/bin", home_dir)
+		bin_dir := BIN_DIR
 		for art in c.artifacts {
 			if ba, ok := art.(cask.Binary_Artifact); ok {
 				target_name := resolve_arch_placeholders(ba.target)
@@ -2293,12 +2273,269 @@ destroy_install_receipt :: proc(r: Install_Receipt) {
 	delete(r.runtime_dependencies)
 }
 
+// Homebrew_Tab_Receipt is a Homebrew-compatible tab structure that
+// ubrew writes to TAB_FORMULA.json in each keg directory.
+// This allows `brew list`, `brew info`, and `brew autoremove` to
+// see ubrew-installed packages as first-class citizens.
+Homebrew_Tab_Receipt :: struct {
+	homebrew_version:     string `json:"homebrew_version"`,
+	tabfile:              string `json:"tabfile"`,
+	name:                 string `json:"name"`,
+	version:              string `json:"version"`,
+	homebrew_prefix:      string `json:"homebrew_prefix"`,
+	homebrew_cellar:      string `json:"homebrew_cellar"`,
+	installed_on_request: bool   `json:"installed_on_request"`,
+	poured_from_bottle:   bool   `json:"poured_from_bottle"`,
+	built_as_bottle:      bool   `json:"built_as_bottle"`,
+	tap:                  string `json:"tap"`,
+	billing_tap:          string `json:"billing_tap"`,
+	pins:                 []string `json:"pins"`,
+	time:                 int `json:"time"`,
+	runtime_dependencies: []Homebrew_Tab_Dep `json:"runtime_dependencies"`,
+	source:               Homebrew_Tab_Source `json:"source"`,
+	link_overwrite:       bool `json:"link_overwrite"`,
+	link_keg:             bool `json:"link_keg"`,
+	head:                 bool `json:"head"`,
+	oldname:              string `json:"oldname"`,
+	aliases:              []string `json:"aliases"`,
+	installed_as_dependency: bool `json:"installed_as_dependency"`,
+	installed_on_request_explicit: bool `json:"installed_on_request_explicit"`,
+	changed_options:      []string `json:"changed_options"`,
+	desc:                 string `json:"desc"`,
+	license:              string `json:"license"`,
+	homepage:             string `json:"homepage"`,
+	keg_only:             bool `json:"keg_only"`,
+	keg_only_reason:      string `json:"keg_only_reason"`,
+	bottle:               Homebrew_Tab_Bottle `json:"bottle"`,
+	language:             map[string]string `json:"language"`,
+	compilation_deps:     []Homebrew_Tab_Dep `json:"compilation_deps"`,
+	tests_deps:           []Homebrew_Tab_Dep `json:"tests_deps"`,
+	optional_deps:        []Homebrew_Tab_Dep `json:"optional_deps"`,
+	recommended_deps:     []Homebrew_Tab_Dep `json:"recommended_deps"`,
+}
+
+Homebrew_Tab_Dep :: struct {
+	full_name: string `json:"full_name"`,
+	version:   string `json:"version"`,
+	revision:  int    `json:"revision"`,
+	pkg_version: string `json:"pkg_version"`,
+	declared_directly: bool `json:"declared_directly"`,
+	paths: []string `json:"paths"`,
+}
+
+Homebrew_Tab_Source :: struct {
+	path: string `json:"path"`,
+	tap:  string `json:"tap"`,
+	spec: string `json:"spec"`,
+	versions: map[string]string `json:"versions"`,
+}
+
+Homebrew_Tab_Bottle :: struct {
+	stable: Homebrew_Tab_Bottle_Stable `json:"stable"`,
+}
+
+Homebrew_Tab_Bottle_Stable :: struct {
+	rebuild: int `json:"rebuild"`,
+	cellar:  string `json:"cellar"`,
+	root_url: string `json:"root_url"`,
+	files: map[string]Homebrew_Tab_Bottle_File `json:"files"`,
+}
+
+Homebrew_Tab_Bottle_File :: struct {
+	cellar:  string `json:"cellar"`,
+	url:     string `json:"url"`,
+	sha256:  string `json:"sha256"`,
+}
+
+build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottle: bool, on_request: bool) -> Homebrew_Tab_Receipt {
+	tab := Homebrew_Tab_Receipt {
+		homebrew_version = "ubrew 0.1.0",
+		tabfile            = fmt.tprintf("%s/TAB_FORMULA.json", keg_dir),
+		name               = strings.clone(f.name, context.allocator),
+		version            = strings.clone(f.version, context.allocator),
+		homebrew_prefix    = strings.clone(PREFIX, context.allocator),
+		homebrew_cellar    = strings.clone(CELLAR_DIR, context.allocator),
+		installed_on_request = on_request,
+		poured_from_bottle   = brewed_from_bottle,
+		built_as_bottle    = brewed_from_bottle,
+		tap                = strings.clone(f.tap, context.allocator),
+		billing_tap        = "",
+		pins               = nil,
+		time               = int(time.time_to_unix(time.now())),
+		link_overwrite     = false,
+		link_keg           = false,
+		head               = false,
+		oldname            = "",
+		aliases            = nil,
+		installed_as_dependency = !on_request,
+		installed_on_request_explicit = on_request,
+		changed_options      = nil,
+		desc               = strings.clone(f.desc, context.allocator),
+		license            = "",
+		homepage           = strings.clone(f.homepage, context.allocator),
+		keg_only           = f.keg_only,
+		keg_only_reason    = "",
+		language           = nil,
+		runtime_dependencies = nil,
+		compilation_deps     = nil,
+		tests_deps           = nil,
+		optional_deps        = nil,
+		recommended_deps     = nil,
+	}
+	// runtime dependencies
+	if len(f.dependencies) > 0 {
+		deps := make([dynamic]Homebrew_Tab_Dep, context.allocator)
+		for d in f.dependencies {
+			append(&deps, Homebrew_Tab_Dep {
+				full_name = strings.clone(d, context.allocator),
+				version   = "",
+				revision  = 0,
+				pkg_version = "",
+				declared_directly = true,
+				paths = nil,
+			})
+		}
+		tab.runtime_dependencies = deps[:]
+	}
+	return tab
+}
+
+destroy_homebrew_tab_receipt :: proc(t: Homebrew_Tab_Receipt) {
+	delete(t.name)
+	delete(t.version)
+	delete(t.homebrew_prefix)
+	delete(t.homebrew_cellar)
+	delete(t.tap)
+	delete(t.desc)
+	delete(t.homepage)
+	delete(t.oldname)
+	for a in t.aliases {
+		delete(a)
+	}
+	delete(t.aliases)
+	for d in t.runtime_dependencies {
+		delete(d.full_name)
+		delete(d.version)
+		delete(d.pkg_version)
+	}
+	delete(t.runtime_dependencies)
+	for d in t.compilation_deps {
+		delete(d.full_name)
+		delete(d.version)
+		delete(d.pkg_version)
+	}
+	delete(t.compilation_deps)
+	for d in t.tests_deps {
+		delete(d.full_name)
+		delete(d.version)
+		delete(d.pkg_version)
+	}
+	delete(t.tests_deps)
+	for d in t.optional_deps {
+		delete(d.full_name)
+		delete(d.version)
+		delete(d.pkg_version)
+	}
+	delete(t.optional_deps)
+	for d in t.recommended_deps {
+		delete(d.full_name)
+		delete(d.version)
+		delete(d.pkg_version)
+	}
+	delete(t.recommended_deps)
+	delete(t.pins)
+	delete(t.language)
+	for _, &v in t.bottle.stable.files {
+		delete(v.cellar)
+		delete(v.url)
+		delete(v.sha256)
+	}
+	delete(t.bottle.stable.files)
+}
+
+write_homebrew_tab :: proc(keg_dir: string, f: formula.Formula, brewed_from_bottle: bool, on_request: bool) -> bool {
+	t := build_tab_receipt(f, keg_dir, brewed_from_bottle, on_request)
+	defer destroy_homebrew_tab_receipt(t)
+	payload, merr := json.marshal(t)
+	if merr != nil {
+		fmt.printf("Warning: failed to marshal Homebrew tab for %s: %v\n", f.name, merr)
+		return false
+	}
+	defer delete(payload)
+	// Homebrew reads INSTALL_RECEIPT.json (the Tab class filename).
+	// We also write TAB_FORMULA.json as a secondary copy for tooling
+	// that looks for that name, but brew itself uses INSTALL_RECEIPT.json.
+	// The enhanced fields below are merged into INSTALL_RECEIPT via
+	// write_install_receipt; this secondary file is the full tab shape.
+	tab_path := fmt.tprintf("%s/TAB_FORMULA.json", keg_dir)
+	werr := os.write_entire_file(tab_path, payload)
+	if werr != nil {
+		fmt.printf("Warning: failed to write Homebrew tab to %s: %v\n", tab_path, werr)
+		return false
+	}
+	return true
+}
+
 write_install_receipt :: proc(keg_dir: string, r: Install_Receipt) -> bool {
 	// Use the Odin core json marshaller. Field names in the struct match
 	// the desired JSON keys; `json.marshal` produces RFC8259-compliant
 	// output with proper string escaping (unlike `fmt.tprintf("%q", ...)`
 	// which emits Odin string-literal syntax).
-	payload, merr := json.marshal(r)
+	//
+	// Homebrew also uses INSTALL_RECEIPT.json as its Tab filename. We
+	// emit a superset that includes ubrew fields plus the Homebrew Tab
+	// keys that brew list/info/autoremove expect.
+	Brew_Compat_Receipt :: struct {
+		// ubrew fields
+		name:                 string,
+		version:              string,
+		installed_on_request: bool,
+		poured_from_bottle:   bool,
+		tap:                  string,
+		runtime_dependencies: []string,
+		// Homebrew Tab fields
+		homebrew_version:       string,
+		built_as_bottle:        bool,
+		installed_as_dependency: bool,
+		loaded_from_api:        bool,
+		time:                   i64,
+		used_options:           []string,
+		unused_options:         []string,
+		compiler:               string,
+		source:                 struct {
+			path: string,
+			tap:  string,
+			spec: string,
+			versions: struct {
+				stable: string,
+			},
+		},
+	}
+	compat := Brew_Compat_Receipt{
+		name                 = r.name,
+		version              = r.version,
+		installed_on_request = r.installed_on_request,
+		poured_from_bottle   = r.poured_from_bottle,
+		tap                  = r.tap,
+		runtime_dependencies = r.runtime_dependencies,
+		homebrew_version     = "ubrew-0.1.0",
+		built_as_bottle      = r.poured_from_bottle,
+		installed_as_dependency = !r.installed_on_request,
+		loaded_from_api      = true,
+		time                 = time.time_to_unix(time.now()),
+		used_options         = nil,
+		unused_options       = nil,
+		compiler             = "clang",
+		source = {
+			path = "",
+			tap  = r.tap != "" ? r.tap : "homebrew/core",
+			spec = "stable",
+			versions = {
+				stable = r.version,
+			},
+		},
+	}
+	payload, merr := json.marshal(compat)
 	if merr != nil {
 		fmt.printf("Warning: failed to marshal install receipt for %s: %v\n", r.name, merr)
 		return false

@@ -26,4 +26,5 @@ Formula :: struct {
     tap:                      string,
     aliases:                  []string,
     keg_only:                 bool,
+    keg_only_reason:          string,
 }
