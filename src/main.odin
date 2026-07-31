@@ -72,20 +72,20 @@ print_usage :: proc() {
 ensure_ubrew_dirs :: proc() -> bool {
     dirs := []string{
         installer.UBREW_ROOT,
-        installer.UBREW_ROOT + "/store",
-        installer.UBREW_ROOT + "/cache",
-        installer.UBREW_ROOT + "/cache/blobs",
-        installer.UBREW_ROOT + "/cache/tmp",
+        fmt.tprintf("%s/store", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache/blobs", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache/tmp", installer.UBREW_ROOT),
         installer.PREFIX,
         installer.CELLAR_DIR,
         installer.CASKROOM_DIR,
-        installer.PREFIX + "/bin",
-        installer.PREFIX + "/opt",
-        installer.PREFIX + "/lib",
-        installer.PREFIX + "/include",
-        installer.PREFIX + "/share",
-        installer.UBREW_ROOT + "/db",
-        installer.UBREW_ROOT + "/locks",
+        fmt.tprintf("%s/bin", installer.PREFIX),
+        fmt.tprintf("%s/opt", installer.PREFIX),
+        fmt.tprintf("%s/lib", installer.PREFIX),
+        fmt.tprintf("%s/include", installer.PREFIX),
+        fmt.tprintf("%s/share", installer.PREFIX),
+        fmt.tprintf("%s/db", installer.UBREW_ROOT),
+        fmt.tprintf("%s/locks", installer.UBREW_ROOT),
     }
 
     for dir in dirs {
@@ -874,23 +874,33 @@ write_brewfile_lock :: proc(brewfile_path: string, entries: []Brewfile_Entry) {
 			ver := "latest"
 			if e.kind == "brew" {
 				keg_dir := fmt.tprintf("%s/%s", platform.get_cellar_dir(), e.name)
-				if infos, err := os.read_directory_by_path(keg_dir, -1, context.temp_allocator); err == nil {
+				allocator := context.allocator
+				if infos, err := os.read_directory_by_path(keg_dir, -1, allocator); err == nil {
+					defer os.file_info_slice_delete(infos, allocator)
+					latest := ""
 					for info in infos {
-						if os.is_dir(info.fullpath) {
-							ver = info.name
-							break
+						if info.type == .Directory && is_version_dir(info.name) {
+							if latest == "" || is_newer(info.name, latest) {
+								latest = info.name
+							}
 						}
 					}
+					if latest != "" do ver = latest
 				}
 			} else if e.kind == "cask" {
 				cask_dir := fmt.tprintf("%s/%s", platform.get_caskroom_dir(), e.name)
-				if infos, err := os.read_directory_by_path(cask_dir, -1, context.temp_allocator); err == nil {
+				allocator := context.allocator
+				if infos, err := os.read_directory_by_path(cask_dir, -1, allocator); err == nil {
+					defer os.file_info_slice_delete(infos, allocator)
+					latest := ""
 					for info in infos {
-						if os.is_dir(info.fullpath) {
-							ver = info.name
-							break
+						if info.type == .Directory && is_version_dir(info.name) {
+							if latest == "" || is_newer(info.name, latest) {
+								latest = info.name
+							}
 						}
 					}
+					if latest != "" do ver = latest
 				}
 			}
 			strings.write_string(&b, fmt.tprintf("      \"%s\": {{\n        \"version\": \"%s\"\n      }}", e.name, ver))
@@ -1025,8 +1035,14 @@ run_bundle :: proc(args: []string) {
 				// Accept and ignore
 			} else if arg == "--no-npm" || arg == "--no-dump-npm" || arg == "--no-cleanup-npm" {
 				// Accept and ignore
-			} else if arg == "--upgrade-formulae" || arg == "--jobs" || arg == "--sandbox" ||
-			          arg == "--appdir" || arg == "--appimagedir" || arg == "--fontdir" || arg == "--language" {
+			} else if arg == "--sandbox" || arg == "--upgrade-formulae" {
+				// Accept and ignore (boolean flags; never consume the next arg)
+			} else if strings.has_prefix(arg, "--jobs=") || strings.has_prefix(arg, "--appdir=") ||
+			          strings.has_prefix(arg, "--appimagedir=") || strings.has_prefix(arg, "--fontdir=") ||
+			          strings.has_prefix(arg, "--language=") || strings.has_prefix(arg, "--upgrade-formulae=") {
+				// Accept and ignore (--flag=value forms)
+			} else if arg == "--jobs" || arg == "--appdir" || arg == "--appimagedir" ||
+			          arg == "--fontdir" || arg == "--language" {
 				if i + 1 < len(args) {
 					i += 1
 				}
@@ -2503,7 +2519,7 @@ run_deps :: proc(args: []string) {
 }
 
 unlink_formula_bins :: proc(name: string) -> int {
-    bin_dir := installer.PREFIX + "/bin"
+    bin_dir := fmt.tprintf("%s/bin", installer.PREFIX)
     formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
     infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator)
     if err != nil {
@@ -3523,7 +3539,7 @@ run_where :: proc(args: []string) {
     }
 
     // The prefix bin directory is small and flat — walk it directly.
-    bin_root := installer.PREFIX + "/bin"
+    bin_root := fmt.tprintf("%s/bin", installer.PREFIX)
     if os.is_dir(bin_root) {
         w := os.walker_create(bin_root)
         defer os.walker_destroy(&w)
@@ -3550,12 +3566,12 @@ command_exists :: proc(tool: string) -> bool {
 check_directories :: proc(warnings: ^[dynamic]string) {
 	dirs := []string{
 		installer.UBREW_ROOT,
-		installer.UBREW_ROOT + "/cache",
-		installer.UBREW_ROOT + "/store",
+		fmt.tprintf("%s/cache", installer.UBREW_ROOT),
+		fmt.tprintf("%s/store", installer.UBREW_ROOT),
 		installer.PREFIX,
 		installer.CELLAR_DIR,
 		installer.CASKROOM_DIR,
-		installer.PREFIX + "/bin",
+		fmt.tprintf("%s/bin", installer.PREFIX),
 	}
 	for dir in dirs {
 		if !os.is_dir(dir) {
@@ -3574,7 +3590,7 @@ check_tools :: proc(warnings: ^[dynamic]string) {
 }
 
 check_symlinks :: proc(warnings: ^[dynamic]string) {
-	bin_dir := installer.PREFIX + "/bin"
+	bin_dir := fmt.tprintf("%s/bin", installer.PREFIX)
 	if infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator); err == nil {
 		defer os.file_info_slice_delete(infos, context.allocator)
 		for info in infos {
@@ -3593,7 +3609,7 @@ check_symlinks :: proc(warnings: ^[dynamic]string) {
 
 check_path :: proc(warnings: ^[dynamic]string) {
 	path_env := os.get_env("PATH", context.temp_allocator)
-	prefix_bin := installer.PREFIX + "/bin"
+	prefix_bin := fmt.tprintf("%s/bin", installer.PREFIX)
 	if !strings.contains(path_env, prefix_bin) {
 		append(warnings, fmt.aprintf("%s is not in PATH", prefix_bin))
 	}
@@ -3753,7 +3769,7 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
                 cleanup_broken_links_in_dir(info.fullpath, dry_run, removed, failed)
                 
                 // If directory is now empty, remove it (unless it is a root directory)
-                if info.fullpath != installer.PREFIX + "/bin" && info.fullpath != installer.PREFIX + "/lib" && info.fullpath != installer.PREFIX + "/include" && info.fullpath != installer.PREFIX + "/share" {
+                if info.fullpath != fmt.tprintf("%s/bin", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/lib", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/include", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/share", installer.PREFIX) {
                     dir_infos, dir_err := os.read_directory_by_path(info.fullpath, -1, context.allocator)
                     if dir_err == nil {
                         defer os.file_info_slice_delete(dir_infos, context.allocator)
@@ -3796,10 +3812,10 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
         }
     }
 
-    cleanup_broken_links_in_dir(installer.PREFIX + "/bin", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/lib", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/include", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/share", dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/bin", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/lib", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/include", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/share", installer.PREFIX), dry_run, removed, failed)
 }
 
 run_cleanup :: proc(args: []string) {
@@ -4068,7 +4084,7 @@ run_cleanup :: proc(args: []string) {
         }
     }
 
-    locks_dir := installer.UBREW_ROOT + "/locks"
+    locks_dir := fmt.tprintf("%s/locks", installer.UBREW_ROOT)
     if os.is_dir(locks_dir) {
         if l_infos, l_err := os.read_directory_by_path(locks_dir, -1, context.temp_allocator); l_err == nil {
             for info in l_infos {
@@ -4089,7 +4105,7 @@ run_cleanup :: proc(args: []string) {
         }
     }
 
-    cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
+    cleanup_cache_tree(fmt.tprintf("%s/cache", installer.UBREW_ROOT), dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
 
     _, h_entries := history.load(context.temp_allocator)
 
@@ -4744,6 +4760,10 @@ Upgrade_Item :: struct {
  	if (name[0] == 'v' || name[0] == 'V') && len(name) > 1 && name[1] >= '0' && name[1] <= '9' {
  		return true
  	}
+ 	// Casks with `version :latest` install into `<token>/latest`.
+ 	if name == "latest" do return true
+ 	// HEAD kegs install into `<name>/HEAD-<rev>`.
+ 	if strings.has_prefix(name, "HEAD") do return true
  	return false
  }
  
@@ -5181,9 +5201,9 @@ run_outdated :: proc(args: []string) {
 // (default 24h, HOMEBREW_AUTO_UPDATE_SECS) decides whether anything is
 // actually downloaded, so this is cheap in the common case.
 maybe_auto_update :: proc() {
-	no_auto := os.get_env("HOMEBREW_NO_AUTO_UPDATE", context.temp_allocator)
-	lower_no_auto := strings.to_lower(no_auto, context.temp_allocator)
-	if no_auto == "1" || lower_no_auto == "true" || lower_no_auto == "yes" {
+	// Homebrew semantics: setting HOMEBREW_NO_AUTO_UPDATE to ANY non-empty
+	// value disables auto-update.
+	if no_auto := os.get_env("HOMEBREW_NO_AUTO_UPDATE", context.temp_allocator); len(no_auto) > 0 {
 		return
 	}
 	// Non-interactive CI: skip to avoid surprising network traffic
@@ -5261,7 +5281,7 @@ run_update :: proc(args: []string) {
 
 	skip_api := false
 	if auto_update && !force {
-		db_path := installer.UBREW_ROOT + "/db/upstream.json"
+		db_path := fmt.tprintf("%s/db/upstream.json", installer.UBREW_ROOT)
 		if fi, err := os.stat(db_path, context.temp_allocator); err == nil {
 			now_sec := time.time_to_unix(time.now())
 			mod_sec := time.time_to_unix(fi.modification_time)
@@ -5354,27 +5374,42 @@ run_update :: proc(args: []string) {
 		// JSON arrays. Downstream code (diffing, rename-to-cache, search index)
 		// then operates on plain arrays exactly as before the JWS switch.
 		// Skip files that are empty (304 Not Modified leaves them empty).
+		//
+		// Track extraction success per list: if unwrapping fails we remove
+		// the ETag sidecar (forcing a fresh download next time) and skip the
+		// diff and cache-promotion steps for that list so we don't operate
+		// on corrupt or envelope data.
+		formula_payload_ok := temp_file_formula == ""
+		cask_payload_ok := temp_file_cask == ""
 		if temp_file_formula != "" {
 			if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
-				if !api.extract_jws_in_place(temp_file_formula) {
+				formula_payload_ok = api.extract_jws_in_place(temp_file_formula)
+				if !formula_payload_ok {
+					_ = os.remove(etag_file_f)
 					fmt.println("Warning: failed to unwrap formula.jws.json payload")
 				}
+			} else {
+				formula_payload_ok = true // 304: nothing to unwrap
 			}
 		}
 		if temp_file_cask != "" {
 			if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
-				if !api.extract_jws_in_place(temp_file_cask) {
+				cask_payload_ok = api.extract_jws_in_place(temp_file_cask)
+				if !cask_payload_ok {
+					_ = os.remove(etag_file_c)
 					fmt.println("Warning: failed to unwrap cask.jws.json payload")
 				}
+			} else {
+				cask_payload_ok = true // 304: nothing to unwrap
 			}
 		}
 
 		// 3. Download upstream.json sequentially (separate from tap probes
 		//    because -z / --time-cond would apply globally in --parallel mode
 		//    and cause GitHub API probes to return 304 Not Modified).
-		_ = os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
-		db_path := installer.UBREW_ROOT + "/db/upstream.json"
-		temp_f3, terr3 := os.create_temp_file(installer.UBREW_ROOT + "/db", "ubrew_upstream_*.json")
+		_ = os.make_directory_all(fmt.tprintf("%s/db", installer.UBREW_ROOT), os.perm(0o755))
+		db_path := fmt.tprintf("%s/db/upstream.json", installer.UBREW_ROOT)
+		temp_f3, terr3 := os.create_temp_file(fmt.tprintf("%s/db", installer.UBREW_ROOT), "ubrew_upstream_*.json")
 		if terr3 == nil {
 			temp_file_upstream = strings.clone(os.name(temp_f3), context.allocator)
 			os.close(temp_f3)
@@ -5507,19 +5542,19 @@ run_update :: proc(args: []string) {
 		// cache) so we don't list every formula/cask as "new".
 		new_formulae := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
 		new_casks := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
-		if temp_file_formula != "" && os.is_file(api.FORMULA_LIST_CACHE) {
+		if formula_payload_ok && temp_file_formula != "" && os.is_file(api.FORMULA_LIST_CACHE) {
 			old_f := api.load_api_name_map(api.FORMULA_LIST_CACHE)
 			new_formulae = api.diff_api_list_new_entries(old_f, temp_file_formula, context.temp_allocator)
 			api.destroy_api_name_map(old_f)
 		}
-		if temp_file_cask != "" && os.is_file(api.CASK_LIST_CACHE) {
+		if cask_payload_ok && temp_file_cask != "" && os.is_file(api.CASK_LIST_CACHE) {
 			old_c := api.load_api_name_map(api.CASK_LIST_CACHE)
 			new_casks = api.diff_api_list_new_entries(old_c, temp_file_cask, context.temp_allocator)
 			api.destroy_api_name_map(old_c)
 		}
 
 		// Post-process Homebrew API lists
-		if temp_file_formula != "" {
+		if formula_payload_ok && temp_file_formula != "" {
 			defer {
 				os.remove(temp_file_formula)
 				delete(temp_file_formula)
@@ -5531,7 +5566,7 @@ run_update :: proc(args: []string) {
 				}
 			}
 		}
-		if temp_file_cask != "" {
+		if cask_payload_ok && temp_file_cask != "" {
 			defer {
 				os.remove(temp_file_cask)
 				delete(temp_file_cask)
@@ -6017,7 +6052,11 @@ run_upgrade :: proc(args: []string) {
 
 	// "Would upgrade" preview (Homebrew parity wording)
 	pkg_word := len(upgrades) == 1 ? "package" : "packages"
-	fmt.printf("==> Would upgrade %d outdated %s\n", len(upgrades), pkg_word)
+	if dry_run {
+		fmt.printf("==> Would upgrade %d outdated %s\n", len(upgrades), pkg_word)
+	} else {
+		fmt.printf("==> Upgrading %d outdated %s\n", len(upgrades), pkg_word)
+	}
 	for pkg in upgrades {
 		tag := " (cask)" if pkg.is_cask else ""
 		// TODO: bottle size via HEAD request on the bottle URL (Phase 2)
@@ -6302,13 +6341,16 @@ run_uses :: proc(args: []string) {
         return
     }
 
+    allocator := context.allocator
     for fi in infos {
         if !os.is_dir(fi.fullpath) { continue }
         keg_name := fi.name
         keg_path := fmt.tprintf("%s/%s", cellar, keg_name)
-        v_infos, verr := os.read_directory_by_path(keg_path, -1, context.temp_allocator)
+        v_infos, verr := os.read_directory_by_path(keg_path, -1, allocator)
         if verr != nil { continue }
+        defer os.file_info_slice_delete(v_infos, allocator)
 
+        matched := false
         for vfi in v_infos {
             if !os.is_dir(vfi.fullpath) { continue }
             keg_ver_dir := fmt.tprintf("%s/%s", keg_path, vfi.name)
@@ -6317,13 +6359,18 @@ run_uses :: proc(args: []string) {
                 for target in targets {
                     for dep in receipt.runtime_dependencies {
                         if dep == target {
-                            fmt.println(keg_name)
+                            matched = true
                             break
                         }
                     }
+                    if matched do break
                 }
                 installer.destroy_install_receipt(receipt)
             }
+            if matched do break
+        }
+        if matched {
+            fmt.println(keg_name)
         }
     }
 }
@@ -6389,11 +6436,17 @@ run_fetch :: proc(args: []string) {
         if f, err := api.fetch_formula(target); err == nil {
             fmt.printf("==> Fetching bottle for formula %s...\n", f.name)
             if f.bottle_url != "" {
-                cache_dir := platform.get_ubrew_root()
-                cache_path := fmt.tprintf("%s/cache/%s.tar.gz", cache_dir, f.name)
-                args_curl := []string{"curl", "-sfL", f.bottle_url, "-o", cache_path}
+                _ = os.make_directory_all(installer.CACHE_DIR, os.perm(0o755))
+                cache_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
+                // Single download: progress bar, no --parallel.
+                args_curl := []string{"curl", "-#", "-fL", f.bottle_url, "-o", cache_path}
                 if platform.exec_cmd("curl", args_curl) {
-                    fmt.printf("Downloaded to: %s\n", cache_path)
+                    if installer.sha256_matches(cache_path, f.bottle_sha256) {
+                        fmt.printf("Downloaded to: %s\n", cache_path)
+                    } else {
+                        fmt.printf("Error: Checksum mismatch for %s\n", f.bottle_url)
+                        _ = os.remove(cache_path)
+                    }
                 } else {
                     fmt.printf("Error: Failed to download %s\n", f.bottle_url)
                 }
@@ -6416,11 +6469,14 @@ run_readall :: proc(args: []string) {
     
     valid_count := 0
 
-    if infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator); err == nil {
+    allocator := context.allocator
+    if infos, err := os.read_directory_by_path(cellar, -1, allocator); err == nil {
+        defer os.file_info_slice_delete(infos, allocator)
         for fi in infos {
             if !os.is_dir(fi.fullpath) do continue
             keg_path := fmt.tprintf("%s/%s", cellar, fi.name)
-            if v_infos, verr := os.read_directory_by_path(keg_path, -1, context.temp_allocator); verr == nil {
+            if v_infos, verr := os.read_directory_by_path(keg_path, -1, allocator); verr == nil {
+                defer os.file_info_slice_delete(v_infos, allocator)
                 for vfi in v_infos {
                     if !os.is_dir(vfi.fullpath) do continue
                     keg_ver_dir := fmt.tprintf("%s/%s", keg_path, vfi.name)
@@ -6433,7 +6489,8 @@ run_readall :: proc(args: []string) {
         }
     }
 
-    if infos, err := os.read_directory_by_path(caskroom, -1, context.temp_allocator); err == nil {
+    if infos, err := os.read_directory_by_path(caskroom, -1, allocator); err == nil {
+        defer os.file_info_slice_delete(infos, allocator)
         for fi in infos {
             if !os.is_dir(fi.fullpath) do continue
             valid_count += 1
@@ -6443,11 +6500,9 @@ run_readall :: proc(args: []string) {
     fmt.printf("Readall complete: %d local formula/cask entry(ies) syntax OK.\n", valid_count)
 }
 
-PINS_FILE :: installer.UBREW_ROOT + "/db/pinned.txt"
-
 read_pins :: proc() -> [dynamic]string {
     pins := make([dynamic]string, context.allocator)
-    data, err := os.read_entire_file(PINS_FILE, context.allocator)
+    data, err := os.read_entire_file(fmt.tprintf("%s/db/pinned.txt", installer.UBREW_ROOT), context.allocator)
     if err != nil {
         return pins
     }
@@ -6471,9 +6526,9 @@ destroy_pins :: proc(pins: [dynamic]string) {
 }
 
 write_pins :: proc(pins: []string) -> bool {
-    mkerr := os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
+    mkerr := os.make_directory_all(fmt.tprintf("%s/db", installer.UBREW_ROOT), os.perm(0o755))
     if mkerr != nil {
-        if !os.is_dir(installer.UBREW_ROOT + "/db") {
+        if !os.is_dir(fmt.tprintf("%s/db", installer.UBREW_ROOT)) {
             fmt.printf("ubrew: failed to create pins dir: %v\n", mkerr)
             return false
         }
@@ -6484,7 +6539,7 @@ write_pins :: proc(pins: []string) -> bool {
         strings.write_byte(&b, '\n')
     }
     payload := strings.to_string(b)
-    return os.write_entire_file(PINS_FILE, payload) == nil
+    return os.write_entire_file(fmt.tprintf("%s/db/pinned.txt", installer.UBREW_ROOT), payload) == nil
 }
 
 is_pinned :: proc(pins: [dynamic]string, name: string) -> bool {
@@ -7104,7 +7159,7 @@ run_unlink :: proc(args: []string) {
             } else {
                 if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
                     prefix := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
-                    if strings.contains(target, prefix) {
+                    if strings.has_prefix(target, prefix) {
                         if dry_run {
                             fmt.printf("Would unlink: %s\n", dst_path)
                             unlinked^ += 1
@@ -8315,13 +8370,13 @@ run_exec :: proc(args: []string) {
 // compound literal (the literal lives on the caller's stack), so the
 // lists live at file scope.
 ubrew_primary_commands := []string{
-    "autoremove", "bundle", "casks", "cleanup", "command", "command-not-found-init",
-    "commands", "completions",
-    "deps", "desc", "developer", "doctor", "exec", "formulae", "gc", "help", "history", "home",
+    "alias", "autoremove", "bundle", "casks", "cat", "cleanup", "command", "command-not-found-init",
+    "commands", "completions", "config",
+    "deps", "desc", "developer", "doctor", "exec", "fetch", "formulae", "gc", "help", "history", "home",
     "info", "init", "install", "leaves", "link", "list", "migrate", "mirror",
-    "nuke", "outdated", "pin", "reinstall", "remove", "search",
-    "shellenv", "tap", "trust", "unlink", "unpin", "untap", "untrust", "update", "upgrade",
-    "version", "where", "which-formula",
+    "nuke", "outdated", "pin", "readall", "reinstall", "remove", "search",
+    "shellenv", "tap", "trust", "unlink", "unpin", "untap", "untrust", "update", "upgrade", "uses",
+    "version", "where", "which", "which-formula",
 }
 ubrew_alias_commands := []string{
     "abv", "clean", "dr", "homepage", "i", "ln", "ls", "rm", "s",
@@ -8372,37 +8427,39 @@ run_path_query :: proc(which: string, args: []string) {
     	}
     case "--cache":
         if len(args) == 0 {
-            fmt.printf("%s/cache\n", installer.UBREW_ROOT)
+            fmt.println(installer.CACHE_DIR)
             return
         }
         for name in args {
             if strings.has_prefix(name, "-") do continue
             if f, err := api.fetch_formula(name); err == nil {
                 if f.bottle_sha256 != "" {
-                    blob_path := fmt.tprintf("%s/cache/blobs/%s", installer.UBREW_ROOT, f.bottle_sha256)
+                    blob_buf := [512]u8{}
+                    blob_path := store.blob_path(f.bottle_sha256, blob_buf[:])
                     if os.is_file(blob_path) {
                         fmt.println(blob_path)
                     } else {
-                        fmt.printf("%s/cache/%s-%s.tar.gz\n", installer.UBREW_ROOT, f.name, f.version)
+                        fmt.printf("%s/%s-%s.bottle.tar.gz\n", installer.CACHE_DIR, f.name, f.version)
                     }
                 } else {
-                    fmt.printf("%s/cache/%s-%s.tar.gz\n", installer.UBREW_ROOT, f.name, f.version)
+                    fmt.printf("%s/%s-%s.bottle.tar.gz\n", installer.CACHE_DIR, f.name, f.version)
                 }
                 api.destroy_formula(f)
             } else if c, cerr := api.fetch_cask(name); cerr == nil {
                 if c.sha256 != "" {
-                    blob_path := fmt.tprintf("%s/cache/blobs/%s", installer.UBREW_ROOT, c.sha256)
+                    blob_buf := [512]u8{}
+                    blob_path := store.blob_path(c.sha256, blob_buf[:])
                     if os.is_file(blob_path) {
                         fmt.println(blob_path)
                     } else {
-                        fmt.printf("%s/cache/%s-%s\n", installer.UBREW_ROOT, c.token, c.version)
+                        fmt.println(installer.cask_download_path(c))
                     }
                 } else {
-                    fmt.printf("%s/cache/%s-%s\n", installer.UBREW_ROOT, c.token, c.version)
+                    fmt.println(installer.cask_download_path(c))
                 }
                 api.destroy_cask(c)
             } else {
-                fmt.printf("%s/cache/%s\n", installer.UBREW_ROOT, name)
+                fmt.printf("%s/%s\n", installer.CACHE_DIR, name)
             }
         }
     case "--repo", "--repository":

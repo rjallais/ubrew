@@ -101,6 +101,9 @@ class Ubrew < Formula
   homepage "https://github.com/rjallais/ubrew"
   license "Apache-2.0"
   version "0.1.0"
+  # TODO: Replace the sha256 PLACEHOLDER values below with the actual
+  # SHA-256 checksums of the published release archives before publishing
+  # this formula.
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/rjallais/ubrew/releases/download/v0.1.0/ubrew-arm64-apple-darwin.tar.gz"
@@ -144,7 +147,7 @@ end
 
 ## Phase 6: Write Odin unit tests
 
-Create `@(test)` unit tests for the 13 modules that had Zig tests. Odin's test framework uses `@(test)` attributes and `testing.assert_*` functions.
+Create `@(test)` unit tests for the 13 modules that had Zig tests. Odin's test framework uses `@(test)` attributes. Test procedures should accept `^testing.T` and use `testing.expect` or `testing.expect_value`.
 
 | Zig Test Target | Odin Module to Test | New Test File | What to Test |
 |---|---|---|---|
@@ -169,14 +172,14 @@ Create `@(test)` unit tests for the 13 modules that had Zig tests. Odin's test f
 ```toml
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src"
+run = "odin test src -all-packages"
 ```
 
 **Update `ci.yml`** to add an Odin unit test step after build:
 
 ```yaml
 - name: Run unit tests
-  run: odin test src
+  run: odin test src -all-packages
 ```
 
 ---
@@ -233,7 +236,7 @@ Already uses "ubrew" consistently. Minor updates needed:
 7. **Phase 7** — Update smoke tests (independent, can be done in parallel)
 8. **Phase 8** — Update CONTRIBUTING.md and .gitignore (low priority)
 9. **Phase 9** — Update AGENTS.md (low priority)
-10. **Verify** — Run `odin check src`, `odin test src`, and `mise run test` to ensure nothing broke
+10. **Verify** — Run `odin check src`, `odin test src -all-packages`, and `mise run test` to ensure nothing broke
 
 ---
 

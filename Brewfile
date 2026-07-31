@@ -1,7 +1,7 @@
 tap "gromgit/brewtils"
-tap "hashicorp/tap", trusted: true
+tap "hashicorp/tap"
 tap "homebrew/core"
-tap "justrach/nanobrew", trusted: true
+tap "justrach/nanobrew"
 tap "kcl-lang/tap"
 tap "microsoft/inshellisense"
 tap "nijaru/tap"
@@ -9,7 +9,7 @@ tap "pkgxdev/made"
 tap "rjallais/ubrew"
 tap "ublue-os/experimental-tap"
 tap "ublue-os/homebrew-experimental-tap"
-tap "ublue-os/tap", trusted: true
+tap "ublue-os/tap"
 
 brew "age"
 brew "appstream"

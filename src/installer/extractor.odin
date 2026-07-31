@@ -1,9 +1,10 @@
 package installer
 
-import "core:c/libc"
+import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sys/posix"
 import "../platform"
 
 Package_Format :: enum {
@@ -50,6 +51,72 @@ detect_package_format :: proc(file_path: string) -> Package_Format {
 	return .Unknown
 }
 
+// rpm_extract_via_cpio implements the equivalent of
+//
+//	rpm2cpio <file> | (cd <dest> && cpio --no-absolute-filenames -idmv)
+//
+// using a real pipe between two forked children and execvp — no shell is
+// involved, so package paths containing `$`, quotes, or command separators
+// cannot inject commands. Paths travel as separate argv elements.
+rpm_extract_via_cpio :: proc(file_path, dest_dir: string) -> bool {
+	fds: [2]posix.FD
+	if posix.pipe(&fds) != .OK {
+		return false
+	}
+
+	make_argv :: proc(args: []string) -> [^]cstring {
+		argv := make([]cstring, len(args) + 1, context.temp_allocator)
+		for a, i in args {
+			argv[i] = strings.clone_to_cstring(a, context.temp_allocator)
+		}
+		argv[len(args)] = nil
+		return &argv[0]
+	}
+
+	// Child 1: rpm2cpio -> stdout -> pipe write end
+	pid1 := posix.fork()
+	if pid1 < 0 {
+		posix.close(fds[0])
+		posix.close(fds[1])
+		return false
+	}
+	if pid1 == 0 {
+		posix.close(fds[0])
+		posix.dup2(fds[1], posix.FD(1))
+		posix.close(fds[1])
+		posix.execvp(strings.clone_to_cstring("rpm2cpio", context.temp_allocator), make_argv([]string{"rpm2cpio", file_path}))
+		posix.exit(1)
+	}
+
+	// Child 2: cpio <- stdin <- pipe read end, chdir to dest_dir
+	pid2 := posix.fork()
+	if pid2 < 0 {
+		posix.close(fds[0])
+		posix.close(fds[1])
+		status: c.int
+		posix.waitpid(pid1, &status, nil)
+		return false
+	}
+	if pid2 == 0 {
+		posix.close(fds[1])
+		posix.dup2(fds[0], posix.FD(0))
+		posix.close(fds[0])
+		_ = posix.chdir(strings.clone_to_cstring(dest_dir, context.temp_allocator))
+		posix.execvp(strings.clone_to_cstring("cpio", context.temp_allocator), make_argv([]string{"cpio", "--no-absolute-filenames", "-idmv"}))
+		posix.exit(1)
+	}
+
+	// Parent: close both ends so the children observe EOF at the right time.
+	posix.close(fds[0])
+	posix.close(fds[1])
+
+	status1: c.int
+	status2: c.int
+	posix.waitpid(pid1, &status1, nil)
+	posix.waitpid(pid2, &status2, nil)
+	return status1 == 0 && status2 == 0
+}
+
 extract_package :: proc(file_path, dest_dir: string, format: Package_Format) -> bool {
 	switch format {
 	case .Deb:
@@ -57,51 +124,51 @@ extract_package :: proc(file_path, dest_dir: string, format: Package_Format) -> 
 		_ = os.make_directory_all(tmp_dir, os.perm(0o755))
 		defer os.remove_all(tmp_dir)
 
-		cmd_ar := fmt.tprintf("ar x \"%s\" --output=\"%s\"", file_path, tmp_dir)
-		if libc.system(strings.clone_to_cstring(cmd_ar, context.temp_allocator)) != 0 {
-			cmd_ar = fmt.tprintf("cd \"%s\" && ar x \"%s\"", tmp_dir, file_path)
-			if libc.system(strings.clone_to_cstring(cmd_ar, context.temp_allocator)) != 0 do return false
+		// Extract the .deb contents into tmp_dir using ar. GNU binutils
+		// supports --output=; on failure we return false (the previous code
+		// had a `cd`-based fallback that we cannot express without shell).
+		if !platform.exec_cmd("ar", []string{"ar", "x", file_path, fmt.tprintf("--output=%s", tmp_dir)}) {
+			return false
 		}
 
 		data_tar := ""
-		if entries, err := os.read_directory_by_path(tmp_dir, -1, context.temp_allocator); err == nil {
+		allocator := context.allocator
+		if entries, err := os.read_directory_by_path(tmp_dir, -1, allocator); err == nil {
+			defer os.file_info_slice_delete(entries, allocator)
 			for entry in entries {
 				if strings.has_prefix(entry.name, "data.tar") {
-					data_tar = entry.fullpath
+					data_tar = strings.clone(entry.fullpath, context.temp_allocator)
 					break
 				}
 			}
 		}
 		if data_tar == "" do return false
-		cmd_tar := fmt.tprintf("tar -xf \"%s\" -C \"%s\"", data_tar, dest_dir)
-		return libc.system(strings.clone_to_cstring(cmd_tar, context.temp_allocator)) == 0
+		return platform.exec_cmd("tar", []string{"tar", "-xf", data_tar, "-C", dest_dir})
 
 	case .Rpm:
-		cmd_bsdtar := fmt.tprintf("bsdtar -xf \"%s\" -C \"%s\"", file_path, dest_dir)
-		if libc.system(strings.clone_to_cstring(cmd_bsdtar, context.temp_allocator)) == 0 do return true
-		cmd_cpio := fmt.tprintf("rpm2cpio \"%s\" | (cd \"%s\" && cpio -idmv)", file_path, dest_dir)
-		return libc.system(strings.clone_to_cstring(cmd_cpio, context.temp_allocator)) == 0
+		if platform.exec_cmd("bsdtar", []string{"bsdtar", "-xf", file_path, "-C", dest_dir}) {
+			return true
+		}
+		// Fallback for RPMs: rpm2cpio piped to cpio.
+		return rpm_extract_via_cpio(file_path, dest_dir)
 
 	case .AppImage:
 		target_name := os.base(file_path)
 		dest_file := fmt.tprintf("%s/%s", dest_dir, target_name)
 		if err := os.copy_file(dest_file, file_path); err != nil do return false
-		platform.exec_cmd("chmod", []string{"chmod", "+x", dest_file})
-		return true
+		return platform.exec_cmd("chmod", []string{"chmod", "+x", dest_file})
 
 	case .SevenZip:
-		cmd_7z := fmt.tprintf("7z x -o\"%s\" \"%s\"", dest_dir, file_path)
-		if libc.system(strings.clone_to_cstring(cmd_7z, context.temp_allocator)) == 0 do return true
-		cmd_bsd := fmt.tprintf("bsdtar -xf \"%s\" -C \"%s\"", file_path, dest_dir)
-		return libc.system(strings.clone_to_cstring(cmd_bsd, context.temp_allocator)) == 0
+		if platform.exec_cmd("7z", []string{"7z", "x", fmt.tprintf("-o%s", dest_dir), file_path}) {
+			return true
+		}
+		return platform.exec_cmd("bsdtar", []string{"bsdtar", "-xf", file_path, "-C", dest_dir})
 
 	case .TarGz, .TarXz, .TarZst, .TarBz2:
-		cmd_tar := fmt.tprintf("tar -xf \"%s\" -C \"%s\"", file_path, dest_dir)
-		return libc.system(strings.clone_to_cstring(cmd_tar, context.temp_allocator)) == 0
+		return platform.exec_cmd("tar", []string{"tar", "-xf", file_path, "-C", dest_dir})
 
 	case .Zip:
-		cmd_unzip := fmt.tprintf("unzip -q \"%s\" -d \"%s\"", file_path, dest_dir)
-		return libc.system(strings.clone_to_cstring(cmd_unzip, context.temp_allocator)) == 0
+		return platform.exec_cmd("unzip", []string{"unzip", "-q", file_path, "-d", dest_dir})
 
 	case .Unknown:
 		return false

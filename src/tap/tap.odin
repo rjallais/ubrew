@@ -104,7 +104,7 @@ read_taps :: proc() -> (taps: [dynamic]Read_Tap_Entry) {
 						if !already {
 							append(&taps, Read_Tap_Entry{
 								name = strings.clone(tap_name, context.allocator),
-								url  = "",
+								url  = strings.clone("", context.allocator),
 							})
 						}
 					}
@@ -277,6 +277,8 @@ derive_branch_from_url :: proc(url: string) -> string {
 			"curl",
 			"-sfL",
 			"--no-progress-meter",
+			"--connect-timeout", "5",
+			"--max-time", "30",
 			"-H", "Accept: application/vnd.github+json",
 			api_url,
 			"-o", temp_file,
@@ -568,9 +570,15 @@ trusted_taps_load :: proc() -> ([dynamic]string, bool) {
 
 	load_file(TRUSTED_TAPS_FILE, &names)
 
-	hb_prefix := platform.get_homebrew_prefix()
-	hb_trusted_path := fmt.tprintf("%s/etc/homebrew/trusted_taps", hb_prefix)
-	load_file(hb_trusted_path, &names)
+	// Only honor the Homebrew installation's trusted_taps file when the
+	// prefix is the compile-time default. When HOMEBREW_PREFIX/UBREW_PREFIX
+	// point at a different tree, that file cannot be assumed to describe
+	// taps we should trust — third-party taps stay untrusted unless they
+	// are explicitly approved via `ubrew tap trust`.
+	if platform.get_homebrew_prefix() == platform.DEFAULT_HOMEBREW_PREFIX {
+		hb_trusted_path := fmt.tprintf("%s/etc/homebrew/trusted_taps", platform.get_homebrew_prefix())
+		load_file(hb_trusted_path, &names)
+	}
 
 	return names, false
 }

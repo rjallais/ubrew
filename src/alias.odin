@@ -6,11 +6,13 @@ import "core:strings"
 import "installer"
 import "platform"
 
-ALIAS_FILE :: installer.UBREW_ROOT + "/db/aliases.txt"
+alias_file :: proc() -> string {
+	return fmt.tprintf("%s/db/aliases.txt", installer.UBREW_ROOT)
+}
 
 read_aliases :: proc() -> map[string]string {
 	m := make(map[string]string, context.allocator)
-	data, err := os.read_entire_file(ALIAS_FILE, context.allocator)
+	data, err := os.read_entire_file(alias_file(), context.allocator)
 	if err != nil {
 		return m
 	}
@@ -31,7 +33,7 @@ read_aliases :: proc() -> map[string]string {
 }
 
 write_alias :: proc(name, target: string) -> bool {
-	dir := installer.UBREW_ROOT + "/db"
+	dir := fmt.tprintf("%s/db", installer.UBREW_ROOT)
 	_ = os.make_directory_all(dir, os.perm(0o755))
 	m := read_aliases()
 	m[name] = target
@@ -41,7 +43,7 @@ write_alias :: proc(name, target: string) -> bool {
 		strings.write_string(&b, fmt.tprintf("%s=%s\n", k, v))
 	}
 	content := strings.to_string(b)
-	return os.write_entire_file_from_string(ALIAS_FILE, content) == nil
+	return os.write_entire_file_from_string(alias_file(), content) == nil
 }
 
 run_alias :: proc(args: []string) {
@@ -61,7 +63,7 @@ run_alias :: proc(args: []string) {
 	if arg == "--edit" {
 		editor := os.get_env("EDITOR", context.temp_allocator)
 		if editor == "" do editor = "nano"
-		platform.exec_cmd(editor, []string{editor, ALIAS_FILE})
+		platform.exec_cmd(editor, []string{editor, alias_file()})
 		return
 	}
 

@@ -120,10 +120,17 @@ json_array_or_nil :: proc(obj: json.Object, key: string) -> (out: json.Array, ok
 // keys (e.g. `sequoia`, `sonoma`) for Darwin. ubrew only installs casks on
 // Linux, so only those two variants are returned.
 cask_variation_key :: proc() -> string {
-    when ODIN_ARCH == .arm64 {
-        return "arm64_linux"
+    // Linux only: the Homebrew JSON API uses `x86_64_linux` / `arm64_linux`
+    // for Linux, while Darwin variants live at the top-level url/sha256.
+    when ODIN_OS == .Linux {
+        when ODIN_ARCH == .arm64 {
+            return "arm64_linux"
+        } else {
+            return "x86_64_linux"
+        }
     } else {
-        return "x86_64_linux"
+        // On Darwin the top-level url/sha256 already carry the macOS variant.
+        return ""
     }
 }
 
@@ -220,8 +227,11 @@ fetch_cached_api_list :: proc(url, cache_path: string) -> (data: []u8, err: os.E
 
 	// The API endpoint now serves a JWS envelope; unwrap it so the cache
 	// file holds the plain JSON array (same shape downstream code expects).
+	//
+	// Ownership of `payload` transfers to the caller — the caller's
+	// `defer delete(data)` releases it exactly once (matching the cached
+	// branch upstream, which returns the freshly read cache file).
 	payload := extract_api_payload(body)
-	defer delete(payload)
 
 	if os.is_dir(API_CACHE_DIR) {
 		_ = os.write_entire_file(cache_path, payload)
@@ -781,7 +791,10 @@ fetch_cask_tap :: proc(token: string) -> (c: cask.Cask, tap_name: string, ok: bo
 		}
 	}
 	if !matched_ok && len(target_tap) > 0 && strings.count(target_tap, "/") == 1 {
-		if tap.tap_add(target_tap, "") {
+		// Never auto-tap an untrusted third-party repository: the tap must
+		// be explicitly trusted (via `ubrew tap trust`) before it is added
+		// or queried.
+		if tap.tap_is_trusted(target_tap) && tap.tap_add(target_tap, "") {
 			matched = tap.tap_from_entry(tap.Read_Tap_Entry{
 				name = target_tap,
 				url  = "",
@@ -1202,12 +1215,13 @@ current_tap_platform :: proc() -> tap.Platform {
 
 // ruby_to_formula converts a parsed Ruby_Formula into a formula.Formula
 // suitable for the install pipeline. Returns the converted formula and ok.
-// Note: `homepage` and `license` are not stored in the Formula struct; they
-// are dropped here since the install pipeline does not consume them. The
-// original Ruby_Formula is the source of truth for those fields.
+// Note: `license` is not stored in the Formula struct; it is dropped here
+// since the install pipeline does not consume it. The original Ruby_Formula
+// is the source of truth for that field.
 ruby_to_formula :: proc(rf: tap.Ruby_Formula, tap_name: string) -> (f: formula.Formula, ok: bool) {
     f.name = strings.clone(rf.name, context.allocator)
     f.desc = strings.clone(rf.desc, context.allocator)
+    f.homepage = strings.clone(rf.homepage, context.allocator)
     f.version = strings.clone(rf.version, context.allocator)
 
     f.source_url = strings.clone(rf.url, context.allocator)
@@ -1623,6 +1637,7 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
 
     f.name = strings.clone(root_obj["name"].(json.String))
     f.desc = strings.clone(root_obj["desc"].(json.String))
+    f.homepage = strings.clone(root_obj["homepage"].(json.String))
 
     versions := root_obj["versions"].(json.Object)
     f.version = strings.clone(versions["stable"].(json.String))
@@ -1813,6 +1828,7 @@ destroy_formula :: proc(f: formula.Formula) {
         delete(b)
     }
     delete(f.binaries)
+    delete(f.homepage)
     delete(f.tap)
 }
 
@@ -2262,7 +2278,7 @@ scan_local_tap_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap
 				if exists do continue
 
 				append(out, Formula_Search_Result{
-					name    = strings.clone(formula_name),
+					name    = strings.clone(token),
 					desc    = strings.clone(fmt.tprintf("(from %s tap)", t.name)),
 					version = "",
 				})
@@ -2439,7 +2455,7 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
 //   3. <github.com/user/homebrew-repo>/... (homebrew- prefix convention)
 // The first one that returns a non-empty JSON array is used.
 fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
-    cache_dir := fmt.tprintf("/opt/ubrew/cache/taps/%s", t.name)
+    cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, t.name)
     cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
     // Try the cache first if fresh.

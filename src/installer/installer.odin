@@ -57,10 +57,12 @@ is_safe_to_remove_dir :: proc(path: string) -> bool {
 	return true
 }
 
-// Compile-time path constants (the historical layout).
-UBREW_ROOT :: "/opt/ubrew"
-PREFIX     :: "/opt/ubrew/prefix"
-CACHE_DIR  :: "/opt/ubrew/cache"
+// Runtime-resolved path roots. Defaults match the historical /opt/ubrew
+// layout; rebound by init_paths() from the same platform resolution used
+// for Cellar/Caskroom so UBREW_ROOT/UBREW_PREFIX env vars take effect.
+UBREW_ROOT: string = platform.DEFAULT_UBREW_ROOT
+PREFIX:     string = platform.DEFAULT_UBREW_ROOT + "/prefix"
+CACHE_DIR:  string = platform.DEFAULT_UBREW_ROOT + "/cache"
 
 // Runtime-resolved Cellar / Caskroom / bin paths. Set by init_paths().
 // Defaults match the Homebrew layout so both tools stay in sync by default.
@@ -68,10 +70,13 @@ CELLAR_DIR:   string = platform.CELLAR_DIR
 CASKROOM_DIR: string = platform.CASKROOM_DIR
 BIN_DIR:      string = platform.BIN_DIR
 
-// init_paths rebinds CELLAR_DIR / CASKROOM_DIR / BIN_DIR from the
-// environment. Must be called once at process start (main does this).
+// init_paths rebinds the path variables from the environment via the
+// platform resolver. Must be called once at process start (main does this).
 init_paths :: proc() {
 	platform.init_paths()
+	UBREW_ROOT  = platform.get_ubrew_root()
+	PREFIX      = platform.get_ubrew_prefix()
+	CACHE_DIR   = platform.get_cache_dir()
 	CELLAR_DIR   = platform.cellar_dir
 	CASKROOM_DIR = platform.caskroom_dir
 	BIN_DIR      = platform.bin_dir
@@ -547,7 +552,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(PREFIX + "/bin") {
+	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(fmt.tprintf("%s/bin", PREFIX)) {
 		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew and the Cellar are writable by your user.")
 		return false
 	}
@@ -784,7 +789,7 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(PREFIX + "/bin") {
+	if !ensure_dir(CACHE_DIR) || !ensure_dir(CELLAR_DIR) || !ensure_dir(fmt.tprintf("%s/bin", PREFIX)) {
 		fmt.println("Error: run `sudo ubrew init`, then ensure /opt/ubrew and the Cellar are writable by your user.")
 		return false
 	}
@@ -1381,7 +1386,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	format := detect_package_format(dl_path)
 	if format == .Unknown {
 		// Single standalone binary stage
-		stage_dst := fmt.tprintf("%s/%s", extract_dir, os.base(c.url))
+		stage_dst := fmt.tprintf("%s/%s", extract_dir, url_basename(c.url))
 		if err := os.copy_file(stage_dst, dl_path); err != nil {
 			fmt.printf("Error: failed staging binary to Caskroom: %v\n", err)
 			return false
@@ -1403,7 +1408,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 				src_rel = resolve_arch_placeholders(ba.target)
 			}
 			if src_rel == "" {
-				src_rel = os.base(c.url)
+				src_rel = url_basename(c.url)
 			}
 			target_name := resolve_arch_placeholders(ba.target)
 			if target_name == "" {
@@ -2197,7 +2202,7 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 				if target_name == "" {
 					src_rel := resolve_arch_placeholders(ba.source)
 					if src_rel == "" {
-						src_rel = os.base(c.url)
+						src_rel = url_basename(c.url)
 					}
 					target_name = os.base(src_rel)
 				}
@@ -2353,7 +2358,7 @@ build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottl
 		tabfile            = fmt.tprintf("%s/TAB_FORMULA.json", keg_dir),
 		name               = strings.clone(f.name, context.allocator),
 		version            = strings.clone(f.version, context.allocator),
-		homebrew_prefix    = strings.clone(PREFIX, context.allocator),
+		homebrew_prefix    = strings.clone(platform.get_homebrew_prefix(), context.allocator),
 		homebrew_cellar    = strings.clone(CELLAR_DIR, context.allocator),
 		installed_on_request = on_request,
 		poured_from_bottle   = brewed_from_bottle,
@@ -2365,7 +2370,7 @@ build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottl
 		link_overwrite     = false,
 		link_keg           = false,
 		head               = false,
-		oldname            = "",
+		oldname            = strings.clone("", context.allocator),
 		aliases            = nil,
 		installed_as_dependency = !on_request,
 		installed_on_request_explicit = on_request,
