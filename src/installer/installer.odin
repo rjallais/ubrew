@@ -578,7 +578,11 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		already_downloaded := os.is_file(dl_path) && sha256_matches(dl_path, f.bottle_sha256)
 
 		if !already_downloaded {
-			fmt.printf("==> Downloading: %s\n", f.bottle_url)
+			if f.bottle_size > 0 {
+				fmt.printf("==> Downloading bottle (%s): %s\n", formula.format_bytes_human(f.bottle_size), f.bottle_url)
+			} else {
+				fmt.printf("==> Downloading: %s\n", f.bottle_url)
+			}
 
 			if !strings.has_prefix(f.bottle_url, "http://") && !strings.has_prefix(f.bottle_url, "https://") {
 				fmt.println("Error: Invalid bottle URL scheme.")

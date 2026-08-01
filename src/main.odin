@@ -4620,6 +4620,12 @@ print_formula :: proc(f: formula.Formula) {
 	if len(f.bottle_url) > 0 {
 		fmt.printf("Bottle:   %s\n", f.bottle_url)
 	}
+	if f.bottle_size > 0 {
+		fmt.printf("Download Size: %s\n", api.format_bytes_human(f.bottle_size))
+	}
+	if f.installed_size > 0 {
+		fmt.printf("Installed Size: %s\n", api.format_bytes_human(f.installed_size))
+	}
 	if len(f.bottle_sha256) > 0 {
 		fmt.printf("Bottle SHA256: %s\n", f.bottle_sha256)
 	}

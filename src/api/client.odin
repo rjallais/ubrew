@@ -3,6 +3,7 @@ package api
 import "core:fmt"
 import "core:os"
 import "core:encoding/json"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "core:c"
@@ -1682,8 +1683,19 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
                     target_obj := target_val.(json.Object)
                     f.bottle_url = strings.clone(target_obj["url"].(json.String))
                     f.bottle_sha256 = strings.clone(target_obj["sha256"].(json.String))
+                    if size_val, size_ok := target_obj["size"]; size_ok {
+                        if size_num, size_num_ok := size_val.(json.Integer); size_num_ok {
+                            f.bottle_size = i64(size_num)
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    if inst_val, inst_ok := root_obj["installed_size"]; inst_ok {
+        if inst_num, inst_num_ok := inst_val.(json.Integer); inst_num_ok {
+            f.installed_size = i64(inst_num)
         }
     }
 
@@ -4075,5 +4087,38 @@ warm_mixed_cache_parallel :: proc(formula_names, cask_tokens: []string) -> int {
 	}
 	_ = fetch_urls_parallel_http2(urls[:], out_files[:], nil)
 	return len(urls)
+}
+
+format_bytes_human :: proc(bytes: i64, allocator := context.temp_allocator) -> string {
+	return formula.format_bytes_human(bytes, allocator)
+}
+
+get_remote_content_length :: proc(url: string) -> i64 {
+	if len(url) == 0 do return 0
+	temp_f, terr := os.create_temp_file("", "ubrew_head_*.txt")
+	if terr != nil do return 0
+	temp_file := strings.clone(os.name(temp_f), context.temp_allocator)
+	os.close(temp_f)
+	defer os.remove(temp_file)
+
+	args := []string{"curl", "-sIL", "-X", "HEAD", url, "-o", temp_file}
+	if !platform.exec_cmd("curl", args) do return 0
+
+	data, rerr := os.read_entire_file(temp_file, context.temp_allocator)
+	if rerr != nil do return 0
+
+	lines := strings.split(string(data), "\n", context.temp_allocator)
+	for line in lines {
+		trimmed := strings.trim_space(line)
+		if strings.has_prefix(strings.to_lower(trimmed, context.temp_allocator), "content-length:") {
+			parts := strings.split(trimmed, ":", context.temp_allocator)
+			if len(parts) == 2 {
+				if val, ok := strconv.parse_int(strings.trim_space(parts[1])); ok {
+					return i64(val)
+				}
+			}
+		}
+	}
+	return 0
 }
 
