@@ -849,6 +849,9 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
     data, read_err := os.read_entire_file(cache_path, context.allocator)
     needs_download := read_err != nil || len(data) == 0
+    if !needs_download && cache_stale(cache_path, CASK_LIST_CACHE) {
+        needs_download = true
+    }
 
     if needs_download {
         if read_err == nil {
@@ -1591,6 +1594,11 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
     cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
     data, read_err := os.read_entire_file(cache_path, context.allocator)
     needs_download := read_err != nil || len(data) == 0
+    // Invalidate the per-formula cache when `ubrew update` has refreshed the
+    // bulk formula.json more recently, so version bumps are picked up.
+    if !needs_download && cache_stale(cache_path, FORMULA_LIST_CACHE) {
+        needs_download = true
+    }
 
     if needs_download {
         if read_err == nil {
@@ -2775,6 +2783,20 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
     return any_updated
 }
 
+// cache_stale returns true when the per-formula/per-cask cache file at
+// `per_cache` should be re-fetched because the bulk list at `bulk_cache`
+// (formula.json / cask.json, refreshed by `ubrew update`) is newer than it.
+// Returns false when either file is missing or the per-file is at least as
+// new as the bulk list, so first-run and pre-update paths keep using the
+// per-file they already have.
+cache_stale :: proc(per_cache, bulk_cache: string) -> bool {
+    bulk_fi, bulk_err := os.stat(bulk_cache, context.temp_allocator)
+    if bulk_err != nil do return false
+    per_fi, per_err := os.stat(per_cache, context.temp_allocator)
+    if per_err != nil do return true
+    return time.time_to_unix(bulk_fi.modification_time) > time.time_to_unix(per_fi.modification_time)
+}
+
 // warm_formulae_cache_parallel batch-fetches the per-formula JSON files
 // for `names` that are not already cached, using a single
 // --http2 --parallel curl invocation. The cached files are written to
@@ -2800,7 +2822,7 @@ warm_formulae_cache_parallel :: proc(names: []string) -> int {
         cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
         if !refresh && os.is_file(cache_path) {
             fi, fi_err := os.stat(cache_path, context.temp_allocator)
-            if fi_err == nil && fi.size > 0 {
+            if fi_err == nil && fi.size > 0 && !cache_stale(cache_path, FORMULA_LIST_CACHE) {
                 continue
             }
         }
@@ -2832,7 +2854,7 @@ warm_casks_cache_parallel :: proc(tokens: []string) -> int {
 		cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
 		if !refresh && os.is_file(cache_path) {
 			fi, fi_err := os.stat(cache_path, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
+			if fi_err == nil && fi.size > 0 && !cache_stale(cache_path, CASK_LIST_CACHE) {
 				continue
 			}
 		}

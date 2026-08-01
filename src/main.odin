@@ -4984,6 +4984,30 @@ run_outdated :: proc(args: []string) {
 
 	outdated_items := make([dynamic]Outdated_Item, context.temp_allocator)
 
+	// Warm the per-formula / per-cask caches in parallel so the first run
+	// after a `brew update` doesn't hit sequential per-package downloads
+	// (which can take 30+ seconds). Stale caches (older than the bulk
+	// formula.json / cask.json dumps) are re-fetched automatically by the
+	// warm helpers.
+	if !cask_only {
+		f_names := make([dynamic]string, 0, len(installed_formulae), context.temp_allocator)
+		for pkg in installed_formulae {
+			if matches_target(pkg.name, targets[:]) && !strings.contains(pkg.name, "/") {
+				append(&f_names, pkg.name)
+			}
+		}
+		_ = api.warm_formulae_cache_parallel(f_names[:])
+	}
+	if !formula_only {
+		c_tokens := make([dynamic]string, 0, len(installed_casks), context.temp_allocator)
+		for pkg in installed_casks {
+			if matches_target(pkg.name, targets[:]) {
+				append(&c_tokens, pkg.name)
+			}
+		}
+		_ = api.warm_casks_cache_parallel(c_tokens[:])
+	}
+
 	cellar_dir := installer.CELLAR_DIR
 	caskroom_dir := installer.CASKROOM_DIR
 
