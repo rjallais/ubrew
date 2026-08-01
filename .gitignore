@@ -3,7 +3,12 @@ ubrew
 ubrew_portable
 ubrew_prod
 ubrew_dbg
+ubrew-check
+ubrew-nobc
 /tmp/
+
+# local-only agent skills/config (never commit)
+.agents/
 
 # local-only SSH keys (never commit)
 data/.ssh/
