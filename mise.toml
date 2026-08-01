@@ -36,7 +36,7 @@ if [ ! -f "$CACHE/sqlite3.c" ]; then
   echo "Cached to $CACHE/"
 fi
 
-cc -c -O2 -fPIC -DSQLITE_ENABLE_FTS5 "$CACHE/sqlite3.c" -o "$CACHE/sqlite3-fts5.o"
+cc -c -O2 -fPIC -w -DSQLITE_ENABLE_FTS5 "$CACHE/sqlite3.c" -o "$CACHE/sqlite3-fts5.o"
 cc -shared "$CACHE/sqlite3-fts5.o" -o "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
 if [ "$(uname -s)" = "Darwin" ]; then
   strip -x "src/vendor/odin-sqlite3/libsqlite3-fts5.${ext}"
@@ -87,7 +87,7 @@ depends = ["build"]
 
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src -define:SQLITE3_CUSTOM_FTS5=true && odin test src/api -define:SQLITE3_CUSTOM_FTS5=true && odin test src/tap -define:SQLITE3_CUSTOM_FTS5=true && odin test src/history && odin test src/store && odin test src/installer"
+run = "odin test src -define:SQLITE3_CUSTOM_FTS5=true && odin test src/api -define:SQLITE3_CUSTOM_FTS5=true && odin test src/tap && odin test src/history && odin test src/store && odin test src/installer"
 depends = ["build-libsqlite"]
 
 [tasks.bench-install]

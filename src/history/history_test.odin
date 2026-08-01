@@ -71,7 +71,6 @@ test_has_from_revision_false :: proc(t: ^testing.T) {
 @(test)
 test_iso8601_now_format :: proc(t: ^testing.T) {
     result := iso8601_now()
-    defer delete(result)
     // Expected format: 2026-07-03T12:34:56Z
     testing.expectf(t, len(result) == 20, "expected length 20, got %d: %q", len(result), result)
     testing.expectf(t, result[10] == 'T', "expected T at position 10, got %c", result[10])
