@@ -115,3 +115,21 @@ test_dir_name_standard :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// verify_jws_token
+// ---------------------------------------------------------------------------
+
+@(test)
+test_verify_jws_token_valid :: proc(t: ^testing.T) {
+    // Header: {"alg":"RS256","typ":"JWT"} -> base64url: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9
+    // Payload: {"sha256":"abcdef123456"} -> base64url: eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ
+    // Sig: dummy_signature
+    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
+    testing.expect(t, verify_jws_token(token, "abcdef123456"), "valid JWS token with matching sha256")
+}
+
+@(test)
+test_verify_jws_token_invalid_format :: proc(t: ^testing.T) {
+    testing.expect(t, !verify_jws_token("invalid_token_parts", "hash"), "reject invalid parts")
+    testing.expect(t, !verify_jws_token("", ""), "reject empty token")
+}
+
