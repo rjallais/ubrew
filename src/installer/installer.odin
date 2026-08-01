@@ -645,15 +645,21 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 			}
 		}
 
-		relocated_bin_count := 0
-		relocate_keg_binaries(keg_dir, &relocated_bin_count)
-		if relocated_bin_count > 0 {
-			fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
-		}
-		if !relocate_keg_placeholders(keg_dir) {
-			fmt.println("Error: Keg relocation failed.")
-			return false
-		}
+	}
+
+	// Relocation must run for every install path — including COW
+	// materialization — because store entries can predate the ELF
+	// relocation pipeline (or come from a failed run) and ship
+	// unreplaced @@HOMEBREW_*@@ placeholders in PT_INTERP / rpath.
+	// Both passes are idempotent: already-relocated kegs are skipped.
+	relocated_bin_count := 0
+	relocate_keg_binaries(keg_dir, &relocated_bin_count)
+	if relocated_bin_count > 0 {
+		fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
+	}
+	if !relocate_keg_placeholders(keg_dir) {
+		fmt.println("Error: Keg relocation failed.")
+		return false
 	}
 
 	bin_dir := fmt.tprintf("%s/bin", keg_dir)

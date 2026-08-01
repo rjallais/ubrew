@@ -126,7 +126,11 @@ CASKROOM_DIR=$("$NB" --caskroom)
 
 echo "--- Test: no @@HOMEBREW_CELLAR@@ or @@HOMEBREW_PREFIX@@ placeholders in Cellar ---"
 if [ -d "$CELLAR_DIR" ]; then
-  PLACEHOLDER_HITS=$(grep -rl '@@HOMEBREW_CELLAR@@\|@@HOMEBREW_PREFIX@@' "$CELLAR_DIR" 2>/dev/null | head -5) || true
+  # The ubrew formula's own binary embeds the literal replacement-source
+  # strings (@@HOMEBREW_PREFIX@@ / @@HOMEBREW_CELLAR@@) in its rodata, so a
+  # naive grep always flags it. Exclude that keg: broken ELF interpreters
+  # and rpaths in real bottles are caught by the patchelf checks below.
+  PLACEHOLDER_HITS=$(grep -rl '@@HOMEBREW_CELLAR@@\|@@HOMEBREW_PREFIX@@' "$CELLAR_DIR" 2>/dev/null | grep -v '/ubrew/' | head -5) || true
   if [ -z "$PLACEHOLDER_HITS" ]; then
     pass "no unreplaced @@HOMEBREW_*@@ placeholders in Cellar"
   else
