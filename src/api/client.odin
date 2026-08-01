@@ -942,6 +942,26 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
             }
         }
     }
+
+    // The "variations" object can also override the base "artifacts" array
+    // (e.g. the grok-build cask ships macOS aarch64 artifacts at the top
+    // level but carries an "x86_64_linux" variation with a Linux-native
+    // binary artifact). If we don't pick up the variation's artifacts, we
+    // download the correct platform binary (via the variation url) but then
+    // look for the macOS artifact filename inside it — failing with "No
+    // artifacts were installed."
+    artifacts_to_parse, ok2 := root_obj["artifacts"]
+    if variations_obj, v_ok := json_object_or_nil(root_obj, "variations"); v_ok {
+        var_key := cask_variation_key()
+        if var_entry, ve_ok := json_object_or_nil(variations_obj, var_key); ve_ok {
+            if v_arts, a_exists := var_entry["artifacts"]; a_exists {
+                if _, arr_ok := v_arts.(json.Array); arr_ok {
+                    artifacts_to_parse = v_arts
+                }
+            }
+        }
+    }
+
     c.url = url_str
     c.sha256 = sha_str
     c.homepage = strings.clone(root_obj["homepage"].(json.String))
@@ -952,8 +972,8 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     }
 
     artifacts_list := make([dynamic]cask.Artifact)
-    if arts, ok2 := root_obj["artifacts"]; ok2 {
-        arts_arr := arts.(json.Array)
+    if ok2 {
+        arts_arr := artifacts_to_parse.(json.Array)
         for art_item in arts_arr {
             art_obj := art_item.(json.Object)
 
