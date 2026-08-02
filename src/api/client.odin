@@ -2265,8 +2265,70 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
     return results[:], nil
 }
 
+// append_tap_search_result appends a matching formula to the search results
+// if it isn't already present (dedupe by short name or full token). Returns
+// true when the result limit is reached (callers should stop scanning).
+append_tap_search_result :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, formula_name, query_lower: string, limit: int) -> bool {
+	name_lc := strings.to_lower(formula_name, context.temp_allocator)
+	tap_lc := strings.to_lower(t.name, context.temp_allocator)
+	token := fmt.tprintf("%s/%s", t.name, formula_name)
+	token_lc := strings.to_lower(token, context.temp_allocator)
+
+	if !strings.contains(name_lc, query_lower) && !strings.contains(tap_lc, query_lower) && !strings.contains(token_lc, query_lower) {
+		return false
+	}
+
+	exists := false
+	for r in out^ {
+		if r.name == formula_name || r.name == token {
+			exists = true
+			break
+		}
+	}
+	if exists {
+		return false
+	}
+
+	append(out, Formula_Search_Result{
+		name    = strings.clone(token),
+		desc    = strings.clone(fmt.tprintf("(from %s tap)", t.name)),
+		version = "",
+	})
+	return len(out^) >= limit
+}
+
+// scan_dir_for_formulae scans a single directory for .rb files and appends
+// matches via append_tap_search_result. Returns (at_limit, found_any) where
+// found_any is true when the directory contained any .rb file at all (even
+// non-matching ones), so callers can tell "tap has local formulae" apart
+// from "nothing here".
+scan_dir_for_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, dir_path, query_lower: string, limit: int) -> (at_limit: bool, found_any: bool) {
+	infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
+	if err != nil {
+		return false, false
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+
+	found_any = false
+	for info in infos {
+		if info.type == .Directory do continue
+		if !strings.has_suffix(info.name, ".rb") do continue
+		found_any = true
+
+		formula_name := info.name[:len(info.name) - 3]
+		if append_tap_search_result(out, t, formula_name, query_lower, limit) {
+			return true, true
+		}
+	}
+	return false, found_any
+}
+
+// scan_local_tap_formulae walks a tap's local directories (shared
+// Library/Taps clone first, then the standalone fetch cache) and appends any
+// formula matching `query_lower`. Handles Homebrew's letter-nested layout
+// (Formula/<c>/<name>.rb) one level deep. Returns found_any — true when the
+// tap has local .rb files — so callers can skip the network listing.
 scan_local_tap_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, query_lower: string, limit: int) -> bool {
-	hb_prefix := platform.get_homebrew_prefix()
 	user := t.name
 	repo := ""
 	if idx := strings.index(t.name, "/"); idx >= 0 {
@@ -2274,9 +2336,11 @@ scan_local_tap_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap
 		repo = t.name[idx + 1:]
 	}
 
+	// Candidate roots: the shared Library/Taps clone (homebrew-<repo>
+	// convention first, plain <repo> second), then the standalone cache.
 	candidates := []string{
-		fmt.tprintf("%s/Homebrew/Library/Taps/%s/homebrew-%s", hb_prefix, user, repo),
-		fmt.tprintf("%s/Homebrew/Library/Taps/%s/%s", hb_prefix, user, repo),
+		tap.shared_tap_dir(t.name),
+		fmt.tprintf("%s/Homebrew/Library/Taps/%s/%s", platform.get_homebrew_prefix(), user, repo),
 		fmt.tprintf("%s/cache/taps/%s", platform.get_ubrew_root(), t.name),
 	}
 
@@ -2289,40 +2353,20 @@ scan_local_tap_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap
 			dir_path := fmt.tprintf("%s%s", base_dir, sub)
 			if !os.is_dir(dir_path) do continue
 
+			at_limit, any := scan_dir_for_formulae(out, t, dir_path, query_lower, limit)
+			found_any = found_any || any
+			if at_limit do return true
+
+			// Letter-nested subdirs (homebrew/core layout): one level deep,
+			// single-letter directories only.
 			infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
 			if err != nil do continue
 			defer os.file_info_slice_delete(infos, context.allocator)
-
 			for info in infos {
-				if info.type == .Directory do continue
-				if !strings.has_suffix(info.name, ".rb") do continue
-				found_any = true
-
-				formula_name := info.name[:len(info.name) - 3]
-				name_lc := strings.to_lower(formula_name, context.temp_allocator)
-				tap_lc := strings.to_lower(t.name, context.temp_allocator)
-				token := fmt.tprintf("%s/%s", t.name, formula_name)
-				token_lc := strings.to_lower(token, context.temp_allocator)
-
-				if !strings.contains(name_lc, query_lower) && !strings.contains(tap_lc, query_lower) && !strings.contains(token_lc, query_lower) {
-					continue
-				}
-
-				exists := false
-				for r in out^ {
-					if r.name == formula_name || r.name == token {
-						exists = true
-						break
-					}
-				}
-				if exists do continue
-
-				append(out, Formula_Search_Result{
-					name    = strings.clone(token),
-					desc    = strings.clone(fmt.tprintf("(from %s tap)", t.name)),
-					version = "",
-				})
-				if len(out^) >= limit do return true
+				if info.type != .Directory || len(info.name) != 1 do continue
+				at_limit, any := scan_dir_for_formulae(out, t, fmt.tprintf("%s/%s", dir_path, info.name), query_lower, limit)
+				found_any = found_any || any
+				if at_limit do return true
 			}
 		}
 	}
@@ -2486,6 +2530,100 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
     return strings.clone(fmt.tprintf("%s/%s", owner, repo), context.allocator)
 }
 
+// listing_write_entry appends one {"name": "<name>"} entry to a synthesized
+// tap listing, inserting a comma separator between entries.
+listing_write_entry :: proc(b: ^strings.Builder, first: ^bool, name: string) {
+	if !first^ {
+		strings.write_string(b, ",")
+	}
+	first^ = false
+	strings.write_string(b, "{\"name\": \"")
+	strings.write_string(b, name)
+	strings.write_string(b, "\"}")
+}
+
+// synth_walk_dir appends every unique .rb filename found directly inside
+// `dir_path` to the synthesized listing.
+synth_walk_dir :: proc(b: ^strings.Builder, first: ^bool, seen: ^[dynamic]string, dir_path: string) {
+	infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
+	if err != nil {
+		return
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+	for info in infos {
+		if info.type == .Directory do continue
+		if !strings.has_suffix(info.name, ".rb") do continue
+		already := false
+		for s in seen^ {
+			if s == info.name {
+				already = true
+				break
+			}
+		}
+		if already do continue
+		append(seen, strings.clone(info.name, context.temp_allocator))
+		listing_write_entry(b, first, info.name)
+	}
+}
+
+// synth_tap_listing_from_clone builds a GitHub-Contents-API-shaped listing (a
+// JSON array of {"name": "x.rb"} objects) by walking a shared-mode local
+// clone: Formula/, Casks/, the repo root, and one level of letter-nested
+// subdirs. Returns ok=false when no clone exists so callers fall back to the
+// network. The returned []u8 is heap-allocated (context.allocator), matching
+// fetch_tap_listing_cached's contract.
+synth_tap_listing_from_clone :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
+	dest := tap.shared_tap_dir(t.name)
+	if !os.is_dir(dest) {
+		return nil, false
+	}
+	return synth_tap_listing_from_dir(dest)
+}
+
+// synth_tap_listing_from_dir is the testable core of
+// synth_tap_listing_from_clone: it walks `dest` (a clone directory, or any
+// fixture in tests) and emits the listing JSON. The returned []u8 is
+// heap-allocated (context.allocator), matching fetch_tap_listing_cached's
+// contract.
+synth_tap_listing_from_dir :: proc(dest: string) -> (data: []u8, ok: bool) {
+	if !os.is_dir(dest) {
+		return nil, false
+	}
+
+	seen := make([dynamic]string, context.temp_allocator)
+	defer delete(seen)
+
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "[")
+	first := true
+
+	roots := []string{
+		fmt.tprintf("%s/Formula", dest),
+		fmt.tprintf("%s/Casks", dest),
+		dest,
+	}
+	for root in roots {
+		if !os.is_dir(root) do continue
+		synth_walk_dir(&b, &first, &seen, root)
+
+		// Letter-nested subdirs (homebrew/core layout): one level deep,
+		// single-letter directories only.
+		infos, err := os.read_directory_by_path(root, -1, context.allocator)
+		if err != nil do continue
+		defer os.file_info_slice_delete(infos, context.allocator)
+		for info in infos {
+			if info.type != .Directory || len(info.name) != 1 do continue
+			synth_walk_dir(&b, &first, &seen, fmt.tprintf("%s/%s", root, info.name))
+		}
+	}
+
+	strings.write_string(&b, "]")
+	result := strings.to_string(b)
+	out := make([]u8, len(result), context.allocator)
+	copy(out, result)
+	return out, true
+}
+
 // fetch_tap_listing_cached returns the cached tap formula listing (a JSON
 // array of objects with a "name" field per GitHub's API), refreshing from
 // GitHub if the cache is missing or stale (older than 1 hour). It tries
@@ -2494,9 +2632,19 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
 //   2. <tap.url>/contents/                (root, e.g. pkgxdev/homebrew-made)
 //   3. <github.com/user/homebrew-repo>/... (homebrew- prefix convention)
 // The first one that returns a non-empty JSON array is used.
+// In shared mode with a local clone the listing is synthesized from the
+// working tree instead, skipping the network entirely.
 fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
-    cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, t.name)
-    cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
+	// Shared mode with a local clone: synthesize the listing from the
+	// working tree — no Contents API round-trip, no cache staleness.
+	if tap.mode() == .Shared {
+		if synth, s_ok := synth_tap_listing_from_clone(t); s_ok {
+			return synth, true
+		}
+	}
+
+	cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, t.name)
+	cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
     // Try the cache first if fresh.
     info, serr := os.stat(cache_path, context.allocator)

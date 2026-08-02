@@ -4347,6 +4347,11 @@ run_tap :: proc(args: []string) {
 		return
 	}
 
+	if tap_name == "migrate" {
+		run_tap_migrate(args[1:])
+		return
+	}
+
 	// Backward-compat: `ubrew tap user/repo [url]` (no subcommand)
 	url := ""
 	if len(args) >= 2 {
@@ -4377,6 +4382,211 @@ run_untap :: proc(args: []string) {
 
 	if !tap.tap_remove(tap_name) {
 		os.exit(1)
+	}
+}
+
+// ── ubrew tap migrate (TAP-INTEROP-MIGRATION.md Phase 4) ──
+
+// run_tap_migrate converts ubrew's fetch-based tap state into shared
+// Library/Taps git clones: it ensures a clone exists for every non-homebrew/*
+// tap, removes now-stale Contents-API probe files, repairs trusted_taps.txt
+// (dropping entries that are not valid user/repo names), and with --brewfile
+// reconciles the tap set against the repo Brewfile. -n / --dry-run prints
+// the plan without writing anything.
+run_tap_migrate :: proc(args: []string) {
+	dry_run := false
+	use_brewfile := false
+	for a in args {
+		if a == "-n" || a == "--dry-run" {
+			dry_run = true
+		} else if a == "--brewfile" {
+			use_brewfile = true
+		} else {
+			fmt.printf("Error: unknown option '%s'\n", a)
+			fmt.println("Usage: ubrew tap migrate [-n|--dry-run] [--brewfile]")
+			os.exit(1)
+		}
+	}
+
+	if tap.mode() != .Shared {
+		fmt.println("Nothing to migrate: no Homebrew install with a Library/Taps directory was found (standalone mode).")
+		fmt.println("Taps stay in ubrew's fetch-based cache at $UBREW_ROOT/cache/taps.")
+		return
+	}
+
+	taps := tap.read_taps()
+	defer {
+		for t in taps {
+			tap.destroy_read_tap_entry(t)
+		}
+		delete(taps)
+	}
+
+	would_clone := 0
+	cloned := 0
+	failed := 0
+	removed_files := 0
+
+	// 1. Ensure a clone exists for every non-homebrew/* tap.
+	fmt.println("==> Checking shared Library/Taps clones")
+	for entry in taps {
+		if strings.has_prefix(entry.name, "homebrew/") do continue
+		dest := tap.shared_tap_dir(entry.name)
+		if os.is_dir(fmt.tprintf("%s/.git", dest)) {
+			fmt.printf("  [ok] %s -> %s\n", entry.name, dest)
+			continue
+		}
+		if dry_run {
+			fmt.printf("  [would clone] %s -> %s\n", entry.name, dest)
+			would_clone += 1
+			continue
+		}
+		if tap.ensure_shared_clone(entry.name, entry.url) {
+			fmt.printf("  [cloned] %s -> %s\n", entry.name, dest)
+			cloned += 1
+		} else {
+			fmt.printf("  [failed] %s (see warning above)\n", entry.name)
+			failed += 1
+		}
+	}
+
+	// 2. Remove stale Contents-API probe state for taps that now live as
+	//    clones (Formula_listing.json + .hit sidecar). The Formula/ mirror
+	//    dir is kept: clone reads write through to it on demand.
+	fmt.println("==> Removing stale probe caches")
+	for entry in taps {
+		if strings.has_prefix(entry.name, "homebrew/") do continue
+		dest := tap.shared_tap_dir(entry.name)
+		if !os.is_dir(fmt.tprintf("%s/.git", dest)) do continue
+		cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, entry.name)
+		if !os.is_dir(cache_dir) do continue
+
+		listing := fmt.tprintf("%s/Formula_listing.json", cache_dir)
+		hit := fmt.tprintf("%s/Formula_listing.hit", cache_dir)
+		paths := []string{listing, hit}
+		for path in paths {
+			if !os.is_file(path) do continue
+			if dry_run {
+				fmt.printf("  [would remove] %s\n", path)
+			} else {
+				_ = os.remove(path)
+				fmt.printf("  [removed] %s\n", path)
+			}
+			removed_files += 1
+		}
+	}
+
+	// 3. Repair trusted_taps.txt: drop entries that are not valid user/repo
+	//    tap names (e.g. the corrupted "https:/..." line).
+	trusted, _ := tap.trusted_taps_load()
+	defer {
+		for n in trusted {
+			delete(n)
+		}
+		delete(trusted)
+	}
+	bad := make([dynamic]string, context.temp_allocator)
+	defer delete(bad)
+	for n in trusted {
+		if !tap.is_valid_tap_name(n) {
+			append(&bad, n)
+		}
+	}
+	if len(bad) > 0 {
+		fmt.println("==> Repairing trusted_taps.txt")
+		if dry_run {
+			for n in bad {
+				fmt.printf("  [would drop] %q\n", n)
+			}
+		} else {
+			clean := make([dynamic]string, context.allocator)
+			defer {
+				for n in clean {
+					delete(n)
+				}
+				delete(clean)
+			}
+			for n in trusted {
+				if tap.is_valid_tap_name(n) {
+					append(&clean, strings.clone(n, context.allocator))
+				}
+			}
+			tap.trusted_taps_save(clean)
+			for n in bad {
+				fmt.printf("  [dropped] %q\n", n)
+			}
+		}
+	}
+
+	// 4. Reconcile against the repo Brewfile (desired tap set).
+	if use_brewfile {
+		bf_path := get_brewfile_path("", false)
+		entries, ok := parse_brewfile(bf_path)
+		if !ok {
+			fmt.printf("Error: could not read Brewfile at %s\n", bf_path)
+			os.exit(1)
+		}
+		defer {
+			for e in entries {
+				delete(e.kind)
+				delete(e.name)
+				delete(e.url)
+			}
+			delete(entries)
+		}
+
+		desired := make([dynamic]string, context.temp_allocator)
+		defer delete(desired)
+		for e in entries {
+			if e.kind == "tap" {
+				append(&desired, e.name)
+			}
+		}
+
+		fmt.println("==> Reconciling with Brewfile")
+		for d in desired {
+			in_set := false
+			for t in taps {
+				if t.name == d {
+					in_set = true
+					break
+				}
+			}
+			if in_set do continue
+			if dry_run {
+				fmt.printf("  [would tap] %s (from Brewfile)\n", d)
+				would_clone += 1
+				continue
+			}
+			if tap.tap_add(d, "") {
+				fmt.printf("  [tapped] %s (from Brewfile)\n", d)
+				cloned += 1
+			} else {
+				fmt.printf("  [failed] %s (from Brewfile)\n", d)
+				failed += 1
+			}
+		}
+
+		// Extras: taps present but not listed in the Brewfile (informational).
+		for t in taps {
+			if strings.has_prefix(t.name, "homebrew/") do continue
+			in_desired := false
+			for d in desired {
+				if d == t.name {
+					in_desired = true
+					break
+				}
+			}
+			if !in_desired {
+				fmt.printf("  [extra] %s (tapped but not in Brewfile)\n", t.name)
+			}
+		}
+	}
+
+	if dry_run {
+		fmt.printf("Dry run: would clone %d tap(s), remove %d stale cache file(s). No changes made.\n", would_clone, removed_files)
+	} else {
+		fmt.printf("Migrated: %d tap(s) cloned, %d failed, %d stale cache file(s) removed.\n", cloned, failed, removed_files)
 	}
 }
 
@@ -5245,6 +5455,22 @@ maybe_auto_update :: proc() {
 
 // ── run_update (Phase 1: HTTP/2 parallel) ──
 
+// git_head_short returns the short HEAD SHA of a repo directory, or "" when
+// the repo is missing/unreadable. Used to detect whether a `git pull`
+// actually advanced the clone (Homebrew only lists taps with new commits as
+// "Updated").
+git_head_short :: proc(dir: string) -> string {
+	buf := make([]u8, 64, context.temp_allocator)
+	out, _ := platform.exec_cmd_capture("git", []string{"git", "-C", dir, "rev-parse", "--short", "HEAD"}, buf)
+	return strings.trim_space(out)
+}
+
+// git_pull_ff_only runs `git pull --ff-only --quiet` inside a shared-mode tap
+// clone. Returns true when the pull succeeded (including "already up to date").
+git_pull_ff_only :: proc(dir: string) -> bool {
+	return platform.exec_cmd("git", []string{"git", "-C", dir, "pull", "--ff-only", "--quiet"})
+}
+
 run_update :: proc(args: []string) {
 	auto_update := false
 	force := false
@@ -5473,7 +5699,55 @@ run_update :: proc(args: []string) {
 		suffixes := []string{"/contents/Formula", "/contents"}
 		TAP_LISTING_MAX_AGE :: 3600 // 1 hour, matches fetch_tap_listing_cached
 
+		// Tap-update accounting. Declared before the loop so the shared-mode
+		// git-pull branch above can populate them; the standalone probe
+		// pipeline fills them during promotion.
+		updated_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
+		failed_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
+
 		for entry in taps {
+			// Shared mode: taps are git clones in brew's Library/Taps. Pull
+			// each clone with `git pull --ff-only` instead of the Contents-API
+			// probe pipeline. homebrew/core & homebrew/cask are API-based and
+			// never cloned — skip them here entirely.
+			if tap.mode() == .Shared {
+				if strings.has_prefix(entry.name, "homebrew/") {
+					if verbose {
+						fmt.printf("  [skip] tap %s is API-based, skipping\n", entry.name)
+					}
+					continue
+				}
+				if !tap.tap_is_trusted(entry.name) {
+					if verbose {
+						fmt.printf("  [skip] tap %s is untrusted, skipping pull\n", entry.name)
+					}
+					continue
+				}
+				dest := tap.shared_tap_dir(entry.name)
+				if os.is_dir(fmt.tprintf("%s/.git", dest)) {
+					before := git_head_short(dest)
+					if git_pull_ff_only(dest) {
+						after := git_head_short(dest)
+						if len(before) > 0 && before != after {
+							append(&updated_tap_names, strings.clone(entry.name, context.temp_allocator))
+							if verbose {
+								fmt.printf("==> Updated tap %s successfully.\n", entry.name)
+							}
+						} else if verbose {
+							fmt.printf("  [up-to-date] tap %s\n", entry.name)
+						}
+					} else {
+						append(&failed_tap_names, strings.clone(entry.name, context.temp_allocator))
+						if verbose {
+							fmt.printf("Error: Failed to update tap %s.\n", entry.name)
+						}
+					}
+				} else if verbose {
+					fmt.printf("  [skip] tap %s has no local clone, skipping pull\n", entry.name)
+				}
+				continue
+			}
+
 			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, entry.name)
 			cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
@@ -5634,8 +5908,6 @@ run_update :: proc(args: []string) {
 
 		// Post-process Formula listings for each tap
 		ok_count := 0
-		updated_tap_names := make([dynamic]string, 0, len(job_taps), context.temp_allocator)
-		failed_tap_names := make([dynamic]string, 0, len(job_taps), context.temp_allocator)
 		for t_ptr in job_taps {
 			t := t_ptr^
 			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, t.name)
@@ -8493,14 +8765,19 @@ run_path_query :: proc(which: string, args: []string) {
             }
         }
     case "--repo", "--repository":
-        // ubrew has no per-tap clone; report the ubrew root for `--repo`
-        // with no args, and the tap cache dir otherwise.
+        // With no args, report the ubrew root. With args, report the per-tap
+        // store path: the git clone in shared mode (matching `brew --repo
+        // <tap>`), else the fetch cache dir.
         if len(args) == 0 {
             fmt.println(installer.UBREW_ROOT)
             return
         }
         for name in args {
-            fmt.printf("%s/cache/taps/%s\n", installer.UBREW_ROOT, name)
+            if tap.mode() == .Shared && !strings.has_prefix(name, "homebrew/") {
+                fmt.println(tap.shared_tap_dir(name))
+            } else {
+                fmt.printf("%s/cache/taps/%s\n", installer.UBREW_ROOT, name)
+            }
         }
     case:
         fmt.printf("ubrew: unknown path query '%s'\n", which)
