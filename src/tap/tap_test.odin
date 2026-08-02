@@ -283,6 +283,77 @@ test_shared_tap_add_clone_and_remove :: proc(t: ^testing.T) {
     testing.expectf(t, !tap_remove("testuser/tapfixture"), "second untap should fail with not tapped")
 }
 
+@(test)
+test_ensure_shared_clone_tolerates_existing_user_dir :: proc(t: ^testing.T) {
+    sync.mutex_lock(&tap_state_mutex)
+    defer sync.mutex_unlock(&tap_state_mutex)
+
+    // --- origin repo (single commit) ---
+    origin := temp_test_dir(t, "ubrew-origin2-*")
+    defer os.remove_all(origin)
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/README.md", origin), "tap fixture\n")
+    testing.expectf(t, git_cmd("-C", origin, "init", "-b", "main"), "git init failed")
+    testing.expectf(t, git_cmd("-C", origin, "add", "-A"), "git add failed")
+    testing.expectf(t, git_cmd("-C", origin, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"), "git commit failed")
+
+    // --- taps fixture with the user dir ALREADY present (failed-clone leftover) ---
+    fixture := temp_test_dir(t, "ubrew-taps2-*")
+    defer os.remove_all(fixture)
+    taps_dir := fmt.tprintf("%s/Homebrew/Library/Taps", fixture)
+    os.make_directory_all(taps_dir, os.perm(0o755))
+    os.make_directory_all(fmt.tprintf("%s/testuser", taps_dir), os.perm(0o755))
+
+    old_override := taps_dir_override
+    defer {
+        taps_dir_override = old_override
+    }
+    taps_dir_override = taps_dir
+
+    clone_url := fmt.tprintf("file://%s", origin)
+    testing.expectf(t, ensure_shared_clone_into(taps_dir, "testuser/tapfixture", clone_url),
+        "clone must proceed even when the user dir already exists")
+    clone_dir := fmt.tprintf("%s/testuser/homebrew-tapfixture", taps_dir)
+    testing.expectf(t, os.is_dir(fmt.tprintf("%s/.git", clone_dir)), "clone dir with .git should exist")
+    testing.expectf(t, os.is_file(fmt.tprintf("%s/README.md", clone_dir)), "cloned tap should contain README.md")
+}
+
+@(test)
+test_tap_from_entry_shared_branch_is_owned :: proc(t: ^testing.T) {
+    sync.mutex_lock(&tap_state_mutex)
+    defer sync.mutex_unlock(&tap_state_mutex)
+
+    // Shared-mode fixture with a real clone: tap_from_entry skips the GitHub
+    // branch probe and returns branch "main", which must be heap-owned so
+    // destroy_tap can free it. Before the ownership fix this deleted the
+    // "main" string literal and aborted the process (free(): invalid pointer).
+    origin := temp_test_dir(t, "ubrew-origin3-*")
+    defer os.remove_all(origin)
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/README.md", origin), "fixture\n")
+    testing.expectf(t, git_cmd("-C", origin, "init", "-b", "main"), "git init failed")
+    testing.expectf(t, git_cmd("-C", origin, "add", "-A"), "git add failed")
+    testing.expectf(t, git_cmd("-C", origin, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"), "git commit failed")
+
+    fixture := temp_test_dir(t, "ubrew-taps3-*")
+    defer os.remove_all(fixture)
+    taps_dir := fmt.tprintf("%s/Homebrew/Library/Taps", fixture)
+    os.make_directory_all(taps_dir, os.perm(0o755))
+
+    old_override := taps_dir_override
+    defer {
+        taps_dir_override = old_override
+    }
+    taps_dir_override = taps_dir
+
+    clone_url := fmt.tprintf("file://%s", origin)
+    testing.expectf(t, ensure_shared_clone_into(taps_dir, "testuser/tapfixture", clone_url), "clone should succeed")
+
+    entry := Read_Tap_Entry{name = "testuser/tapfixture", url = clone_url}
+    tap_val := tap_from_entry(entry)
+    testing.expect_value(t, tap_val.branch, "main")
+    // Must not abort: this frees the branch (and name/url) strings.
+    destroy_tap(tap_val)
+}
+
 // temp_test_dir creates a unique temp directory (create_temp_file then reuse
 // the name) and returns its heap-allocated path; caller removes with os.remove_all.
 temp_test_dir :: proc(t: ^testing.T, pattern: string) -> string {

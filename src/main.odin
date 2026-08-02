@@ -4454,7 +4454,15 @@ run_tap_migrate :: proc(args: []string) {
 	//    clones (Formula_listing.json + .hit sidecar). The Formula/ mirror
 	//    dir is kept: clone reads write through to it on demand.
 	fmt.println("==> Removing stale probe caches")
-	for entry in taps {
+	// Re-read so taps just added in step 1 (e.g. --brewfile) are covered too.
+	taps_now := tap.read_taps()
+	defer {
+		for t in taps_now {
+			tap.destroy_read_tap_entry(t)
+		}
+		delete(taps_now)
+	}
+	for entry in taps_now {
 		if strings.has_prefix(entry.name, "homebrew/") do continue
 		dest := tap.shared_tap_dir(entry.name)
 		if !os.is_dir(fmt.tprintf("%s/.git", dest)) do continue
@@ -4559,8 +4567,13 @@ run_tap_migrate :: proc(args: []string) {
 				continue
 			}
 			if tap.tap_add(d, "") {
-				fmt.printf("  [tapped] %s (from Brewfile)\n", d)
-				cloned += 1
+				if os.is_dir(fmt.tprintf("%s/.git", tap.shared_tap_dir(d))) {
+					fmt.printf("  [tapped] %s (from Brewfile)\n", d)
+					cloned += 1
+				} else {
+					fmt.printf("  [tapped, no clone] %s (from Brewfile)\n", d)
+					failed += 1
+				}
 			} else {
 				fmt.printf("  [failed] %s (from Brewfile)\n", d)
 				failed += 1

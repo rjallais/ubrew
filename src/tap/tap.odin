@@ -130,9 +130,15 @@ ensure_shared_clone_into :: proc(taps_dir, name, url: string) -> bool {
 	if os.is_dir(fmt.tprintf("%s/.git", dest)) {
 		return true
 	}
-	if mk_err := os.make_directory_all(fmt.tprintf("%s/%s", taps_dir, parts[0]), os.perm(0o755)); mk_err != nil {
-		fmt.printf("Warning: Cannot create %s/%s: %v\n", taps_dir, parts[0], mk_err)
-		return false
+	user_dir := fmt.tprintf("%s/%s", taps_dir, parts[0])
+	if mk_err := os.make_directory_all(user_dir, os.perm(0o755)); mk_err != nil {
+		// POSIX make_directory_all returns .Exist when the dir already
+		// exists (e.g. a leftover from an earlier failed clone); that is
+		// fine, git clone populates the repo dir below.
+		if !os.is_dir(user_dir) {
+			fmt.printf("Warning: Cannot create %s: %v\n", user_dir, mk_err)
+			return false
+		}
 	}
 
 	clone_url := tap_clone_url(name, url)
@@ -654,7 +660,7 @@ tap_from_entry :: proc(e: Read_Tap_Entry) -> Tap {
 	} else {
 		url = strings.clone(e.url, context.allocator)
 	}
-	branch := "main"
+	branch := strings.clone("main", context.allocator)
 	if mode() != .Shared || !os.is_dir(shared_tap_dir(e.name)) {
 		// Standalone mode — or shared mode without a local clone (clone failed
 		// or not yet migrated): the raw-URL fallback needs the real default
