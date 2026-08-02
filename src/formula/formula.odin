@@ -33,13 +33,26 @@ Formula :: struct {
     keg_only_reason:          string,
 }
 
+// format_bytes_human renders a byte count in a human-friendly unit. Values
+// are promoted to the next unit when display rounding would cross the
+// boundary (e.g. 1024*1024-1 bytes must not read "1024.0 KB").
 format_bytes_human :: proc(bytes: i64, allocator := context.temp_allocator) -> string {
 	if bytes <= 0 do return fmt.aprintf("%s", "N/A", allocator = allocator)
 	if bytes < 1024 do return fmt.aprintf("%d B", bytes, allocator = allocator)
 	kb := f64(bytes) / 1024.0
-	if kb < 1024 do return fmt.aprintf("%.1f KB", kb, allocator = allocator)
+	if kb < 1024 {
+		if kb >= 1023.95 { // rounds to "1024.0" — promote to MB
+			return fmt.aprintf("%.2f MB", kb / 1024.0, allocator = allocator)
+		}
+		return fmt.aprintf("%.1f KB", kb, allocator = allocator)
+	}
 	mb := kb / 1024.0
-	if mb < 1024 do return fmt.aprintf("%.1f MB", mb, allocator = allocator)
+	if mb < 1024 {
+		if mb >= 1023.95 { // rounds to "1024.0" — promote to GB
+			return fmt.aprintf("%.2f GB", mb / 1024.0, allocator = allocator)
+		}
+		return fmt.aprintf("%.1f MB", mb, allocator = allocator)
+	}
 	gb := mb / 1024.0
 	return fmt.aprintf("%.2f GB", gb, allocator = allocator)
 }

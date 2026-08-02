@@ -94,16 +94,16 @@ init_paths :: proc() {
 	if root := clone_env("UBREW_ROOT"); root != "" {
 		ubrew_root = root
 	}
-	// Derived state paths always follow UBREW_ROOT.
-	ubrew_prefix = fmt.aprintf("%s/prefix", ubrew_root)
-	cache_dir    = fmt.aprintf("%s/cache", ubrew_root)
+	// cache always follows UBREW_ROOT; ubrew_prefix is computed below so it
+	// is allocated exactly once (no orphaned allocation when UBREW_PREFIX
+	// overrides it).
+	cache_dir = fmt.aprintf("%s/cache", ubrew_root)
 
 	// Allow explicit UBREW_PREFIX to also override the "ubrew prefix"
 	// used for opt/bin links under /opt/ubrew/prefix historically.
 	// When UBREW_PREFIX is set, both the package prefix AND ubrew_prefix
 	// point at it so a fully-isolated install is a single env var.
 	ubrew_prefix_env := clone_env("UBREW_PREFIX")
-	homebrew_prefix_env := clone_env("HOMEBREW_PREFIX")
 
 	// --- package install prefix (Cellar/Caskroom/bin) ---
 	prefix := DEFAULT_HOMEBREW_PREFIX
@@ -111,8 +111,12 @@ init_paths :: proc() {
 		prefix = ubrew_prefix_env
 		// Fully isolated mode: also redirect ubrew's own prefix.
 		ubrew_prefix = ubrew_prefix_env
-	} else if homebrew_prefix_env != "" {
-		prefix = homebrew_prefix_env
+	} else {
+		ubrew_prefix = fmt.aprintf("%s/prefix", ubrew_root)
+		// Defer cloning HOMEBREW_PREFIX until it is actually needed.
+		if homebrew_prefix_env := clone_env("HOMEBREW_PREFIX"); homebrew_prefix_env != "" {
+			prefix = homebrew_prefix_env
+		}
 	}
 	homebrew_prefix = prefix
 

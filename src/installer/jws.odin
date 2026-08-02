@@ -30,10 +30,20 @@ base64url_decode :: proc(input: string, allocator := context.temp_allocator) -> 
 	return string(decoded_bytes), true
 }
 
-// verify_jws_token checks if a raw JWS string (header.payload.signature)
-// has valid base64url structure and matching algorithm (RS256 / ES256 / PS256).
+// verify_jws_token checks a raw JWS string (header.payload.signature) for
+// valid base64url structure, a supported algorithm (RS256 / ES256 / PS256),
+// and a payload that CONTAINS the expected_sha256.
+//
+// SECURITY NOTE: this is an attestation-hash gate, NOT cryptographic
+// signature verification. The signature segment is only checked for
+// presence — it is never verified against a public key, so a forged
+// signature on a structurally valid token passes. Do not use this function
+// as the sole integrity gate for downloaded binaries. expected_sha256 is
+// mandatory: a caller that cannot supply the expected hash gets false, so a
+// missing expectation can never silently widen the trust decision.
 verify_jws_token :: proc(token: string, expected_sha256: string) -> bool {
 	if len(token) == 0 do return false
+	if len(expected_sha256) == 0 do return false
 
 	parts := strings.split(token, ".", context.temp_allocator)
 	if len(parts) != 3 {
@@ -62,13 +72,12 @@ verify_jws_token :: proc(token: string, expected_sha256: string) -> bool {
 		return false
 	}
 
+	// The expected hash must be present in the payload; a mismatch is a hard
+	// rejection (there is no non-empty-signature fallback).
 	payload_data, pok := base64url_decode(parts[1], context.temp_allocator)
-	if pok && len(expected_sha256) > 0 {
-		if strings.contains(payload_data, expected_sha256) {
-			return true
-		}
-	}
+	if !pok do return false
+	if !strings.contains(payload_data, expected_sha256) do return false
 
-	// Non-empty valid 3-part JWS token with supported algorithm
+	// Structural check only: a signature segment must be present.
 	return len(parts[2]) > 0
 }

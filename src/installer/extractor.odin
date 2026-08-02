@@ -101,7 +101,12 @@ rpm_extract_via_cpio :: proc(file_path, dest_dir: string) -> bool {
 		posix.close(fds[1])
 		posix.dup2(fds[0], posix.FD(0))
 		posix.close(fds[0])
-		_ = posix.chdir(strings.clone_to_cstring(dest_dir, context.temp_allocator))
+		// If chdir fails, cpio would extract into the inherited working
+		// directory instead of dest_dir — fail the child so the parent sees
+		// a non-zero status instead of extracting to the wrong place.
+		if posix.chdir(strings.clone_to_cstring(dest_dir, context.temp_allocator)) != .OK {
+			posix.exit(1)
+		}
 		posix.execvp(strings.clone_to_cstring("cpio", context.temp_allocator), make_argv([]string{"cpio", "--no-absolute-filenames", "-idmv"}))
 		posix.exit(1)
 	}

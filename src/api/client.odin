@@ -4272,12 +4272,18 @@ get_remote_content_length :: proc(url: string) -> i64 {
 	os.close(temp_f)
 	defer os.remove(temp_file)
 
-	args := []string{"curl", "-sIL", "-X", "HEAD", url, "-o", temp_file}
+	// -L follows redirects (Homebrew bottle URLs on ghcr.io redirect), so the
+	// header dump contains every response in the chain. The first
+	// content-length belongs to the redirect (typically 0) — keep the LAST
+	// match, which is the final response's. -I implies HEAD, so -X HEAD is
+	// redundant.
+	args := []string{"curl", "-sIL", url, "-o", temp_file}
 	if !platform.exec_cmd("curl", args) do return 0
 
 	data, rerr := os.read_entire_file(temp_file, context.temp_allocator)
 	if rerr != nil do return 0
 
+	last: i64 = 0
 	lines := strings.split(string(data), "\n", context.temp_allocator)
 	for line in lines {
 		trimmed := strings.trim_space(line)
@@ -4285,11 +4291,11 @@ get_remote_content_length :: proc(url: string) -> i64 {
 			parts := strings.split(trimmed, ":", context.temp_allocator)
 			if len(parts) == 2 {
 				if val, ok := strconv.parse_int(strings.trim_space(parts[1])); ok {
-					return i64(val)
+					last = i64(val)
 				}
 			}
 		}
 	}
-	return 0
+	return last
 }
 

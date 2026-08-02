@@ -69,7 +69,7 @@ sources = ["src/**/*.odin"]
 outputs = ["ubrew_portable"]
 
 [tasks.build-prod]
-description = "Build ubrew for production: aggressive native microarch opts + disabled assertions (slowest build, fastest binary)"
+description = "Build ubrew for production: aggressive native microarch opts + disabled assertions (no LTO)"
 run = "odin build src -out:ubrew_prod -define:SQLITE3_CUSTOM_FTS5=true -o:aggressive -no-bounds-check -no-type-assert -disable-assert -microarch:native"
 depends = ["build-libsqlite"]
 sources = ["src/**/*.odin"]
@@ -87,7 +87,7 @@ depends = ["build"]
 
 [tasks.test-unit]
 description = "Run Odin unit tests"
-run = "odin test src -define:SQLITE3_CUSTOM_FTS5=true && odin test src/api -define:SQLITE3_CUSTOM_FTS5=true && odin test src/tap && odin test src/history && odin test src/store && odin test src/installer"
+run = "odin test src -define:SQLITE3_CUSTOM_FTS5=true && odin test src/api -define:SQLITE3_CUSTOM_FTS5=true && odin test src/tap && odin test src/formula && odin test src/history && odin test src/store && odin test src/installer"
 depends = ["build-libsqlite"]
 
 [tasks.bench-install]

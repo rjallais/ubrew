@@ -8840,32 +8840,35 @@ run_shellenv :: proc(args: []string) {
     bin := platform.get_bin_dir()
     prefix := platform.get_homebrew_prefix()
     cellar := platform.get_cellar_dir()
+    // HOMEBREW_REPOSITORY is the brew git checkout root, which on Linux is
+    // <prefix>/Homebrew (where Library/Taps lives) — not the prefix itself.
+    repository := fmt.tprintf("%s/Homebrew", prefix)
     switch shell {
     case "bash", "zsh", "sh":
         fmt.printf("export HOMEBREW_PREFIX=\"%s\"\n", prefix)
         fmt.printf("export HOMEBREW_CELLAR=\"%s\"\n", cellar)
-        fmt.printf("export HOMEBREW_REPOSITORY=\"%s\"\n", prefix)
+        fmt.printf("export HOMEBREW_REPOSITORY=\"%s\"\n", repository)
         fmt.printf("export UBREW_PREFIX=\"%s\"\n", platform.get_ubrew_prefix())
         fmt.printf("export UBREW_CELLAR=\"%s\"\n", cellar)
         fmt.printf("export PATH=\"%s:$PATH\"\n", bin)
     case "fish":
         fmt.printf("set -gx HOMEBREW_PREFIX \"%s\"\n", prefix)
         fmt.printf("set -gx HOMEBREW_CELLAR \"%s\"\n", cellar)
-        fmt.printf("set -gx HOMEBREW_REPOSITORY \"%s\"\n", prefix)
+        fmt.printf("set -gx HOMEBREW_REPOSITORY \"%s\"\n", repository)
         fmt.printf("set -gx UBREW_PREFIX \"%s\"\n", platform.get_ubrew_prefix())
         fmt.printf("set -gx UBREW_CELLAR \"%s\"\n", cellar)
         fmt.printf("set -gx PATH \"%s\" $PATH\n", bin)
     case "csh", "tcsh":
         fmt.printf("setenv HOMEBREW_PREFIX \"%s\"\n", prefix)
         fmt.printf("setenv HOMEBREW_CELLAR \"%s\"\n", cellar)
-        fmt.printf("setenv HOMEBREW_REPOSITORY \"%s\"\n", prefix)
+        fmt.printf("setenv HOMEBREW_REPOSITORY \"%s\"\n", repository)
         fmt.printf("setenv UBREW_PREFIX \"%s\"\n", platform.get_ubrew_prefix())
         fmt.printf("setenv UBREW_CELLAR \"%s\"\n", cellar)
         fmt.printf("setenv PATH \"%s:$PATH\"\n", bin)
     case "pwsh":
         fmt.printf("$env:HOMEBREW_PREFIX = \"%s\"\n", prefix)
         fmt.printf("$env:HOMEBREW_CELLAR = \"%s\"\n", cellar)
-        fmt.printf("$env:HOMEBREW_REPOSITORY = \"%s\"\n", prefix)
+        fmt.printf("$env:HOMEBREW_REPOSITORY = \"%s\"\n", repository)
         fmt.printf("$env:UBREW_PREFIX = \"%s\"\n", platform.get_ubrew_prefix())
         fmt.printf("$env:UBREW_CELLAR = \"%s\"\n", cellar)
         fmt.printf("$env:PATH = \"%s:$env:PATH\"\n", bin)
@@ -8873,7 +8876,7 @@ run_shellenv :: proc(args: []string) {
         fmt.println("# Add to your config.nu:")
         fmt.printf("$env.HOMEBREW_PREFIX = '%s'\n", prefix)
         fmt.printf("$env.HOMEBREW_CELLAR = '%s'\n", cellar)
-        fmt.printf("$env.HOMEBREW_REPOSITORY = '%s'\n", prefix)
+        fmt.printf("$env.HOMEBREW_REPOSITORY = '%s'\n", repository)
         fmt.printf("$env.UBREW_PREFIX = '%s'\n", platform.get_ubrew_prefix())
         fmt.printf("$env.UBREW_CELLAR = '%s'\n", cellar)
         fmt.printf("$env.PATH = ($env.PATH | split row (char esep) | prepend '%s')\n", bin)
@@ -9671,23 +9674,9 @@ run_search :: proc(args_slice: []string) {
                 tap_part, f_part := api.parse_tap_token(query_lower)
                 defer delete(tap_part)
                 defer delete(f_part)
-                if len(tap_part) > 0 && strings.count(tap_part, "/") == 1 {
-                    existing_taps := tap.read_taps()
-                    defer {
-                        for et in existing_taps do tap.destroy_read_tap_entry(et)
-                        delete(existing_taps)
-                    }
-                    is_tapped := false
-                    for et in existing_taps {
-                        if et.name == tap_part {
-                            is_tapped = true
-                            break
-                        }
-                    }
-                    if !is_tapped {
-                        _ = tap.tap_add(tap_part, "")
-                    }
-                }
+                // Search is read-only: never tap a repository as a side
+                // effect of a query. append_tap_formulae_matches only reads
+                // already-tapped (or cloned) taps.
                 if len(f_part) > 0 {
                     api.append_tap_formulae_matches(&matched_formulae, f_part, 100)
                 }

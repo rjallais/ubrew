@@ -133,3 +133,20 @@ test_verify_jws_token_invalid_format :: proc(t: ^testing.T) {
     testing.expect(t, !verify_jws_token("", ""), "reject empty token")
 }
 
+@(test)
+test_verify_jws_token_hash_mismatch_rejected :: proc(t: ^testing.T) {
+    // Same structurally valid token as the positive test, but a payload that
+    // does not contain the expected hash: must be rejected even though the
+    // signature segment is non-empty (no fallback).
+    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
+    testing.expect(t, !verify_jws_token(token, "ffffffffffff"), "reject payload that does not contain expected_sha256")
+}
+
+@(test)
+test_verify_jws_token_empty_expected_rejected :: proc(t: ^testing.T) {
+    // expected_sha256 is mandatory: without it the token is rejected, so a
+    // missing expectation can never silently widen the trust decision.
+    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
+    testing.expect(t, !verify_jws_token(token, ""), "reject token when expected_sha256 is empty")
+}
+
