@@ -1,8 +1,10 @@
 package tap
 
+import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sys/posix"
 import "../platform"
 
 // Runtime tap paths. Re-bound by init_paths() after platform.init_paths().
@@ -110,7 +112,7 @@ tap_shallow_enabled :: proc() -> bool {
 // Library/Taps. Idempotent: a clone that already exists is a no-op (true).
 // homebrew/core and homebrew/cask are never cloned (API-based) and return
 // true. On clone failure prints a warning with a `brew tap` hint and returns
-// false so callers can fall back to a DB-only entry.
+// false so callers can surface the failure (the tap is not added).
 ensure_shared_clone :: proc(name, url: string) -> bool {
 	if strings.has_prefix(name, "homebrew/") {
 		return true
@@ -118,19 +120,50 @@ ensure_shared_clone :: proc(name, url: string) -> bool {
 	return ensure_shared_clone_into(shared_taps_dir(), name, url)
 }
 
+// clone_origin_remote returns the origin remote URL of a git clone, or
+// ("", false) when the clone has no origin remote (or git is unavailable).
+clone_origin_remote :: proc(repo_dir: string) -> (string, bool) {
+	buf := make([]u8, 4096, context.temp_allocator)
+	out, _ := platform.exec_cmd_capture(
+		"git",
+		[]string{"git", "-C", repo_dir, "remote", "get-url", "origin"},
+		buf,
+	)
+	trimmed := strings.trim_space(out)
+	if len(trimmed) == 0 do return "", false
+	return trimmed, true
+}
+
 // ensure_shared_clone_into is the testable core of ensure_shared_clone: it
 // clones <name> from <url> (or the Homebrew-convention URL when empty) into
 // <taps_dir>/<user>/homebrew-<repo>. Returns false when the clone fails.
 ensure_shared_clone_into :: proc(taps_dir, name, url: string) -> bool {
-	parts := strings.split(name, "/", context.temp_allocator)
-	if len(parts) != 2 || len(parts[0]) == 0 || len(parts[1]) == 0 {
+	if !is_valid_tap_name(name) {
 		return false
 	}
 	dest := shared_tap_dir_in(taps_dir, name)
-	if os.is_dir(fmt.tprintf("%s/.git", dest)) {
-		return true
+	if is_symlink(dest) {
+		fmt.printf("Error: Refusing to use '%s' for tap '%s' (symlink).\n", dest, name)
+		return false
 	}
-	user_dir := fmt.tprintf("%s/%s", taps_dir, parts[0])
+	clone_url := tap_clone_url(name, url)
+	if os.is_dir(fmt.tprintf("%s/.git", dest)) {
+		// The clone already exists: verify its origin remote before treating
+		// it as the requested tap, so a stale, partial, or unrelated
+		// repository is never used for formula/cask reads. An explicitly
+		// given URL must match; otherwise any working origin is accepted.
+		if remote, ok := clone_origin_remote(dest); !ok {
+			fmt.printf("Warning: Tap '%s' clone at %s has no origin remote; re-cloning.\n", name, dest)
+			_ = os.remove_all(dest)
+		} else if len(url) > 0 && remote != clone_url {
+			fmt.printf("Warning: Tap '%s' clone at %s points at %s, not %s; re-cloning.\n", name, dest, remote, clone_url)
+			_ = os.remove_all(dest)
+		} else {
+			return true
+		}
+	}
+	user_part := name[:strings.index(name, "/")]
+	user_dir := fmt.tprintf("%s/%s", taps_dir, user_part)
 	if mk_err := os.make_directory_all(user_dir, os.perm(0o755)); mk_err != nil {
 		// POSIX make_directory_all returns .Exist when the dir already
 		// exists (e.g. a leftover from an earlier failed clone); that is
@@ -141,8 +174,11 @@ ensure_shared_clone_into :: proc(taps_dir, name, url: string) -> bool {
 		}
 	}
 
-	clone_url := tap_clone_url(name, url)
 	fmt.printf("==> Tapping '%s'\n", name)
+	// Clone into a temporary sibling and rename it into place only after
+	// success, so a concurrent reader never observes a partial clone.
+	tmp := fmt.tprintf("%s.tmp", dest)
+	_ = os.remove_all(tmp)
 	args := make([dynamic]string, context.temp_allocator)
 	defer delete(args)
 	append(&args, "git")
@@ -151,11 +187,20 @@ ensure_shared_clone_into :: proc(taps_dir, name, url: string) -> bool {
 		append(&args, "--depth=1")
 	}
 	append(&args, clone_url)
-	append(&args, dest)
+	append(&args, tmp)
 	if !platform.exec_cmd("git", args[:]) {
 		fmt.printf("Warning: Failed to clone tap '%s' from %s.\n", name, clone_url)
 		fmt.printf("  If the repo does not follow the homebrew-<repo> convention, pass its URL explicitly:\n")
 		fmt.printf("    brew tap %s <url>\n", name)
+		_ = os.remove_all(tmp)
+		return false
+	}
+	if os.is_dir(dest) {
+		_ = os.remove_all(dest)
+	}
+	if err := os.rename(tmp, dest); err != os.ERROR_NONE {
+		fmt.printf("Warning: Failed to move cloned tap into place at %s: %v\n", dest, err)
+		_ = os.remove_all(tmp)
 		return false
 	}
 	return true
@@ -176,9 +221,45 @@ destroy_tap :: proc(t: Tap) {
 
 // Read_Tap_Entry represents a single line in taps.txt.
 // Format: "user/repo" or "user/repo<TAB>https://github.com/user/repo".
+// discovered marks entries synthesized from a shared Library/Taps clone
+// (not a taps.txt row); write_taps skips them so the database only ever
+// holds rows the user (or standalone mode) actually recorded.
 Read_Tap_Entry :: struct {
-	name: string,
-	url:  string,
+	name:       string,
+	url:        string,
+	discovered: bool,
+}
+
+// ── cross-process lock for shared tap mutations ──
+//
+// Concurrent ubrew processes can race on the same Library/Taps store
+// (tap add cloning while another untaps, `ubrew update` pulling while a
+// clone is being removed). An advisory fcntl record lock on a lock file
+// inside the taps dir serializes ubrew's own tap add/remove/update.
+// NOTE: this coordinates ubrew processes only — `brew` itself does not
+// honor the lock, so keep mutating operations short.
+
+// shared_tap_lock acquires an exclusive lock for shared tap mutations.
+// The returned fd must be closed (defer posix.close) to release the lock.
+// Returns (-1, false) when the lock cannot be taken.
+shared_tap_lock :: proc() -> (posix.FD, bool) {
+	lock_path := strings.clone_to_cstring(fmt.tprintf("%s/.ubrew.lock", shared_taps_dir()), context.temp_allocator)
+	fd := posix.open(lock_path, {.RDWR, .CREAT}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
+	if fd == -1 {
+		return -1, false
+	}
+	fl := posix.flock {
+		l_start  = 0,
+		l_len    = 0,
+		l_pid    = 0,
+		l_type   = posix.Lock_Type.WRLCK,
+		l_whence = c.short(0), // SEEK_SET
+	}
+	if posix.fcntl(fd, posix.FCNTL_Cmd.SETLKW, &fl) != 0 {
+		posix.close(fd)
+		return -1, false
+	}
+	return fd, true
 }
 
 destroy_read_tap_entry :: proc(e: Read_Tap_Entry) {
@@ -248,14 +329,35 @@ read_taps :: proc() -> (taps: [dynamic]Read_Tap_Entry) {
 						}
 						if !already {
 							append(&taps, Read_Tap_Entry{
-								name = strings.clone(tap_name, context.allocator),
-								url  = strings.clone("", context.allocator),
+								name       = strings.clone(tap_name, context.allocator),
+								url        = strings.clone("", context.allocator),
+								discovered = true,
 							})
 						}
 					}
 				}
 			}
 		}
+	}
+
+	// Shared mode: Library/Taps is the sole source of *active* taps. A
+	// taps.txt row with no backing clone is stale — either brew untapped it
+	// or the clone failed — so drop it from the view (homebrew/* pseudo-taps
+	// are API-based and legitimately never cloned). Standalone mode keeps
+	// every row.
+	if os.is_dir(taps_dir) {
+		kept := make([dynamic]Read_Tap_Entry, 0, len(taps), context.allocator)
+		for t in taps {
+			if !t.discovered && !strings.has_prefix(t.name, "homebrew/") {
+				if !os.is_dir(fmt.tprintf("%s/.git", shared_tap_dir_in(taps_dir, t.name))) {
+					destroy_read_tap_entry(t)
+					continue
+				}
+			}
+			append(&kept, t)
+		}
+		delete(taps)
+		taps = kept
 	}
 
 	return taps
@@ -267,6 +369,10 @@ write_taps :: proc(taps: [dynamic]Read_Tap_Entry) -> bool {
 
 	b := strings.builder_make(context.temp_allocator)
 	for t in taps {
+		// Discovered entries are shared-mode clones, not taps.txt rows:
+		// never persist them (prevents homebrew/core, homebrew/cask and
+		// dir-only taps from leaking into the database file).
+		if t.discovered do continue
 		strings.write_string(&b, t.name)
 		if len(t.url) > 0 {
 			strings.write_string(&b, "\t")
@@ -280,12 +386,41 @@ write_taps :: proc(taps: [dynamic]Read_Tap_Entry) -> bool {
 	return err == nil
 }
 
+// read_taps_rows returns only the taps.txt rows (no clone discovery, no
+// shared-mode filtering). Used by `ubrew tap migrate` so pre-shared state
+// recorded only in taps.txt is still visible for cloning.
+read_taps_rows :: proc() -> (taps: [dynamic]Read_Tap_Entry) {
+	taps = make([dynamic]Read_Tap_Entry, context.allocator)
+	if !os.is_file(TAPS_DB_PATH) do return taps
+	data, read_err := os.read_entire_file(TAPS_DB_PATH, context.allocator)
+	if read_err != nil do return taps
+	defer delete(data)
+
+	lines := strings.split(string(data), "\n", context.temp_allocator)
+	for line in lines {
+		trimmed := strings.trim_space(line)
+		if len(trimmed) == 0 do continue
+		parts := strings.split(trimmed, "\t", context.temp_allocator)
+		name := strings.trim_space(parts[0])
+		url := ""
+		if len(parts) > 1 {
+			url = strings.trim_space(parts[1])
+		}
+		if len(name) > 0 {
+			append(&taps, Read_Tap_Entry{
+				name = strings.clone(name, context.allocator),
+				url  = strings.clone(url, context.allocator),
+			})
+		}
+	}
+	return taps
+}
+
 // tap_add adds a tap to the database. The url parameter is optional; if
 // non-empty, it is stored alongside the name and used as the fetch source.
 // In shared mode the tap is also cloned into brew's Library/Taps first.
 tap_add :: proc(name, url: string) -> bool {
-	parts := strings.split(name, "/", context.temp_allocator)
-	if len(parts) != 2 || len(parts[0]) == 0 || len(parts[1]) == 0 {
+	if !is_valid_tap_name(name) {
 		fmt.printf("Error: Invalid tap name '%s'. Tap name must be in format user/repo.\n", name)
 		return false
 	}
@@ -294,10 +429,17 @@ tap_add :: proc(name, url: string) -> bool {
 	// dedupe so taps already listed in taps.txt but not yet cloned still get
 	// materialized. homebrew/core & homebrew/cask are API-based, never cloned.
 	if mode() == .Shared && !strings.has_prefix(name, "homebrew/") {
+		lock_fd, lock_ok := shared_tap_lock()
+		if !lock_ok {
+			fmt.printf("Error: Could not lock the shared taps directory for '%s'.\n", name)
+			return false
+		}
+		defer posix.close(lock_fd)
 		if !ensure_shared_clone(name, url) {
-			// Fall back to a DB-only entry so auto-tap installs don't
-			// hard-fail; the warning with the `brew tap` hint was printed.
-			fmt.printf("Warning: Recorded '%s' without a local clone. Run `ubrew tap migrate` or `brew tap %s` to fix.\n", name, name)
+			// Shared mode: the clone is the record of the tap; a failed
+			// clone means the tap was not added (ensure_shared_clone
+			// already printed the warning with the `brew tap` hint).
+			return false
 		}
 	}
 
@@ -311,6 +453,12 @@ tap_add :: proc(name, url: string) -> bool {
 
 	for &t in taps {
 		if t.name == name {
+			// A discovered entry is a shared-mode clone; the git remote is
+			// authoritative and there is no taps.txt row to update.
+			if t.discovered {
+				fmt.printf("Warning: Already tapped '%s'\n", name)
+				return true
+			}
 			// Update URL if a new one was provided
 			if len(url) > 0 && t.url != url {
 				old_url := t.url
@@ -330,6 +478,13 @@ tap_add :: proc(name, url: string) -> bool {
 			}
 			return true
 		}
+	}
+
+	// In shared mode the clone itself is the record of the tap; write a
+	// taps.txt row only for standalone mode (and homebrew/* pseudo-taps).
+	// This keeps Library/Taps the sole source of active taps.
+	if mode() == .Shared {
+		return true
 	}
 
 	append(&taps, Read_Tap_Entry{
@@ -391,6 +546,12 @@ tap_row_exists :: proc(name: string) -> bool {
 	return false
 }
 
+// is_symlink reports whether path is a symbolic link (any type of target).
+is_symlink :: proc(path: string) -> bool {
+	target, err := os.read_link(path, context.temp_allocator)
+	return err == nil && len(target) > 0
+}
+
 // tap_remove removes a tap from the database.
 tap_remove :: proc(name: string) -> bool {
 	// Shared mode: the clone directory in brew's Library/Taps is the tap.
@@ -398,10 +559,27 @@ tap_remove :: proc(name: string) -> bool {
 	// drop the taps.txt compatibility row. A DB-only tap (clone missing)
 	// still gets its row removed.
 	if mode() == .Shared && !strings.has_prefix(name, "homebrew/") {
+		// Validate the name shape before deriving any path: a name like
+		// "a/../../tmp/x" would otherwise produce a dest that still has the
+		// taps_dir prefix and could escape Library/Taps (path traversal).
+		if !is_valid_tap_name(name) {
+			fmt.printf("Error: Invalid tap name '%s'. Tap name must be in format user/repo.\n", name)
+			return false
+		}
+		lock_fd, lock_ok := shared_tap_lock()
+		if !lock_ok {
+			fmt.printf("Error: Could not lock the shared taps directory for '%s'.\n", name)
+			return false
+		}
+		defer posix.close(lock_fd)
 		dest := shared_tap_dir(name)
 		taps_dir := shared_taps_dir()
-		if !strings.has_prefix(dest, taps_dir) {
+		if !strings.has_prefix(dest, taps_dir) || strings.contains(dest, "/../") {
 			fmt.printf("Error: Refusing to remove '%s' (outside %s).\n", dest, taps_dir)
+			return false
+		}
+		if is_symlink(dest) {
+			fmt.printf("Error: Refusing to remove '%s' (symlink; refusing to follow it out of %s).\n", dest, taps_dir)
 			return false
 		}
 		dir_exists := os.is_dir(dest)
@@ -660,12 +838,15 @@ tap_from_entry :: proc(e: Read_Tap_Entry) -> Tap {
 	} else {
 		url = strings.clone(e.url, context.allocator)
 	}
-	branch := strings.clone("main", context.allocator)
-	if mode() != .Shared || !os.is_dir(shared_tap_dir(e.name)) {
-		// Standalone mode — or shared mode without a local clone (clone failed
-		// or not yet migrated): the raw-URL fallback needs the real default
-		// branch. Shared mode with a clone reads Ruby straight from the
+	branch: string
+	if mode() == .Shared && os.is_dir(shared_tap_dir(e.name)) {
+		// Shared mode with a local clone reads Ruby straight from the
 		// working tree, so skip the GitHub API probe entirely.
+		branch = strings.clone("main", context.allocator)
+	} else {
+		// Standalone mode — or shared mode without a local clone (clone
+		// failed or not yet migrated): the raw-URL fallback needs the real
+		// default branch.
 		branch = derive_branch_from_url(url)
 	}
 	return Tap{
@@ -827,60 +1008,122 @@ fetch_formula_ruby :: proc(t: Tap, formula_name: string) -> (contents: string, o
 	return "", false
 }
 
-trusted_taps_load :: proc() -> ([dynamic]string, bool) {
-	names := make([dynamic]string, context.allocator)
-
-	load_file :: proc(path: string, names: ^[dynamic]string) {
-		data, rerr := os.read_entire_file(path, context.allocator)
-		if rerr != nil || len(data) == 0 do return
-		defer delete(data)
-		text := string(data)
-		start := 0
-		for start < len(text) {
-			end := start
-			for end < len(text) && text[end] != '\n' {
-				end += 1
-			}
-			if end > start {
-				line := strings.trim_space(text[start:end])
-				if len(line) > 0 && !strings.has_prefix(line, "#") {
-					already := false
-					for n in names^ {
-						if n == line {
-							already = true
-							break
-						}
-					}
-					if !already {
-						append(names, strings.clone(line, context.allocator))
+// load_trusted_file appends every non-empty, non-comment line of path to
+// names (deduplicated). No-op when the file is missing.
+load_trusted_file :: proc(path: string, names: ^[dynamic]string) {
+	data, rerr := os.read_entire_file(path, context.allocator)
+	if rerr != nil || len(data) == 0 do return
+	defer delete(data)
+	text := string(data)
+	start := 0
+	for start < len(text) {
+		end := start
+		for end < len(text) && text[end] != '\n' {
+			end += 1
+		}
+		if end > start {
+			line := strings.trim_space(text[start:end])
+			if len(line) > 0 && !strings.has_prefix(line, "#") {
+				already := false
+				for n in names^ {
+					if n == line {
+						already = true
+						break
 					}
 				}
+				if !already {
+					append(names, strings.clone(line, context.allocator))
+				}
 			}
-			start = end + 1
+		}
+		start = end + 1
+	}
+}
+
+// homebrew_trusted_taps returns the trusted taps recorded by the actual
+// Homebrew install at the *runtime* prefix (the same prefix shared-mode
+// clones come from). The file is honored whenever it exists; a custom
+// HOMEBREW_PREFIX/UBREW_PREFIX tree carries its own trust state. Callers
+// must delete the returned strings and slice.
+homebrew_trusted_taps :: proc() -> [dynamic]string {
+	return homebrew_trusted_taps_at(platform.get_homebrew_prefix())
+}
+
+// homebrew_trusted_taps_at is the testable core of homebrew_trusted_taps:
+// it loads <prefix>/etc/homebrew/trusted_taps when that file exists.
+homebrew_trusted_taps_at :: proc(prefix: string) -> [dynamic]string {
+	names := make([dynamic]string, context.allocator)
+	hb_trusted_path := fmt.tprintf("%s/etc/homebrew/trusted_taps", prefix)
+	if os.is_file(hb_trusted_path) {
+		load_trusted_file(hb_trusted_path, &names)
+	}
+	return names
+}
+
+// trusted_taps_load returns the merged trust view: ubrew's own
+// TRUSTED_TAPS_FILE plus the Homebrew install's trusted_taps overlay.
+// The overlay is read-only — mutating commands must use
+// trusted_taps_load_own so Homebrew entries are never copied into
+// ubrew's file.
+trusted_taps_load :: proc() -> ([dynamic]string, bool) {
+	names := make([dynamic]string, context.allocator)
+	load_trusted_file(TRUSTED_TAPS_FILE, &names)
+	homebrew := homebrew_trusted_taps()
+	defer {
+		for n in homebrew {
+			delete(n)
+		}
+		delete(homebrew)
+	}
+	for n in homebrew {
+		already := false
+		for own in names {
+			if own == n {
+				already = true
+				break
+			}
+		}
+		if !already {
+			append(&names, strings.clone(n, context.allocator))
 		}
 	}
-
-	load_file(TRUSTED_TAPS_FILE, &names)
-
-	// Only honor the Homebrew installation's trusted_taps file when the
-	// prefix is the compile-time default. When HOMEBREW_PREFIX/UBREW_PREFIX
-	// point at a different tree, that file cannot be assumed to describe
-	// taps we should trust — third-party taps stay untrusted unless they
-	// are explicitly approved via `ubrew tap trust`.
-	if platform.get_homebrew_prefix() == platform.DEFAULT_HOMEBREW_PREFIX {
-		hb_trusted_path := fmt.tprintf("%s/etc/homebrew/trusted_taps", platform.get_homebrew_prefix())
-		load_file(hb_trusted_path, &names)
-	}
-
 	return names, false
 }
 
+// trusted_taps_load_own returns only the entries owned by ubrew's own
+// TRUSTED_TAPS_FILE — the set mutating commands may add to or remove
+// from. Callers must delete the returned strings and slice.
+trusted_taps_load_own :: proc() -> [dynamic]string {
+	names := make([dynamic]string, context.allocator)
+	load_trusted_file(TRUSTED_TAPS_FILE, &names)
+	return names
+}
+
+// trusted_taps_save persists names to TRUSTED_TAPS_FILE, excluding any
+// entries owned by the Homebrew overlay so ubrew's file never absorbs
+// brew's trust state.
 trusted_taps_save :: proc(names: [dynamic]string) {
 	db_dir := fmt.tprintf("%s/db", platform.get_ubrew_root())
 	_ = os.make_directory_all(db_dir, os.perm(0o755))
+
+	homebrew := homebrew_trusted_taps()
+	defer {
+		for n in homebrew {
+			delete(n)
+		}
+		delete(homebrew)
+	}
+	is_brew_owned :: proc(n: string, hb: [dynamic]string) -> bool {
+		for h in hb {
+			if h == n do return true
+		}
+		return false
+	}
+
 	buf: strings.Builder
 	strings.builder_init(&buf)
 	for name in names {
+		if is_brew_owned(name, homebrew) do continue
 		strings.write_string(&buf, name)
 		strings.write_byte(&buf, '\n')
 	}
@@ -913,15 +1156,21 @@ tap_is_trusted :: proc(name: string) -> bool {
 }
 
 // is_valid_tap_name reports whether a name looks like a tap: exactly one '/'
-// with non-empty user and repo parts, and no URL scheme markers. This guards
-// trusted_taps.txt against entries like "https:/..." (a real corruption seen
-// in the live /opt/ubrew state) being written verbatim.
+// with non-empty user and repo parts, no URL scheme markers, and no "." or
+// ".." path components (which could escape the taps directory via
+// shared_tap_dir). This guards trusted_taps.txt against entries like
+// "https:/..." (a real corruption seen in the live /opt/ubrew state) being
+// written verbatim.
 is_valid_tap_name :: proc(name: string) -> bool {
 	if len(name) == 0 || strings.contains(name, "://") || strings.contains(name, ":") {
 		return false
 	}
 	parts := strings.split(name, "/", context.temp_allocator)
-	return len(parts) == 2 && len(parts[0]) > 0 && len(parts[1]) > 0
+	if len(parts) != 2 do return false
+	for p in parts {
+		if len(p) == 0 || p == "." || p == ".." do return false
+	}
+	return true
 }
 
 tap_trust :: proc(name: string) -> bool {
@@ -929,7 +1178,21 @@ tap_trust :: proc(name: string) -> bool {
 		fmt.printf("Error: Invalid tap name '%s'. Tap name must be in format user/repo.\n", name)
 		return false
 	}
-	names, _ := trusted_taps_load()
+	// A Homebrew-owned trust entry is already trusted; nothing to save —
+	// never copy brew's entries into ubrew's file.
+	homebrew := homebrew_trusted_taps()
+	defer {
+		for n in homebrew {
+			delete(n)
+		}
+		delete(homebrew)
+	}
+	for n in homebrew {
+		if n == name {
+			return true
+		}
+	}
+	names := trusted_taps_load_own()
 	defer {
 		for n in names {
 			delete(n)
@@ -950,7 +1213,23 @@ tap_trust :: proc(name: string) -> bool {
 }
 
 tap_untrust :: proc(name: string) -> bool {
-	names, _ := trusted_taps_load()
+	// Homebrew-owned entries are managed by brew's trusted_taps file;
+	// ubrew must not silently pretend to remove them.
+	homebrew := homebrew_trusted_taps()
+	defer {
+		for n in homebrew {
+			delete(n)
+		}
+		delete(homebrew)
+	}
+	for n in homebrew {
+		if n == name {
+			fmt.printf("Error: Tap '%s' is trusted by Homebrew (%s/etc/homebrew/trusted_taps).\n", name, platform.get_homebrew_prefix())
+			fmt.printf("  Remove it there (or run `brew untap %s --force`) instead.\n", name)
+			return false
+		}
+	}
+	names := trusted_taps_load_own()
 	defer delete(names)
 	found := false
 	new_names := make([dynamic]string, context.allocator)
@@ -962,6 +1241,7 @@ tap_untrust :: proc(name: string) -> bool {
 		}
 	}
 	trusted_taps_save(new_names)
+	delete(new_names)
 	return found
 }
 

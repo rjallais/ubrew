@@ -4414,7 +4414,10 @@ run_tap_migrate :: proc(args: []string) {
 		return
 	}
 
-	taps := tap.read_taps()
+	// Rows only, not the merged view: migration must see pre-shared state
+	// recorded in taps.txt even when the clone does not exist yet (the
+	// merged read_taps view filters those out in shared mode).
+	taps := tap.read_taps_rows()
 	defer {
 		for t in taps {
 			tap.destroy_read_tap_entry(t)
@@ -4454,7 +4457,8 @@ run_tap_migrate :: proc(args: []string) {
 	//    clones (Formula_listing.json + .hit sidecar). The Formula/ mirror
 	//    dir is kept: clone reads write through to it on demand.
 	fmt.println("==> Removing stale probe caches")
-	// Re-read so taps just added in step 1 (e.g. --brewfile) are covered too.
+	// Merged view so taps just added in step 1 / step 4 (clones without
+	// taps.txt rows) are covered too.
 	taps_now := tap.read_taps()
 	defer {
 		for t in taps_now {
@@ -5717,6 +5721,22 @@ run_update :: proc(args: []string) {
 		// pipeline fills them during promotion.
 		updated_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
 		failed_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
+
+		// Serialize git pulls against concurrent tap add/remove from other
+		// ubrew processes (advisory lock; brew itself does not honor it).
+		tap_lock_fd: posix.FD
+		have_tap_lock := false
+		if tap.mode() == .Shared {
+			if fd, ok := tap.shared_tap_lock(); ok {
+				tap_lock_fd = fd
+				have_tap_lock = true
+			}
+		}
+		defer {
+			if have_tap_lock {
+				posix.close(tap_lock_fd)
+			}
+		}
 
 		for entry in taps {
 			// Shared mode: taps are git clones in brew's Library/Taps. Pull
