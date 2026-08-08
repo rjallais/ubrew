@@ -2379,8 +2379,10 @@ Homebrew_Tab_Bottle_File :: struct {
 
 // UBREW_HOMEBREW_VERSION is the single source of truth for the version
 // string written into both TAB_FORMULA.json and INSTALL_RECEIPT.json, so
-// the two receipts always agree.
-UBREW_HOMEBREW_VERSION :: "ubrew 0.1.0"
+// the two receipts always agree. It must be a bare, Homebrew-compatible
+// version value ("0.1.0"): Homebrew receipt readers parse this field as a
+// version number, so a "ubrew"-prefixed "ubrew 0.1.0" would be misread.
+UBREW_HOMEBREW_VERSION :: "0.1.0"
 
 build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottle: bool, on_request: bool) -> Homebrew_Tab_Receipt {
 	tab := Homebrew_Tab_Receipt {

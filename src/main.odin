@@ -905,7 +905,7 @@ write_brewfile_lock :: proc(brewfile_path: string, entries: []Brewfile_Entry) {
 			}
 			strings.write_string(&b, fmt.tprintf("      \"%s\": {{\n        \"version\": \"%s\"\n      }}", e.name, ver))
 		}
-		strings.write_string(&b, "\n    }}")
+		strings.write_string(&b, "\n    }")
 		if k_idx < len(kinds) - 1 do strings.write_string(&b, ",")
 		strings.write_string(&b, "\n")
 	}
@@ -4434,6 +4434,17 @@ run_tap_migrate :: proc(args: []string) {
 	failed := 0
 	removed_files := 0
 
+	// Serialize the destructive clone/re-clone mutations below against
+	// concurrent tap add/remove/git-pull from other ubrew processes (the
+	// same advisory lock run_update and tap_add/tap_remove use; fcntl locks
+	// are per-process so tap_add/remove re-locking inside --brewfile is safe).
+	mig_lock_fd, mig_lock_ok := tap.shared_tap_lock()
+	if !mig_lock_ok {
+		fmt.println("Error: Could not lock the shared taps directory for migration.")
+		return
+	}
+	defer posix.close(mig_lock_fd)
+
 	// 1. Ensure a clone exists for every non-homebrew/* tap.
 	fmt.println("==> Checking shared Library/Taps clones")
 	for entry in taps {
@@ -6203,7 +6214,9 @@ run_update :: proc(args: []string) -> bool {
 		tap.print_untrusted_taps_warning_once()
 	}
 
-	fmt.println("==> ubrew is up-to-date.")
+	if snapshot_complete {
+		fmt.println("==> ubrew is up-to-date.")
+	}
 	return snapshot_complete
 }
 
@@ -10306,11 +10319,13 @@ run_trust :: proc(args: []string) {
 			fmt.printf("==> Trusted tap: %s\n", target_tap)
 		} else {
 			fmt.printf("Error: Failed to trust tap %s\n", target_tap)
-			delete(t_name)
+			// parse_tap_token only allocates non-empty names (a bare
+			// "formula" token yields the "" literal), so guard the delete.
+			if len(t_name) > 0 do delete(t_name)
 			delete(f_name)
 			os.exit(1)
 		}
-		delete(t_name)
+		if len(t_name) > 0 do delete(t_name)
 		delete(f_name)
 	}
 }

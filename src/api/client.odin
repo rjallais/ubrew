@@ -525,10 +525,10 @@ append_api_cask_matches_fast :: proc(data: []u8, out: ^[dynamic]Cask_Search_Resu
 				if !lower_contains(token, query_lower) && !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
 					continue
 				}
-				// Homebrew core casks are macOS-only; skip on other platforms
-				when ODIN_OS != .Darwin {
-					continue
-				}
+				// No platform gate here: mirrors cask_available_on_current_os
+				// (returns true on Linux) so the no-index JSON fallback
+				// surfaces the same cross-platform casks as the SQLite
+				// index when it is unavailable.
 				if cask_results_contains(out^[:], token) {
 					continue
 				}

@@ -134,6 +134,14 @@ clone_origin_remote :: proc(repo_dir: string) -> (string, bool) {
 	return trimmed, true
 }
 
+// normalize_git_url strips a trailing "/" or ".git" so equivalent remote
+// spellings (e.g. ".../homebrew-tap" vs ".../homebrew-tap.git") compare
+// equal. Temp-allocated; do not free.
+normalize_git_url :: proc(url: string) -> string {
+	u := strings.trim_suffix(url, "/")
+	return strings.trim_suffix(u, ".git")
+}
+
 // ensure_shared_clone_into is the testable core of ensure_shared_clone: it
 // clones <name> from <url> (or the Homebrew-convention URL when empty) into
 // <taps_dir>/<user>/homebrew-<repo>. Returns false when the clone fails.
@@ -151,11 +159,12 @@ ensure_shared_clone_into :: proc(taps_dir, name, url: string) -> bool {
 		// The clone already exists: verify its origin remote before treating
 		// it as the requested tap, so a stale, partial, or unrelated
 		// repository is never used for formula/cask reads. An explicitly
-		// given URL must match; otherwise any working origin is accepted.
+		// given URL must match (modulo spelling differences); otherwise any
+		// working origin is accepted.
 		if remote, ok := clone_origin_remote(dest); !ok {
 			fmt.printf("Warning: Tap '%s' clone at %s has no origin remote; re-cloning.\n", name, dest)
 			_ = os.remove_all(dest)
-		} else if len(url) > 0 && remote != clone_url {
+		} else if len(url) > 0 && normalize_git_url(remote) != normalize_git_url(clone_url) {
 			fmt.printf("Warning: Tap '%s' clone at %s points at %s, not %s; re-cloning.\n", name, dest, remote, clone_url)
 			_ = os.remove_all(dest)
 		} else {
