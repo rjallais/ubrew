@@ -2,7 +2,7 @@
 
 **Goal:** Close the user-visible behavioral gaps between `ubrew` and official Homebrew's `brew update` / outdated / tap-trust / upgrade flow, as captured in the comparison below.
 
-**Status:** Draft — 2026-07-31
+**Status:** Implementation in progress — W3, W4, W6, W8 shipped on branch `homebrew-parity` (2026-08-08); see §6.
 
 ---
 
@@ -164,3 +164,14 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 | 3 | W6 (batch tap-trust warning) | Low |
 | 4 | W3 (new formulae/casks diffing) | Medium |
 | 5 | W4 (JWS API JSONs) + W8 (auto-update hook) | Higher — network path changes |
+
+## 6. Implementation status (branch `homebrew-parity`, 2026-08-08)
+
+Items 1–4 of the user-approved work order (see summary of 2026-08-08 session) are implemented and verified (`mise run build`, `mise run test-unit` — 2+16+6+13 tests green, live smoke §4):
+
+- **W4 — JWS fail-closed.** The unsigned `formula.json` / `cask.json` endpoints remain the default (`formula_url()` / `cask_url()` return `FORMULA_LIST_URL_UNSIGNED` unless `jws_override_active()`). JWS is only reached through the explicit `UBREW_NO_VERIFY_JWS` insecure override, which prints a warning once per run and unwraps the envelopes in place; without the override ubrew never hits the `.jws.json` endpoints, so unverified payloads cannot silently become the cache.
+- **W6 — Batch untrusted-tap warning.** `print_untrusted_taps_warning_once()` (src/tap/tap.odin) emits the full remediation block at most once per process; called from `run_update` (non-`--auto-update`) and from `run_upgrade` after `maybe_auto_update`. The per-tap interactive prompt on install/fetch paths is preserved.
+- **W8 — Auto-update atomicity.** `maybe_auto_update()` propagates failure when `run_update(--auto-update)` could not commit a complete metadata snapshot and `run_install`/`run_upgrade` abort with `Error: auto-update could not establish a complete metadata snapshot; refusing to ...` (verified: forced total network failure via dead proxy aborts `install` with exit 1; bare `update` stays a non-fatal warning). The formula/cask caches are committed as one all-or-none pair: each list must stage (fresh payload, or a clean 304 after a transfer that exited 0) before either temp file is renamed. `fetch_etag_batch` now returns per-URL `written` flags plus `cmd_ok` (and `fetch_single_with_etag` a `(written, completed)` pair) so a failed transfer is never mistaken for a 304 no-op.
+- **W3 — New Formulae / New Casks listings.** `run_update()` diffs previous vs new API lists and prints `==> New Formulae` / `==> New Casks` with descriptions, capped at 50 entries per section with an "… and N more" tail, and suppressed entirely on a non-TTY under `--auto-update`.
+
+Remaining: W1, W2 (aggregate tap summary), W5, W7 (upgrade prompt always-on; non-TTY auto-proceed contract fixed in `25995bb`).
