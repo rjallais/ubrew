@@ -1,14 +1,14 @@
-tap "gromgit/brewtils"
-tap "hashicorp/tap"
+tap "gromgit/brewtils", trusted: true
+tap "hashicorp/tap", trusted: true
 tap "homebrew/core"
-tap "justrach/nanobrew"
-tap "kcl-lang/tap"
-tap "nijaru/tap"
-tap "pkgxdev/made"
-tap "rjallais/ubrew"
-tap "ublue-os/experimental-tap"
-tap "ublue-os/homebrew-experimental-tap"
-tap "ublue-os/tap"
+tap "justrach/nanobrew", trusted: true
+tap "kcl-lang/tap", trusted: true
+tap "nijaru/tap", trusted: true
+tap "pkgxdev/made", trusted: true
+tap "rjallais/ubrew", trusted: true
+tap "ublue-os/experimental-tap", trusted: true
+tap "ublue-os/homebrew-experimental-tap", trusted: true
+tap "ublue-os/tap", trusted: true
 
 brew "acl"
 brew "age"
@@ -142,6 +142,7 @@ brew "osqp"
 brew "p11-kit"
 brew "pango"
 brew "pass"
+brew "patchelf"
 brew "pcre2"
 brew "perl"
 brew "pinentry"
@@ -164,7 +165,6 @@ brew "systemd"
 brew "taproom"
 brew "terraform"
 brew "tree"
-brew "tree.bak"
 brew "ubrew"
 brew "userspace-rcu"
 brew "util-linux"
