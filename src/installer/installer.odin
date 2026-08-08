@@ -64,6 +64,20 @@ UBREW_ROOT: string = platform.DEFAULT_UBREW_ROOT
 PREFIX:     string = platform.DEFAULT_UBREW_ROOT + "/prefix"
 CACHE_DIR:  string = platform.DEFAULT_UBREW_ROOT + "/cache"
 
+// Runtime-resolved Homebrew install prefix (where Cellar/Caskroom/bin
+// actually live). This is the correct target for rewriting Homebrew
+// bottle placeholders (`@@HOMEBREW_PREFIX@@`) — bottles are installed
+// into the *shared* Homebrew prefix, so replacing the placeholder with
+// PREFIX (ubrew's own stage/prefix) yields RUNPATHs and symlinks that
+// point at a nonexistent /opt/ubrew/prefix/Cellar/... layout.
+//
+// It must stay distinct from PREFIX: PREFIX is also used below to derive
+// the staged-link bin dir (`fmt.tprintf("%s/bin", PREFIX)`), which is
+// ubrew's own prefix even in default shared mode. Rebinding PREFIX to the
+// brew prefix would silently move the staged-link layout into the Cellar.
+// Rebound in init_paths() from the same platform resolver as the cells.
+HOMEBREW_PREFIX: string = platform.DEFAULT_HOMEBREW_PREFIX
+
 // Runtime-resolved Cellar / Caskroom / bin paths. Set by init_paths().
 // Defaults match the Homebrew layout so both tools stay in sync by default.
 CELLAR_DIR:   string = platform.CELLAR_DIR
@@ -80,6 +94,7 @@ init_paths :: proc() {
 	CELLAR_DIR   = platform.cellar_dir
 	CASKROOM_DIR = platform.caskroom_dir
 	BIN_DIR      = platform.bin_dir
+	HOMEBREW_PREFIX = platform.get_homebrew_prefix()
 }
 
 ensure_dir :: proc(path: string) -> bool {
@@ -363,7 +378,7 @@ relocate_single_file :: proc(path: string) -> bool {
 	if read_link_err == nil {
 		if strings.contains(target, "@@HOMEBREW_PREFIX@@") || strings.contains(target, "@@HOMEBREW_CELLAR@@") {
 			new_target, _ := strings.replace_all(target, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
-			new_target, _ = strings.replace_all(new_target, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+			new_target, _ = strings.replace_all(new_target, "@@HOMEBREW_PREFIX@@", HOMEBREW_PREFIX, context.temp_allocator)
 			os.remove(path)
 			sym_err := os.symlink(new_target, path)
 			if sym_err != nil {
@@ -385,7 +400,7 @@ relocate_single_file :: proc(path: string) -> bool {
 		rpath = strings.trim_space(rpath)
 		if strings.contains(rpath, "@@HOMEBREW_PREFIX@@") || strings.contains(rpath, "@@HOMEBREW_CELLAR@@") {
 			new_rpath, _ := strings.replace_all(rpath, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
-			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+			new_rpath, _ = strings.replace_all(new_rpath, "@@HOMEBREW_PREFIX@@", HOMEBREW_PREFIX, context.temp_allocator)
 			chmod_args := []string{"chmod", "+w", path}
 			if !platform.exec_cmd("chmod", chmod_args) {
 				return false
@@ -403,7 +418,7 @@ relocate_single_file :: proc(path: string) -> bool {
 			content := string(data)
 			if strings.contains(content, "@@HOMEBREW_PREFIX@@") || strings.contains(content, "@@HOMEBREW_CELLAR@@") {
 				new_content, _ := strings.replace_all(content, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
-				new_content, _ = strings.replace_all(new_content, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+				new_content, _ = strings.replace_all(new_content, "@@HOMEBREW_PREFIX@@", HOMEBREW_PREFIX, context.temp_allocator)
 				chmod_args := []string{"chmod", "+w", path}
 				if !platform.exec_cmd("chmod", chmod_args) {
 					return false
@@ -478,7 +493,7 @@ relocate_macho_file :: proc(path: string) -> bool {
 					old_path := parts[1]
 					if strings.contains(old_path, "@@HOMEBREW_PREFIX@@") || strings.contains(old_path, "@@HOMEBREW_CELLAR@@") {
 						new_path, _ := strings.replace_all(old_path, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
-						new_path, _ = strings.replace_all(new_path, "@@HOMEBREW_PREFIX@@", PREFIX, context.temp_allocator)
+						new_path, _ = strings.replace_all(new_path, "@@HOMEBREW_PREFIX@@", HOMEBREW_PREFIX, context.temp_allocator)
 						
 						tool_args := make([dynamic]string, context.temp_allocator)
 						defer delete(tool_args)
@@ -2362,9 +2377,14 @@ Homebrew_Tab_Bottle_File :: struct {
 	sha256:  string `json:"sha256"`,
 }
 
+// UBREW_HOMEBREW_VERSION is the single source of truth for the version
+// string written into both TAB_FORMULA.json and INSTALL_RECEIPT.json, so
+// the two receipts always agree.
+UBREW_HOMEBREW_VERSION :: "ubrew 0.1.0"
+
 build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottle: bool, on_request: bool) -> Homebrew_Tab_Receipt {
 	tab := Homebrew_Tab_Receipt {
-		homebrew_version = "ubrew 0.1.0",
+		homebrew_version = UBREW_HOMEBREW_VERSION,
 		tabfile            = fmt.tprintf("%s/TAB_FORMULA.json", keg_dir),
 		name               = strings.clone(f.name, context.allocator),
 		version            = strings.clone(f.version, context.allocator),
@@ -2403,9 +2423,9 @@ build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottl
 		for d in f.dependencies {
 			append(&deps, Homebrew_Tab_Dep {
 				full_name = strings.clone(d, context.allocator),
-				version   = "",
+				version   = strings.clone("", context.allocator),
 				revision  = 0,
-				pkg_version = "",
+				pkg_version = strings.clone("", context.allocator),
 				declared_directly = true,
 				paths = nil,
 			})
@@ -2533,7 +2553,7 @@ write_install_receipt :: proc(keg_dir: string, r: Install_Receipt) -> bool {
 		poured_from_bottle   = r.poured_from_bottle,
 		tap                  = r.tap,
 		runtime_dependencies = r.runtime_dependencies,
-		homebrew_version     = "ubrew-0.1.0",
+		homebrew_version     = UBREW_HOMEBREW_VERSION,
 		built_as_bottle      = r.poured_from_bottle,
 		installed_as_dependency = !r.installed_on_request,
 		loaded_from_api      = true,
