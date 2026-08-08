@@ -993,6 +993,7 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
             if v_arts, a_exists := var_entry["artifacts"]; a_exists {
                 if _, arr_ok := v_arts.(json.Array); arr_ok {
                     artifacts_to_parse = v_arts
+                    ok2 = true
                 }
             }
         }
@@ -1008,8 +1009,7 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     }
 
     artifacts_list := make([dynamic]cask.Artifact)
-    if ok2 {
-        arts_arr := artifacts_to_parse.(json.Array)
+    if arts_arr, arts_ok := artifacts_to_parse.(json.Array); ok2 && arts_ok {
         for art_item in arts_arr {
             art_obj := art_item.(json.Object)
 
@@ -2333,7 +2333,7 @@ append_tap_search_result :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Ta
 	append(out, Formula_Search_Result{
 		name    = strings.clone(token),
 		desc    = strings.clone(fmt.tprintf("(from %s tap)", t.name)),
-		version = "",
+		version = strings.clone(""),
 	})
 	return len(out^) >= limit
 }
@@ -2912,7 +2912,11 @@ fetch_single_with_etag :: proc (url, out_file, etag_file: string, headers: []str
     append(&args, "-sfL")
     append(&args, "--compressed")
     append(&args, "--http2")
-    if os.is_file(etag_file) {
+    // A 304 can only be received when the request carries a conditional
+    // ETag; record whether one existed so an empty output file afterwards
+    // can be told apart from an interrupted transfer.
+    had_conditional := os.is_file(etag_file)
+    if had_conditional {
         append(&args, "--etag-compare")
         append(&args, etag_file)
     }
@@ -2936,7 +2940,14 @@ fetch_single_with_etag :: proc (url, out_file, etag_file: string, headers: []str
     ok := platform.exec_cmd("curl", args[:])
     if !ok { return false, false }
     fi, fi_err := os.stat(out_file, context.temp_allocator)
-    if fi_err != nil || fi.size == 0 { return false, true }
+    if fi_err != nil { return false, false }
+    if fi.size == 0 {
+        // Empty output is a trustworthy "no-op" only when the transfer was
+        // conditional (a 304 was possible). Without an ETag sidecar the
+        // server could not have replied 304, so an empty file means no
+        // bytes arrived and the cache must not be committed as a snapshot.
+        return false, had_conditional
+    }
     return fi.size != pre_size || fi.modification_time != pre_mtime, true
 }
 
@@ -2974,8 +2985,14 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
 
     args := make([dynamic]string, context.temp_allocator)
     defer delete(args)
+    // A per-URL 304 can only be received when that request carried a
+    // conditional ETag. Record which transfers were conditional so an
+    // empty output file afterwards can be told apart from an entry that
+    // never received bytes.
+    had_conditional := make([]bool, len(urls), context.temp_allocator)
 
     for i in 0..<len(urls) {
+        had_conditional[i] = os.is_file(etag_files[i])
         if i > 0 {
             append(&args, "--next")
         } else {
@@ -2984,6 +3001,13 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
         append(&args, "-sfL")
         append(&args, "--compressed")
         append(&args, "--http2")
+        // Fail the whole process on the first failed transfer. curl's
+        // default, when chaining transfers with --next, is to return the
+        // exit status of the LAST URL only — a failed formula transfer
+        // followed by a successful cask transfer would then report success
+        // and the caller could treat the empty formula staging file as a
+        // clean 304 no-op.
+        append(&args, "--fail-early")
         if os.is_file(etag_files[i]) {
             append(&args, "--etag-compare")
             append(&args, etag_files[i])
@@ -3005,15 +3029,30 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
     any_written = false
     if ok {
         for i in 0..<len(out_files) {
-            if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
-                // Either the byte count changed (200 with new payload) or
-                // the mtime advanced past the pre-snapshot (curl's write
-                // bumps mtime on every successful download). The mtime
-                // check covers in-place edits where size is unchanged.
-                if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
-                    written[i] = true
-                    any_written = true
+            fi, stat_err := os.stat(out_files[i], context.temp_allocator)
+            if stat_err != nil {
+                // The output file for this entry is missing; the outcome is
+                // indeterminate and must not be committed as a valid no-op.
+                ok = false
+                continue
+            }
+            if fi.size == 0 {
+                // Empty output is a genuine 304 no-op only when the request
+                // was conditional (ETag sidecar present). Without it the
+                // server could not have replied 304, so this entry received
+                // no bytes and is indeterminate.
+                if !had_conditional[i] {
+                    ok = false
                 }
+                continue
+            }
+            // Either the byte count changed (200 with new payload) or the
+            // mtime advanced past the pre-snapshot (curl's write bumps mtime
+            // on every successful download). The mtime check covers in-place
+            // edits where size is unchanged.
+            if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
+                written[i] = true
+                any_written = true
             }
         }
     }

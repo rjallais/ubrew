@@ -28,16 +28,28 @@ store_ensure_dir :: proc() -> bool {
 	return os.make_directory_all(STORE_DIR, os.perm(0o755)) == nil
 }
 
-store_has_relocated_entry :: proc(sha256: string) -> bool {
+// store_relocated_entry_path returns the store-relocated entry directory
+// for a keg, scoped by the resolved HOMEBREW_PREFIX it was relocated for.
+// The sha256 identifies the bottle artifact, but relocation bakes the
+// runtime prefix into rpaths, symlinks and file contents; an entry written
+// under one prefix must never be materialized under a different one.
+store_relocated_entry_path :: proc(sha256, prefix: string, buf: []u8) -> string {
 	if !is_valid_sha256(sha256) {
-		return false
+		return ""
 	}
-	buf: [512]u8
-	result := fmt.bprintf(buf[:], "%s/%s", STORE_RELOCATED_DIR, sha256)
-	return os.is_dir(result)
+	if len(prefix) < 2 || prefix[0] != '/' {
+		return ""
+	}
+	return fmt.bprintf(buf[:], "%s%s/%s", STORE_RELOCATED_DIR, prefix, sha256)
 }
 
-store_save_relocated_entry :: proc(sha256: string, name: string, version: string) -> bool {
+store_has_relocated_entry :: proc(sha256, prefix: string) -> bool {
+	buf: [512]u8
+	result := store_relocated_entry_path(sha256, prefix, buf[:])
+	return len(result) > 0 && os.is_dir(result)
+}
+
+store_save_relocated_entry :: proc(sha256: string, name: string, version: string, prefix: string) -> bool {
 	if !is_valid_sha256(sha256) {
 		return false
 	}
@@ -57,7 +69,10 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 	src_result := fmt.bprintf(src_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)
 
 	dst_buf: [512]u8
-	dst_result := fmt.bprintf(dst_buf[:], "%s/%s", STORE_RELOCATED_DIR, sha256)
+	dst_result := store_relocated_entry_path(sha256, prefix, dst_buf[:])
+	if len(dst_result) == 0 {
+		return false
+	}
 
 	if os.is_dir(dst_result) {
 		return true
@@ -68,7 +83,7 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 	return platform.cow_copy(src_result, dst_result)
 }
 
-store_materialize_from_relocated :: proc(sha256: string, name: string, version: string) -> bool {
+store_materialize_from_relocated :: proc(sha256: string, name: string, version: string, prefix: string) -> bool {
 	if !is_valid_sha256(sha256) {
 		return false
 	}
@@ -85,7 +100,10 @@ store_materialize_from_relocated :: proc(sha256: string, name: string, version: 
 	}
 
 	src_buf: [512]u8
-	src_result := fmt.bprintf(src_buf[:], "%s/%s", STORE_RELOCATED_DIR, sha256)
+	src_result := store_relocated_entry_path(sha256, prefix, src_buf[:])
+	if len(src_result) == 0 {
+		return false
+	}
 
 	dst_buf: [512]u8
 	dst_result := fmt.bprintf(dst_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)

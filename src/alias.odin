@@ -64,6 +64,15 @@ write_alias :: proc(name, target: string) -> bool {
 	if name == "" || strings.contains(name, "\n") || strings.contains(target, "\n") {
 		return false
 	}
+	// Refuse to let an alias shadow a built-in command: a routine
+	// `ubrew <cmd>` must never dispatch to something else (e.g. a
+	// destructive command) through an alias entry.
+	for k in ubrew_known_commands(true) {
+		if name == k {
+			fmt.printf("ubrew: refusing to alias built-in command '%s'\n", name)
+			return false
+		}
+	}
 	dir := fmt.tprintf("%s/db", installer.UBREW_ROOT)
 	_ = os.make_directory_all(dir, os.perm(0o755))
 

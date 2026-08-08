@@ -577,10 +577,10 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	keg_dir := fmt.tprintf("%s/%s/%s", cellar_dir, f.name, f.version)
 
 	materialized := false
-	if store.store_has_relocated_entry(sha) {
+	if store.store_has_relocated_entry(sha, HOMEBREW_PREFIX) {
 		fmt.printf("==> Found cached store entry for %s, materializing via COW...\n", sha[:12])
 		_ = store.store_ensure_dir()
-		if store.store_materialize_from_relocated(sha, f.name, f.version) {
+		if store.store_materialize_from_relocated(sha, f.name, f.version, HOMEBREW_PREFIX) {
 			fmt.printf("==> Materialized %s from store via COW\n", f.name)
 			materialized = true
 		} else {
@@ -741,7 +741,7 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	if !materialized && store.is_valid_sha256(sha) {
 		_ = store.store_ensure_dir()
-		if store.store_save_relocated_entry(sha, f.name, f.version) {
+		if store.store_save_relocated_entry(sha, f.name, f.version, HOMEBREW_PREFIX) {
 			fmt.printf("==> Saved store entry %s via COW\n", sha[:12])
 		}
 	}

@@ -3349,7 +3349,7 @@ run_install :: proc(args: []string) {
 		f := job.f
 		if !build_from_source && len(f.bottle_url) > 0 {
 			sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
-			if store.store_has_relocated_entry(sha) {
+			if store.store_has_relocated_entry(sha, installer.HOMEBREW_PREFIX) {
 				continue // COW cache hit
 			}
 			dl_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
@@ -4573,7 +4573,7 @@ run_tap_migrate :: proc(args: []string) {
 		fmt.println("==> Reconciling with Brewfile")
 		for d in desired {
 			in_set := false
-			for t in taps {
+			for t in taps_now {
 				if t.name == d.name {
 					in_set = true
 					break
@@ -4605,7 +4605,7 @@ run_tap_migrate :: proc(args: []string) {
 		}
 
 		// Extras: taps present but not listed in the Brewfile (informational).
-		for t in taps {
+		for t in taps_now {
 			if strings.has_prefix(t.name, "homebrew/") do continue
 			in_desired := false
 			for d in desired {
@@ -5503,7 +5503,21 @@ git_head_short :: proc(dir: string) -> string {
 // git_pull_ff_only runs `git pull --ff-only --quiet` inside a shared-mode tap
 // clone. Returns true when the pull succeeded (including "already up to date").
 git_pull_ff_only :: proc(dir: string) -> bool {
-	return platform.exec_cmd("git", []string{"git", "-C", dir, "pull", "--ff-only", "--quiet"})
+	// Tap remotes are public and this runs non-interactively (before
+	// install/upgrade and during shared-mode updates). Keep the pull from
+	// blocking forever: abort the transfer once it stops making progress,
+	// cap the connect phase, and never fall back to an interactive
+	// credential prompt — the `true` ask-pass helper reports no
+	// credentials instead of hanging on the terminal.
+	args := []string{
+		"git",
+		"-c", "http.connectTimeout=10",
+		"-c", "http.lowSpeedLimit=1000",
+		"-c", "http.lowSpeedTime=30",
+		"-c", "core.askPass=true",
+		"-C", dir, "pull", "--ff-only", "--quiet",
+	}
+	return platform.exec_cmd("git", args[:])
 }
 
 run_update :: proc(args: []string) -> bool {
@@ -5665,7 +5679,11 @@ run_update :: proc(args: []string) -> bool {
 				[]string{etag_file_f, etag_file_c},
 				headers[:])
 			// curl --next runs both transfers inside one process, so a single
-			// exit code gates both staging files.
+			// exit code gates both staging files. --fail-early (inside
+			// fetch_etag_batch) makes that exit code truthful: the process
+			// dies on the FIRST failed transfer instead of reporting the
+			// last URL's status, so a failed formula list can never be
+			// masked by a successful cask list.
 			formula_transfer_ok = batch_cmd_ok
 			cask_transfer_ok = batch_cmd_ok
 			delete(batch_written)
@@ -6047,7 +6065,14 @@ run_update :: proc(args: []string) -> bool {
 				if data, rerr := os.read_entire_file(temp_file_upstream, context.temp_allocator); rerr == nil && len(data) > 0 {
 					if val, json_err := json.parse(data); json_err == nil {
 						json.destroy_value(val)
-						if os.rename(temp_file_upstream, db_path) == nil {
+						// Freshness marker: advance only when the snapshot
+						// committed cleanly. A failed/partial commit leaves
+						// a mixed generation on disk (e.g. new formula.json
+						// alongside the previous cask.json); if upstream.json
+						// were updated anyway, the next auto-update would
+						// skip the retry for the whole freshness window and
+						// trust the mixed state.
+						if snapshot_complete && os.rename(temp_file_upstream, db_path) == nil {
 							rebuild_index = true
 						}
 					}
@@ -6846,8 +6871,22 @@ run_uses :: proc(args: []string) {
                 continue
             }
             if r_ok {
+                deps := receipt.runtime_dependencies
+                // Homebrew receipts can store runtime_dependencies as an
+                // array of objects, which ubrew's parser reads as empty;
+                // fall back to the formula API (mirroring get_runtime_deps)
+                // so shared-Cellar kegs are covered.
+                api_f: formula.Formula
+                api_ok := false
+                if len(deps) == 0 {
+                    if f, ferr := api.fetch_formula(keg_name); ferr == nil {
+                        api_f = f
+                        api_ok = true
+                        deps = f.dependencies
+                    }
+                }
                 for target in targets {
-                    for dep in receipt.runtime_dependencies {
+                    for dep in deps {
                         if dep == target {
                             matched = true
                             break
@@ -6855,6 +6894,7 @@ run_uses :: proc(args: []string) {
                     }
                     if matched do break
                 }
+                if api_ok do api.destroy_formula(api_f)
                 installer.destroy_install_receipt(receipt)
             }
             if matched do break
@@ -6926,19 +6966,23 @@ run_fetch :: proc(args: []string) {
         if f, err := api.fetch_formula(target); err == nil {
             fmt.printf("==> Fetching bottle for formula %s...\n", f.name)
             if f.bottle_url != "" {
-                _ = os.make_directory_all(installer.CACHE_DIR, os.perm(0o755))
-                cache_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
-                // Single download: progress bar, no --parallel.
-                args_curl := []string{"curl", "-#", "-fL", f.bottle_url, "-o", cache_path}
-                if platform.exec_cmd("curl", args_curl) {
-                    if installer.sha256_matches(cache_path, f.bottle_sha256) {
-                        fmt.printf("Downloaded to: %s\n", cache_path)
-                    } else {
-                        fmt.printf("Error: Checksum mismatch for %s\n", f.bottle_url)
-                        _ = os.remove(cache_path)
-                    }
+                if f.bottle_sha256 == "" {
+                    fmt.printf("Error: no bottle SHA256 for %s; refusing to cache an unverified bottle\n", f.name)
                 } else {
-                    fmt.printf("Error: Failed to download %s\n", f.bottle_url)
+                    _ = os.make_directory_all(installer.CACHE_DIR, os.perm(0o755))
+                    cache_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
+                    // Single download: progress bar, no --parallel.
+                    args_curl := []string{"curl", "-#", "-fL", f.bottle_url, "-o", cache_path}
+                    if platform.exec_cmd("curl", args_curl) {
+                        if installer.sha256_matches(cache_path, f.bottle_sha256) {
+                            fmt.printf("Downloaded to: %s\n", cache_path)
+                        } else {
+                            fmt.printf("Error: Checksum mismatch for %s\n", f.bottle_url)
+                            _ = os.remove(cache_path)
+                        }
+                    } else {
+                        fmt.printf("Error: Failed to download %s\n", f.bottle_url)
+                    }
                 }
             } else {
                 fmt.printf("No bottle URL for %s\n", f.name)
@@ -8995,9 +9039,15 @@ run_shellenv :: proc(args: []string) {
     bin := platform.get_bin_dir()
     prefix := platform.get_homebrew_prefix()
     cellar := platform.get_cellar_dir()
-    // HOMEBREW_REPOSITORY is the brew git checkout root, which on Linux is
-    // <prefix>/Homebrew (where Library/Taps lives) — not the prefix itself.
-    repository := fmt.tprintf("%s/Homebrew", prefix)
+    // HOMEBREW_REPOSITORY is the brew git checkout root: on Linux that is
+    // <prefix>/Homebrew (where Library/Taps lives); on macOS the checkout
+    // IS the prefix itself (/opt/homebrew or /usr/local).
+    repository: string
+    when ODIN_OS == .Linux {
+        repository = fmt.tprintf("%s/Homebrew", prefix)
+    } else {
+        repository = prefix
+    }
     switch shell {
     case "bash", "zsh", "sh":
         fmt.printf("export HOMEBREW_PREFIX=\"%s\"\n", prefix)
@@ -9251,19 +9301,19 @@ main :: proc() {
     args_slice := os.args[2:]
 
     // User-defined alias expansion
+    // Never let an alias shadow a built-in command; a mistaken
+    // `install=nuke` entry must not turn `ubrew install` into a
+    // destructive dispatch.
+    is_builtin := false
+    for k in ubrew_known_commands(true) {
+        if cmd == k {
+            is_builtin = true
+            break
+        }
+    }
     user_aliases := read_aliases()
-    if target_cmd, found := user_aliases[cmd]; found {
+    if target_cmd, found := user_aliases[cmd]; found && !is_builtin {
         cmd = target_cmd
-    }
-
-    if cmd == "alias" {
-        run_alias(args_slice)
-        return
-    }
-
-    if cmd == "readall" {
-        run_readall(args_slice)
-        return
     }
 
     if cmd == "help" {
@@ -9273,6 +9323,19 @@ main :: proc() {
         }
         cmd = os.args[2]
         args_slice = []string{"--help"}
+    }
+
+    // handle alias/readall dispatch AFTER help rewrites cmd, so
+    // `ubrew help alias` / `ubrew help readall` resolve instead of
+    // reporting an unknown command.
+    if cmd == "alias" {
+        run_alias(args_slice)
+        return
+    }
+
+    if cmd == "readall" {
+        run_readall(args_slice)
+        return
     }
 
     if cmd == "version" || cmd == "--version" || cmd == "-v" {
@@ -9815,8 +9878,10 @@ run_search :: proc(args_slice: []string) {
             }
             if strings.contains(query_lower, "/") {
                 tap_part, f_part := api.parse_tap_token(query_lower)
-                defer delete(tap_part)
-                defer delete(f_part)
+                // parse_tap_token yields the "" literal for an empty part;
+                // only free heap strings (len > 0).
+                defer if len(tap_part) > 0 { delete(tap_part) }
+                defer if len(f_part) > 0 { delete(f_part) }
                 // Search is read-only: never tap a repository as a side
                 // effect of a query. append_tap_formulae_matches only reads
                 // already-tapped (or cloned) taps.
@@ -10322,11 +10387,11 @@ run_trust :: proc(args: []string) {
 			// parse_tap_token only allocates non-empty names (a bare
 			// "formula" token yields the "" literal), so guard the delete.
 			if len(t_name) > 0 do delete(t_name)
-			delete(f_name)
+			if len(f_name) > 0 do delete(f_name)
 			os.exit(1)
 		}
 		if len(t_name) > 0 do delete(t_name)
-		delete(f_name)
+		if len(f_name) > 0 do delete(f_name)
 	}
 }
 

@@ -32,7 +32,7 @@ base64url_decode :: proc(input: string, allocator := context.temp_allocator) -> 
 
 // verify_jws_token checks a raw JWS string (header.payload.signature) for
 // valid base64url structure, a supported algorithm (RS256 / ES256 / PS256),
-// and a payload that CONTAINS the expected_sha256.
+// and a payload whose "sha256" field matches expected_sha256 exactly.
 //
 // SECURITY NOTE: this is an attestation-hash gate, NOT cryptographic
 // signature verification. The signature segment is only checked for
@@ -72,11 +72,30 @@ verify_jws_token :: proc(token: string, expected_sha256: string) -> bool {
 		return false
 	}
 
-	// The expected hash must be present in the payload; a mismatch is a hard
-	// rejection (there is no non-empty-signature fallback).
+	// The expected digest must match the payload's "sha256" field exactly.
+	// This is an exact equality decision — a substring match anywhere in
+	// the decoded JSON is not acceptable, since the digest could turn up in
+	// an unrelated field of a forged payload. Malformed JSON, a missing
+	// field, or a non-string / non-exact value is a hard rejection.
 	payload_data, pok := base64url_decode(parts[1], context.temp_allocator)
 	if !pok do return false
-	if !strings.contains(payload_data, expected_sha256) do return false
+
+	payload_val, perr := json.parse(transmute([]u8)payload_data)
+	if perr != nil do return false
+	defer json.destroy_value(payload_val)
+
+	p_obj, p_ok := payload_val.(json.Object)
+	if !p_ok do return false
+
+	digest_field, d_ok := p_obj["sha256"]
+	if !d_ok do return false
+
+	digest_str, ds_ok := digest_field.(json.String)
+	if !ds_ok do return false
+
+	expected := strings.to_lower(strings.trim_space(expected_sha256), context.temp_allocator)
+	actual := strings.to_lower(strings.trim_space(string(digest_str)), context.temp_allocator)
+	if expected != actual do return false
 
 	// Structural check only: a signature segment must be present.
 	return len(parts[2]) > 0
