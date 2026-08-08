@@ -45,11 +45,44 @@ get_registry_path :: proc(allocator := context.temp_allocator) -> string {
 API_CACHE_DIR:        string = "/opt/ubrew/cache/api"
 FORMULA_LIST_CACHE:   string = "/opt/ubrew/cache/api/formula.json"
 CASK_LIST_CACHE:      string = "/opt/ubrew/cache/api/cask.json"
-// Homebrew's API serves these as JWS envelopes (formula.jws.json /
-// cask.jws.json); the payload is unwrapped via extract_api_payload before
-// the cache files are written, so downstream code keeps reading plain arrays.
+// Homebrew API list endpoints.
+//
+// Default source is the UNSIGNED dumps (formula.json / cask.json). The
+// signed JWS envelopes (formula.jws.json / cask.jws.json) are used ONLY
+// when the user explicitly opts in via UBREW_NO_VERIFY_JWS, and are then
+// marked unverified in code (jws_override_active) because the signature is
+// not currently cryptographically verified — matching the parity-plan gate
+// (do not make JWS the default until verification ships; never fall back
+// automatically; leaving the override unset must fail closed by simply not
+// using the signed source).
+//
+// When JWS is active, extract_api_payload unwraps the envelope so the
+// cache files always hold plain JSON arrays.
+FORMULA_LIST_URL_UNSIGNED :: "https://formulae.brew.sh/api/formula.json"
+CASK_LIST_URL_UNSIGNED    :: "https://formulae.brew.sh/api/cask.json"
 FORMULA_LIST_URL :: "https://formulae.brew.sh/api/formula.jws.json"
 CASK_LIST_URL :: "https://formulae.brew.sh/api/cask.jws.json"
+
+// jws_override_active reports whether UBREW_NO_VERIFY_JWS is set (values
+// 1/true/yes). This is the explicit insecure override: it switches the
+// fetch source to the signed JWS endpoints while signature verification is
+// not implemented, and is the in-code marker that any JWS-decoded metadata
+// is untrusted. It is never set automatically and never used as a fallback.
+jws_override_active :: proc() -> bool {
+	v := os.get_env("UBREW_NO_VERIFY_JWS", context.temp_allocator)
+	lower := strings.to_lower(v, context.temp_allocator)
+	return v == "1" || lower == "true" || lower == "yes"
+}
+
+// formula_list_url / cask_list_url return the runtime source endpoint.
+// All downloads go through these (never the raw constants) so the
+// default-unsigned / override-signed selection is honored uniformly.
+formula_list_url :: proc() -> string {
+	return FORMULA_LIST_URL_UNSIGNED if !jws_override_active() else FORMULA_LIST_URL
+}
+cask_list_url :: proc() -> string {
+	return CASK_LIST_URL_UNSIGNED if !jws_override_active() else CASK_LIST_URL
+}
 
 // Phase 2: SQLite search database. Built from the 30MB formula.json /
 // 15MB cask.json dumps on first search (or `update`). Uses SQL LIKE
@@ -226,8 +259,11 @@ fetch_cached_api_list :: proc(url, cache_path: string) -> (data: []u8, err: os.E
 	}
 	defer delete(body)
 
-	// The API endpoint now serves a JWS envelope; unwrap it so the cache
-	// file holds the plain JSON array (same shape downstream code expects).
+	// The list source may be a JWS envelope (only when the explicit
+	// UBREW_NO_VERIFY_JWS override is set); unwrap it so the cache file
+	// holds a plain JSON array, matching the shape produced by run_update.
+	// Plain-array sources (the default unsigned endpoints) pass through
+	// unchanged.
 	//
 	// Ownership of `payload` transfers to the caller — the caller's
 	// `defer delete(data)` releases it exactly once (matching the cached
@@ -1428,7 +1464,7 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
 // `oldnames` or `aliases` arrays contain the given name. If found, the current
 // canonical formula name is returned. This handles cases like "dash" -> "dash-shell".
 resolve_formula_alias :: proc(name: string) -> (canonical: string, ok: bool) {
-    data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
+    data, read_err := fetch_cached_api_list(formula_list_url(), FORMULA_LIST_CACHE)
     if read_err != nil {
         return "", false
     }
@@ -2253,7 +2289,7 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 				}
 			}
 		} else {
-			data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
+			data, read_err := fetch_cached_api_list(formula_list_url(), FORMULA_LIST_CACHE)
 			if read_err == nil {
 				defer delete(data)
 				append_api_formulae_matches_fast(data, &results, query_lower, limit)
@@ -2797,7 +2833,7 @@ search_casks :: proc(query: string, limit: int = 25) -> (out: []Cask_Search_Resu
             }
         }
     } else {
-        data, read_err := fetch_cached_api_list(CASK_LIST_URL, CASK_LIST_CACHE)
+        data, read_err := fetch_cached_api_list(cask_list_url(), CASK_LIST_CACHE)
         if read_err == nil {
             defer delete(data)
             append_api_cask_matches_fast(data, &results, query_lower, limit)
@@ -2861,10 +2897,15 @@ fetch_urls_parallel_http2 :: proc(urls, out_files: []string, headers: []string, 
 }
 
 // fetch_single_with_etag downloads a single URL to out_file using curl's
-// --etag-compare and --etag-save. Returns true if the file was actually
-// downloaded (200 response), false if 304 Not Modified or on error.
-// The etag_file stores the ETag header value between runs.
-fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []string = nil) -> bool {
+// --etag-compare and --etag-save. Returns (written, completed): written is
+// true when the file was actually updated with new bytes (200 response)
+// versus a 304 Not Modified; completed is true when the curl transfer
+// finished cleanly (exit 0), covering both a fresh download and a genuine
+// 304. completed=false means the transfer failed, in which case an empty or
+// unchanged out_file is NOT a trustworthy "no-op" — the caller must not
+// treat it as a valid cache state. The etag_file stores the ETag header
+// value between runs.
+fetch_single_with_etag :: proc (url, out_file, etag_file: string, headers: []string = nil) -> (written: bool, completed: bool) {
     args := make([dynamic]string, context.temp_allocator)
     defer delete(args)
     append(&args, "curl")
@@ -2893,19 +2934,27 @@ fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []stri
     }
 
     ok := platform.exec_cmd("curl", args[:])
-    if !ok { return false }
+    if !ok { return false, false }
     fi, fi_err := os.stat(out_file, context.temp_allocator)
-    if fi_err != nil || fi.size == 0 { return false }
-    return fi.size != pre_size || fi.modification_time != pre_mtime
+    if fi_err != nil || fi.size == 0 { return false, true }
+    return fi.size != pre_size || fi.modification_time != pre_mtime, true
 }
 
 // fetch_etag_batch downloads multiple URLs sequentially in a single curl
 // process using --next between transfers. Each URL gets its own ETag file.
 // Saves one fork/exec per additional URL vs calling fetch_single_with_etag N
-// times. Returns true if any output file was actually written (200 response).
-fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []string) -> bool {
+// times. Returns:
+//   any_written — true when at least one out_file received new bytes (200).
+//   written     — per-URL flag of that; the caller owns the slice and must
+//                 delete() it with the caller's allocator.
+//   cmd_ok      — curl's exit status (true == the transfer completed
+//                 cleanly). With --next, a genuine 304 and a failed transfer
+//                 both leave out_file untouched, so a caller may treat
+//                 written[i] == false as a real no-op ONLY when cmd_ok is
+//                 true; otherwise the list is indeterminate.
+fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []string) -> (any_written: bool, written: []bool, cmd_ok: bool) {
     if len(urls) == 0 || len(urls) != len(out_files) || len(urls) != len(etag_files) {
-        return false
+        return false, nil, false
     }
 
     // Snapshot pre-transfer sizes AND mtimes so we can detect actual
@@ -2951,21 +3000,24 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
     }
 
     ok := platform.exec_cmd("curl", args[:])
-    if !ok { return false }
 
-    any_updated := false
-    for i in 0..<len(out_files) {
-        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
-            // Either the byte count changed (200 with new payload) or
-            // the mtime advanced past the pre-snapshot (curl's write
-            // bumps mtime on every successful download). The mtime
-            // check covers in-place edits where size is unchanged.
-            if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
-                any_updated = true
+    written = make([]bool, len(urls), context.allocator)
+    any_written = false
+    if ok {
+        for i in 0..<len(out_files) {
+            if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
+                // Either the byte count changed (200 with new payload) or
+                // the mtime advanced past the pre-snapshot (curl's write
+                // bumps mtime on every successful download). The mtime
+                // check covers in-place edits where size is unchanged.
+                if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
+                    written[i] = true
+                    any_written = true
+                }
             }
         }
     }
-    return any_updated
+    return any_written, written, ok
 }
 
 // cache_stale returns true when the per-formula/per-cask cache file at
@@ -3328,7 +3380,7 @@ refresh_homebrew_api_lists :: proc() -> bool {
 	}
 	append(&curl_args, "-o")
 	append(&curl_args, temp_file1)
-	append(&curl_args, FORMULA_LIST_URL)
+	append(&curl_args, formula_list_url())
 
 	// Second URL: cask.json
 	if os.is_file(CASK_LIST_CACHE) {
@@ -3337,7 +3389,7 @@ refresh_homebrew_api_lists :: proc() -> bool {
 	}
 	append(&curl_args, "-o")
 	append(&curl_args, temp_file2)
-	append(&curl_args, CASK_LIST_URL)
+	append(&curl_args, cask_list_url())
 
 	if !platform.exec_cmd("curl", curl_args[:]) {
 		return false

@@ -1329,6 +1329,27 @@ print_untrusted_taps_warning :: proc() -> bool {
 	return true
 }
 
+// untrusted_warning_shown remembers (per process) that the batch
+// untrusted-tap warning has already been printed, so multiple command
+// phases in one invocation (e.g. update, then upgrade) print it at most
+// once — matching Homebrew's once-per-command behavior.
+untrusted_warning_shown: bool = false
+
+// print_untrusted_taps_warning_once prints the batch untrusted-tap warning
+// exactly once per process (see untrusted_warning_shown). Callers should
+// use this instead of print_untrusted_taps_warning; returns true if the
+// warning was printed by THIS call.
+print_untrusted_taps_warning_once :: proc() -> bool {
+	if untrusted_warning_shown {
+		return false
+	}
+	shown := print_untrusted_taps_warning()
+	if shown {
+		untrusted_warning_shown = true
+	}
+	return shown
+}
+
 tap_cask_cache_path :: proc(t: Tap, cask_name: string) -> string {
 	return fmt.tprintf("%s/%s/Casks/%s.rb", TAPS_CACHE_DIR, t.name, cask_name)
 }

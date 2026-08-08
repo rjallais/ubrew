@@ -2931,7 +2931,10 @@ run_install :: proc(args: []string) {
 		}
 	}
 	if !has_help {
-		maybe_auto_update()
+		if !maybe_auto_update() {
+			fmt.eprintln("Error: auto-update could not establish a complete metadata snapshot; refusing to install against indeterminate API state. Retry once the network is up (or set HOMEBREW_NO_AUTO_UPDATE=1 to install against the current cache).")
+			os.exit(1)
+		}
 	}
 
 	mode := Target_Type.Unknown
@@ -5457,17 +5460,21 @@ run_outdated :: proc(args: []string) {
 // non-interactive CI environment (no TTY). run_update's own freshness gate
 // (default 24h, HOMEBREW_AUTO_UPDATE_SECS) decides whether anything is
 // actually downloaded, so this is cheap in the common case.
-maybe_auto_update :: proc() {
+maybe_auto_update :: proc() -> bool {
 	// Homebrew semantics: setting HOMEBREW_NO_AUTO_UPDATE to ANY non-empty
 	// value disables auto-update.
 	if no_auto := os.get_env("HOMEBREW_NO_AUTO_UPDATE", context.temp_allocator); len(no_auto) > 0 {
-		return
+		return true
 	}
 	// Non-interactive CI: skip to avoid surprising network traffic
 	if ci := os.get_env("CI", context.temp_allocator); ci != "" && !os.is_tty(os.stdout) {
-		return
+		return true
 	}
-	run_update([]string{"--auto-update"})
+	// Returns false when the freshness-gated refresh could not establish a
+	// complete metadata snapshot (see run_update's W8 atomicity rule); the
+	// caller must refuse to continue rather than run against indeterminate
+	// API state.
+	return run_update([]string{"--auto-update"})
 }
 
 // ── run_update (Phase 1: HTTP/2 parallel) ──
@@ -5488,7 +5495,7 @@ git_pull_ff_only :: proc(dir: string) -> bool {
 	return platform.exec_cmd("git", []string{"git", "-C", dir, "pull", "--ff-only", "--quiet"})
 }
 
-run_update :: proc(args: []string) {
+run_update :: proc(args: []string) -> bool {
 	auto_update := false
 	force := false
 	verbose := false
@@ -5510,6 +5517,12 @@ run_update :: proc(args: []string) {
 	}
 
 	platform.GLOBAL_DEBUG = debug
+
+	// W8 atomicity: false means the API lists snapshot was NOT established
+	// (partial or failed refresh). Callers that auto-update (install/upgrade)
+	// must refuse to continue in that case. Starts true: a no-op refresh
+	// (freshness gate) or pure-tap refresh is not a snapshot failure.
+	snapshot_complete := true
 
 	fmt.println("==> Updating ubrew...")
 
@@ -5626,37 +5639,69 @@ run_update :: proc(args: []string) {
 			os.close(temp_f2)
 		}
 
+		// W8: record per-list transfer outcomes for the atomicity gate
+		// below. A zero-byte staging file is only a genuine 304 "no-op" when
+		// the transfer that produced it finished cleanly (curl exit 0); a
+		// failed transfer leaves that list indeterminate and must abort the
+		// snapshot commit.
+		formula_transfer_ok := false
+		cask_transfer_ok := false
+
 		if temp_file_formula != "" && temp_file_cask != "" {
-			if api.fetch_etag_batch([]string{api.FORMULA_LIST_URL, api.CASK_LIST_URL},
+			_, batch_written, batch_cmd_ok := api.fetch_etag_batch(
+				[]string{api.formula_list_url(), api.cask_list_url()},
 				[]string{temp_file_formula, temp_file_cask},
 				[]string{etag_file_f, etag_file_c},
-				headers[:]) {
-				rebuild_index = true
-			}
+				headers[:])
+			// curl --next runs both transfers inside one process, so a single
+			// exit code gates both staging files.
+			formula_transfer_ok = batch_cmd_ok
+			cask_transfer_ok = batch_cmd_ok
+			delete(batch_written)
 		} else {
-			// Fallback: sequential if temp file creation failed
-			if temp_file_formula != "" && api.fetch_single_with_etag(api.FORMULA_LIST_URL, temp_file_formula, etag_file_f, headers[:]) {
-				rebuild_index = true
+			// Fallback: sequential if temp file creation failed, keeping the
+			// same per-list transfer accounting.
+			if temp_file_formula != "" {
+				if f_written, f_ok := api.fetch_single_with_etag(api.formula_list_url(), temp_file_formula, etag_file_f, headers[:]); f_ok {
+					formula_transfer_ok = true
+					if f_written {
+						rebuild_index = true
+					}
+				}
 			}
-			if temp_file_cask != "" && api.fetch_single_with_etag(api.CASK_LIST_URL, temp_file_cask, etag_file_c, headers[:]) {
-				rebuild_index = true
+			if temp_file_cask != "" {
+				if c_written, c_ok := api.fetch_single_with_etag(api.cask_list_url(), temp_file_cask, etag_file_c, headers[:]); c_ok {
+					cask_transfer_ok = true
+					if c_written {
+						rebuild_index = true
+					}
+				}
 			}
 		}
 
 		// Unwrap the JWS envelopes in place so the temp files contain the raw
-		// JSON arrays. Downstream code (diffing, rename-to-cache, search index)
-		// then operates on plain arrays exactly as before the JWS switch.
-		// Skip files that are empty (304 Not Modified leaves them empty).
+		// JSON arrays — but ONLY when the JWS endpoints are actually active
+		// (UBREW_NO_VERIFY_JWS override). The default unsigned endpoints
+		// already return plain arrays, so the unwrap step is skipped and the
+		// cache is never fed marked-up JWS data.
 		//
 		// Track extraction success per list: if unwrapping fails we remove
 		// the ETag sidecar (forcing a fresh download next time) and skip the
 		// diff and cache-promotion steps for that list so we don't operate
 		// on corrupt or envelope data.
+		jws_mode := api.jws_override_active()
+		if jws_mode {
+			fmt.println("Warning: UBREW_NO_VERIFY_JWS is set — metadata is being fetched from the signed JWS endpoints WITHOUT signature verification.")
+		}
 		formula_payload_ok := temp_file_formula == ""
 		cask_payload_ok := temp_file_cask == ""
 		if temp_file_formula != "" {
 			if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
-				formula_payload_ok = api.extract_jws_in_place(temp_file_formula)
+				if jws_mode {
+					formula_payload_ok = api.extract_jws_in_place(temp_file_formula)
+				} else {
+					formula_payload_ok = true // unsigned endpoint: plain array, no unwrap needed
+				}
 				if !formula_payload_ok {
 					_ = os.remove(etag_file_f)
 					fmt.println("Warning: failed to unwrap formula.jws.json payload")
@@ -5667,7 +5712,11 @@ run_update :: proc(args: []string) {
 		}
 		if temp_file_cask != "" {
 			if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
-				cask_payload_ok = api.extract_jws_in_place(temp_file_cask)
+				if jws_mode {
+					cask_payload_ok = api.extract_jws_in_place(temp_file_cask)
+				} else {
+					cask_payload_ok = true // unsigned endpoint: plain array, no unwrap needed
+				}
 				if !cask_payload_ok {
 					_ = os.remove(etag_file_c)
 					fmt.println("Warning: failed to unwrap cask.jws.json payload")
@@ -5890,29 +5939,91 @@ run_update :: proc(args: []string) {
 			api.destroy_api_name_map(old_c)
 		}
 
-		// Post-process Homebrew API lists
-		if formula_payload_ok && temp_file_formula != "" {
+		// Post-process Homebrew API lists — W8 atomicity rule: the formula
+		// and cask lists are committed as a SINGLE all-or-none snapshot.
+		// Both lists must stage — a fresh payload (200) or a genuine 304
+		// no-op after a clean transfer — before EITHER cache file is
+		// renamed; if a transfer failed, a list is missing, empty, or failed
+		// to unwrap, the previous generation stays live and consistent and
+		// the caller (maybe_auto_update) is told the update did not complete
+		// so a dependent install/upgrade refuses to run against
+		// indeterminate data.
+		formula_fetch_ok := temp_file_formula != ""
+		cask_fetch_ok := temp_file_cask != ""
+		formula_staged := false
+		cask_staged := false
+
+		// Track whether any fresh bytes arrived, so a total network failure
+		// is reported as a warning ("using previous snapshot") while a partial
+		// snapshot failure aborts the dependent command.
+		formula_had_data := false
+		cask_had_data := false
+
+		if formula_fetch_ok && formula_payload_ok {
+			if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				formula_staged = true
+				formula_had_data = true
+			} else if formula_transfer_ok {
+				// Genuine no-op: the transfer completed and upstream replied
+				// 304, so the cache already holds the current generation.
+				formula_staged = true
+			}
+		}
+		if cask_fetch_ok && cask_payload_ok {
+			if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				cask_staged = true
+				cask_had_data = true
+			} else if cask_transfer_ok {
+				// Genuine 304 no-op, as above for formulas.
+				cask_staged = true
+			}
+		}
+
+		// W8 all-or-none commit: whatever happens below, the two cache files
+		// are renamed as a single snapshot or not at all. Only when BOTH
+		// lists staged (fresh payload, or a clean 304 no-op) is any temp file
+		// promoted — a partial commit would leave one new-generation file
+		// alongside one stale, the exact mixed state this rule forbids.
+		if formula_staged && cask_staged {
+			snapshot_complete = true
+			if formula_had_data {
+				if os.rename(temp_file_formula, api.FORMULA_LIST_CACHE) != nil {
+					snapshot_complete = false
+					fmt.eprintf("Error: failed to promote formula cache file; previous generation kept.\n")
+				} else {
+					rebuild_index = true
+				}
+			}
+			if cask_had_data {
+				if os.rename(temp_file_cask, api.CASK_LIST_CACHE) != nil {
+					snapshot_complete = false
+					fmt.eprintf("Error: failed to promote cask cache file; previous generation kept.\n")
+				} else {
+					rebuild_index = true
+				}
+			}
+		} else {
+			snapshot_complete = false
+			if formula_had_data || cask_had_data {
+				fmt.eprintf("Error: metadata snapshot incomplete (formulas or casks could not be committed); previous generation kept.\n")
+			} else {
+				fmt.println("Warning: metadata refresh failed (network); using previous snapshot.")
+			}
+		}
+
+		// Clean up staging files (no-ops when a list was renamed into the
+		// cache). The strings were allocated with context.allocator and must
+		// be freed here rather than leaked on the partial/error paths above.
+		if temp_file_formula != "" {
 			defer {
 				os.remove(temp_file_formula)
 				delete(temp_file_formula)
 			}
-			fi, fi_err := os.stat(temp_file_formula, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
-				if os.rename(temp_file_formula, api.FORMULA_LIST_CACHE) == nil {
-					rebuild_index = true
-				}
-			}
 		}
-		if cask_payload_ok && temp_file_cask != "" {
+		if temp_file_cask != "" {
 			defer {
 				os.remove(temp_file_cask)
 				delete(temp_file_cask)
-			}
-			fi, fi_err := os.stat(temp_file_cask, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
-				if os.rename(temp_file_cask, api.CASK_LIST_CACHE) == nil {
-					rebuild_index = true
-				}
 			}
 		}
 		if temp_file_upstream != "" {
@@ -6043,26 +6154,43 @@ run_update :: proc(args: []string) {
 			fmt.printf("Error: Failed to update tap %s.\n", fname)
 		}
 
-		// New Formulae / New Casks sections (Homebrew parity)
-		if len(new_formulae) > 0 {
+		// New Formulae / New Casks sections (Homebrew parity). The diff
+		// listings are capped at ~50 entries (Homebrew truncates similarly)
+		// and are suppressed during --auto-update unless stdout is a TTY, so
+		// an auto-update never spams piped/scripted output.
+		NEW_LISTING_CAP :: 50
+		show_listings := !auto_update || os.is_tty(os.stdout)
+		if show_listings && len(new_formulae) > 0 {
 			fmt.println("==> New Formulae")
+			shown := 0
 			for e in new_formulae {
+				if shown >= NEW_LISTING_CAP {
+					fmt.printf("  ... and %d more\n", len(new_formulae) - shown)
+					break
+				}
 				if len(e.desc) > 0 {
 					fmt.printf("%s: %s\n", e.name, e.desc)
 				} else {
 					fmt.printf("%s\n", e.name)
 				}
+				shown += 1
 			}
 		}
-		if len(new_casks) > 0 {
+		if show_listings && len(new_casks) > 0 {
 			if len(new_formulae) > 0 do fmt.println("")
 			fmt.println("==> New Casks")
+			shown := 0
 			for e in new_casks {
+				if shown >= NEW_LISTING_CAP {
+					fmt.printf("  ... and %d more\n", len(new_casks) - shown)
+					break
+				}
 				if len(e.desc) > 0 {
 					fmt.printf("%s: %s\n", e.name, e.desc)
 				} else {
 					fmt.printf("%s\n", e.name)
 				}
+				shown += 1
 			}
 		}
 
@@ -6072,10 +6200,11 @@ run_update :: proc(args: []string) {
 	// Skipped during --auto-update to avoid repeating the warning on every
 	// install/upgrade; it still shows on explicit `ubrew update`.
 	if !auto_update {
-		tap.print_untrusted_taps_warning()
+		tap.print_untrusted_taps_warning_once()
 	}
 
 	fmt.println("==> ubrew is up-to-date.")
+	return snapshot_complete
 }
 
 // ── run_upgrade (Phase 1: warm cache) ──
@@ -6111,8 +6240,16 @@ run_upgrade :: proc(args: []string) {
 		}
 	}
 	if !has_help {
-		maybe_auto_update()
+		if !maybe_auto_update() {
+			fmt.eprintln("Error: auto-update could not establish a complete metadata snapshot; refusing to upgrade.")
+			os.exit(1)
+		}
 	}
+
+	// W6: surface untrusted taps before upgrading. maybe_auto_update runs a
+	// quiet --auto-update (which deliberately suppresses the warning), so the
+	// command itself prints it here, at most once per invocation.
+	tap.print_untrusted_taps_warning_once()
 
 	formula_only := false
 	cask_only := false
@@ -7774,7 +7911,7 @@ run_formulae :: proc(args: []string) {
         for name in names {
             insert_name(&seen, name)
         }
-    } else if data, rerr2 := api.fetch_cached_api_list(api.FORMULA_LIST_URL, api.FORMULA_LIST_CACHE); rerr2 == nil {
+    } else if data, rerr2 := api.fetch_cached_api_list(api.formula_list_url(), api.FORMULA_LIST_CACHE); rerr2 == nil {
         // Fallback: read the raw 30MB formula.json if the index doesn't
         // exist yet (first run before `update`).
         defer delete(data)
