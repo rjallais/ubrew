@@ -1,15 +1,14 @@
 tap "gromgit/brewtils"
-tap "hashicorp/tap", trusted: true
+tap "hashicorp/tap"
 tap "homebrew/core"
-tap "justrach/nanobrew", trusted: true
-tap "kcl-lang/tap", trusted: true
-tap "microsoft/inshellisense"
+tap "justrach/nanobrew"
+tap "kcl-lang/tap"
 tap "nijaru/tap"
 tap "pkgxdev/made"
 tap "rjallais/ubrew"
-tap "ublue-os/experimental-tap", trusted: true
-tap "ublue-os/homebrew-experimental-tap", trusted: true
-tap "ublue-os/tap", trusted: true
+tap "ublue-os/experimental-tap"
+tap "ublue-os/homebrew-experimental-tap"
+tap "ublue-os/tap"
 
 brew "acl"
 brew "age"
@@ -17,7 +16,6 @@ brew "alsa-lib"
 brew "appstream"
 brew "atuin"
 brew "awscli"
-brew "bison"
 brew "brotli"
 brew "bzip2"
 brew "ca-certificates"

@@ -480,10 +480,11 @@ tap_add :: proc(name, url: string) -> bool {
 		}
 	}
 
-	// In shared mode the clone itself is the record of the tap; write a
-	// taps.txt row only for standalone mode (and homebrew/* pseudo-taps).
+	// In shared mode the clone is the record of the tap; write a
+	// taps.txt row only for standalone mode (and homebrew/* pseudo-taps,
+	// which are API-based and never cloned, so the row is their record).
 	// This keeps Library/Taps the sole source of active taps.
-	if mode() == .Shared {
+	if mode() == .Shared && !strings.has_prefix(name, "homebrew/") {
 		return true
 	}
 
@@ -507,7 +508,7 @@ tap_add :: proc(name, url: string) -> bool {
 // remove_tap_row drops a tap from taps.txt if present. Returns true when the
 // write succeeded or the row did not exist; false on write failure.
 remove_tap_row :: proc(name: string) -> bool {
-	taps := read_taps()
+	taps := read_taps_rows()
 	defer {
 		for t in taps {
 			destroy_read_tap_entry(t)
@@ -531,7 +532,7 @@ remove_tap_row :: proc(name: string) -> bool {
 
 // tap_row_exists reports whether a tap name is present in taps.txt.
 tap_row_exists :: proc(name: string) -> bool {
-	taps := read_taps()
+	taps := read_taps_rows()
 	defer {
 		for t in taps {
 			destroy_read_tap_entry(t)
@@ -580,6 +581,13 @@ tap_remove :: proc(name: string) -> bool {
 		}
 		if is_symlink(dest) {
 			fmt.printf("Error: Refusing to remove '%s' (symlink; refusing to follow it out of %s).\n", dest, taps_dir)
+			return false
+		}
+		// A symlinked owner directory (e.g. Library/Taps/<user> -> outside)
+		// would let os.remove_all escape via dest, so reject it too.
+		user_part := name[:strings.index(name, "/")]
+		if is_symlink(fmt.tprintf("%s/%s", taps_dir, user_part)) {
+			fmt.printf("Error: Refusing to remove '%s' (owner directory is a symlink).\n", dest)
 			return false
 		}
 		dir_exists := os.is_dir(dest)
@@ -901,7 +909,7 @@ read_tap_ruby_from_clone :: proc(t: Tap, subdir, name: string) -> (contents: str
 // `dest` is the clone directory (any base — a fixture in tests). Temp-allocated
 // intermediates; the returned string is heap-allocated and caller-freed.
 read_tap_ruby_from_clone_in :: proc(dest: string, t: Tap, subdir, name: string) -> (contents: string, ok: bool) {
-	if len(name) == 0 {
+	if len(name) == 0 || strings.contains(name, "/") || strings.contains(subdir, "/") {
 		return "", false
 	}
 	base := fmt.tprintf("%s/%s", dest, subdir)

@@ -120,11 +120,16 @@ test_dir_name_standard :: proc(t: ^testing.T) {
 
 @(test)
 test_verify_jws_token_valid :: proc(t: ^testing.T) {
-    // Header: {"alg":"RS256","typ":"JWT"} -> base64url: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9
-    // Payload: {"sha256":"abcdef123456"} -> base64url: eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ
-    // Sig: dummy_signature
-    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
-    testing.expect(t, verify_jws_token(token, "abcdef123456"), "valid JWS token with matching sha256")
+    // Realistic fixtures: a 64-hex SHA-256 digest, base64url-encoded
+    // header/payload. The signature seg is dummy because verify_jws_token
+    // deliberately does NOT cryptographically verify it (see SECURITY NOTE
+    // in jws.odin) — it only requires the segment to be present.
+    header    := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9" // {"alg":"RS256","typ":"JWT"}
+    payload   := "eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0" // {"sha256":"<64-hex>"}
+    digest    := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    token     := fmt.tprintf("%s.%s.%s", header, payload, "dummy_signature")
+    testing.expectf(t, verify_jws_token(token, digest),
+        "valid JWS token with matching 64-hex sha256 must pass")
 }
 
 @(test)
@@ -135,18 +140,36 @@ test_verify_jws_token_invalid_format :: proc(t: ^testing.T) {
 
 @(test)
 test_verify_jws_token_hash_mismatch_rejected :: proc(t: ^testing.T) {
-    // Same structurally valid token as the positive test, but a payload that
-    // does not contain the expected hash: must be rejected even though the
-    // signature segment is non-empty (no fallback).
-    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
-    testing.expect(t, !verify_jws_token(token, "ffffffffffff"), "reject payload that does not contain expected_sha256")
+    // The payload carries a valid 64-hex digest; a different expected digest
+    // must fail at the expected_sha256 check (no fallback bypass).
+    header  := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+    payload := "eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0"
+    token   := fmt.tprintf("%s.%s.%s", header, payload, "dummy_signature")
+    wrong   := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    testing.expect(t, !verify_jws_token(token, wrong), "reject payload that does not contain expected_sha256")
 }
 
 @(test)
 test_verify_jws_token_empty_expected_rejected :: proc(t: ^testing.T) {
-    // expected_sha256 is mandatory: without it the token is rejected, so a
-    // missing expectation can never silently widen the trust decision.
-    token := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaGEyNTYiOiJhYmNkZWYxMjM0NTYifQ.dummy_signature"
+    // expected_sha256 is mandatory: a structurally valid token with a valid
+    // payload and non-empty signature is still rejected when the expected
+    // digest is empty, so a missing expectation can never silently widen
+    // the trust decision.
+    header  := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+    payload := "eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0"
+    token   := fmt.tprintf("%s.%s.%s", header, payload, "dummy_signature")
     testing.expect(t, !verify_jws_token(token, ""), "reject token when expected_sha256 is empty")
+}
+
+@(test)
+test_verify_jws_token_empty_signature_rejected :: proc(t: ^testing.T) {
+    // The only signature-related contract verify_jws_token enforces is
+    // presence: a structurally valid token with an empty signature segment
+    // must be rejected.
+    header  := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+    digest  := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    payload := "eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0"
+    token := fmt.tprintf("%s.%s.", header, payload) // empty signature segment
+    testing.expect(t, !verify_jws_token(token, digest), "reject token with empty signature segment")
 }
 

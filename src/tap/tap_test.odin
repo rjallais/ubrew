@@ -375,10 +375,12 @@ test_tap_from_entry_shared_branch_is_owned :: proc(t: ^testing.T) {
 test_is_valid_tap_name_rejects_dotdot :: proc(t: ^testing.T) {
     // Path-traversal components and malformed names must be rejected; they
     // would otherwise reach shared_tap_dir / os.remove_all via tap_remove.
-    for bad in ([]string{"a/..", "../a", "a/.", "./a", "a//b", "a", "a/b/c", "a:b", "https://github.com/a/b", ""}) {
+    bad_names := []string{"a/..", "../a", "a/.", "./a", "a//b", "a", "a/b/c", "a:b", "https://github.com/a/b", ""}
+    for bad in bad_names {
         testing.expectf(t, !is_valid_tap_name(bad), "is_valid_tap_name(%q) must be false", bad)
     }
-    for good in ([]string{"user/repo", "homebrew/core", "ublue-os/tap"}) {
+    good_names := []string{"user/repo", "homebrew/core", "ublue-os/tap"}
+    for good in good_names {
         testing.expectf(t, is_valid_tap_name(good), "is_valid_tap_name(%q) must be true", good)
     }
 }
@@ -605,7 +607,7 @@ test_trusted_taps_load_own_roundtrip :: proc(t: ^testing.T) {
         }
         delete(names)
     }
-    append(&names, strings.clone("justrach/nanobrew", context.allocator))
+    append(&names, strings.clone("ubrewtest/roundtrip-fixture", context.allocator))
     trusted_taps_save(names)
 
     reloaded := trusted_taps_load_own()
@@ -617,7 +619,7 @@ test_trusted_taps_load_own_roundtrip :: proc(t: ^testing.T) {
     }
     found := false
     for n in reloaded {
-        if n == "justrach/nanobrew" do found = true
+        if n == "ubrewtest/roundtrip-fixture" do found = true
     }
     testing.expectf(t, found, "trusted_taps_load_own must round-trip entries through trusted_taps_save")
 }

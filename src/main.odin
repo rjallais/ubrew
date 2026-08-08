@@ -3264,6 +3264,7 @@ run_install :: proc(args: []string) {
 		}
 
 		if !installer.cask_host_supported(c) {
+			fmt.printf("Error: Cask %s is not supported on this host\n", c.token)
 			api.destroy_cask(c)
 			failed = true
 			continue
@@ -4547,11 +4548,11 @@ run_tap_migrate :: proc(args: []string) {
 			delete(entries)
 		}
 
-		desired := make([dynamic]string, context.temp_allocator)
+		desired := make([dynamic]Brewfile_Entry, context.temp_allocator)
 		defer delete(desired)
 		for e in entries {
 			if e.kind == "tap" {
-				append(&desired, e.name)
+				append(&desired, e)
 			}
 		}
 
@@ -4559,27 +4560,32 @@ run_tap_migrate :: proc(args: []string) {
 		for d in desired {
 			in_set := false
 			for t in taps {
-				if t.name == d {
+				if t.name == d.name {
 					in_set = true
 					break
 				}
 			}
 			if in_set do continue
 			if dry_run {
-				fmt.printf("  [would tap] %s (from Brewfile)\n", d)
+				fmt.printf("  [would tap] %s (from Brewfile)\n", d.name)
 				would_clone += 1
 				continue
 			}
-			if tap.tap_add(d, "") {
-				if os.is_dir(fmt.tprintf("%s/.git", tap.shared_tap_dir(d))) {
-					fmt.printf("  [tapped] %s (from Brewfile)\n", d)
+			if tap.tap_add(d.name, "") {
+				// Trust a tap only when the Brewfile entry explicitly marks
+				// it trusted; third-party taps stay untrusted otherwise.
+				if d.trusted {
+					tap.tap_trust(d.name)
+				}
+				if os.is_dir(fmt.tprintf("%s/.git", tap.shared_tap_dir(d.name))) {
+					fmt.printf("  [tapped] %s (from Brewfile)\n", d.name)
 					cloned += 1
 				} else {
-					fmt.printf("  [tapped, no clone] %s (from Brewfile)\n", d)
+					fmt.printf("  [tapped, no clone] %s (from Brewfile)\n", d.name)
 					failed += 1
 				}
 			} else {
-				fmt.printf("  [failed] %s (from Brewfile)\n", d)
+				fmt.printf("  [failed] %s (from Brewfile)\n", d.name)
 				failed += 1
 			}
 		}
@@ -4589,7 +4595,7 @@ run_tap_migrate :: proc(args: []string) {
 			if strings.has_prefix(t.name, "homebrew/") do continue
 			in_desired := false
 			for d in desired {
-				if d == t.name {
+				if d.name == t.name {
 					in_desired = true
 					break
 				}
@@ -5438,13 +5444,7 @@ run_outdated :: proc(args: []string) {
 
 			// Bare names for non-verbose / piped output (script-friendly)
 			for item in outdated_items {
-				if print_version_info {
-					joined_versions := strings.join(item.installed_versions, ", ", context.temp_allocator)
-					suffix := item.is_cask ? " (cask)" : ""
-					fmt.printf("%s (%s) < %s%s\n", item.name, joined_versions, item.current_version, suffix)
-				} else {
-					fmt.println(item.name)
-				}
+				fmt.println(item.name)
 			}
 		}
 	}
@@ -6671,25 +6671,30 @@ run_uses :: proc(args: []string) {
     }
 
     cellar := platform.get_cellar_dir()
-    infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator)
+    infos, err := os.read_directory_by_path(cellar, -1, context.allocator)
     if err != nil {
         return
     }
+    defer os.file_info_slice_delete(infos, context.allocator)
 
-    allocator := context.allocator
     for fi in infos {
         if !os.is_dir(fi.fullpath) { continue }
         keg_name := fi.name
         keg_path := fmt.tprintf("%s/%s", cellar, keg_name)
-        v_infos, verr := os.read_directory_by_path(keg_path, -1, allocator)
+        v_infos, verr := os.read_directory_by_path(keg_path, -1, context.allocator)
         if verr != nil { continue }
-        defer os.file_info_slice_delete(v_infos, allocator)
+        defer os.file_info_slice_delete(v_infos, context.allocator)
 
         matched := false
         for vfi in v_infos {
             if !os.is_dir(vfi.fullpath) { continue }
             keg_ver_dir := fmt.tprintf("%s/%s", keg_path, vfi.name)
             receipt, r_ok := installer.read_install_receipt(keg_ver_dir)
+            // --installed restricts the report to installed formulae: an
+            // entry with no install receipt is not treated as installed.
+            if opt_installed && !r_ok {
+                continue
+            }
             if r_ok {
                 for target in targets {
                     for dep in receipt.runtime_dependencies {
@@ -9084,21 +9089,9 @@ main :: proc() {
     tap.init_paths()
     history.init_paths()
 
-    // Consume known Homebrew env vars so they don't cause
-    // "unknown option" errors when scripts pass them through.
-    // These are no-ops in ubrew (no auto-update, etc).
-    ignored_brew_envs := []string{
-        "HOMEBREW_NO_AUTO_UPDATE",
-        "HOMEBREW_AUTO_UPDATE_SECS",
-        "HOMEBREW_NO_INSTALL_CLEANUP",
-        "HOMEBREW_NO_ENV_HINTS",
-        "HOMEBREW_CLEANUP_PERIODIC_FULL_DAYS",
-        "HOMEBREW_BUNDLE_NO_SKIP",
-    }
-    for key in ignored_brew_envs {
-        _ = os.get_env(key, context.temp_allocator)  // consume
-    }
-
+    // Homebrew env vars (HOMEBREW_NO_AUTO_UPDATE, HOMEBREW_AUTO_UPDATE_SECS,
+    // etc.) are honored where relevant by maybe_auto_update and run_update;
+    // no consume step is needed here.
     if len(os.args) < 2 || os.args[1] == "--help" || os.args[1] == "-h" {
         print_usage()
         os.exit(0)

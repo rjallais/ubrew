@@ -1378,7 +1378,9 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
         }
     }
     if !matched_ok && len(target_tap) > 0 && strings.count(target_tap, "/") == 1 {
-        if tap.tap_add(target_tap, "") {
+        // Never auto-add an untrusted third-party tap: it must be explicitly
+        // trusted (ubrew tap trust) before we clone or query it.
+        if tap.tap_is_trusted(target_tap) && tap.tap_add(target_tap, "") {
             matched = tap.tap_from_entry(tap.Read_Tap_Entry{
                 name = target_tap,
                 url  = "",

@@ -21,8 +21,11 @@ import "core:strings"
 //                    Set to e.g. /opt/ubrew/prefix for isolation.
 //   UBREW_CELLAR     Override Cellar path (default: $UBREW_PREFIX/Cellar)
 //   UBREW_CASKROOM   Override Caskroom path (default: $UBREW_PREFIX/Caskroom)
+//   UBREW_BIN        Override bin path (default: $UBREW_PREFIX/bin)
 //   HOMEBREW_PREFIX  Honoured as fallback for UBREW_PREFIX when the
 //                    UBREW-specific var is unset (script interop).
+//   HOMEBREW_CELLAR  Fallback for UBREW_CELLAR	(default: $UBREW_PREFIX/Cellar)
+//   HOMEBREW_CASKROOM  Fallback for UBREW_CASKROOM (default: $UBREW_PREFIX/Caskroom).
 
 when ODIN_OS == .Linux {
 	DEFAULT_HOMEBREW_PREFIX :: "/home/linuxbrew/.linuxbrew"

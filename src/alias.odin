@@ -61,6 +61,9 @@ read_aliases :: proc() -> map[string]string {
 }
 
 write_alias :: proc(name, target: string) -> bool {
+	if name == "" || strings.contains(name, "\n") || strings.contains(target, "\n") {
+		return false
+	}
 	dir := fmt.tprintf("%s/db", installer.UBREW_ROOT)
 	_ = os.make_directory_all(dir, os.perm(0o755))
 
