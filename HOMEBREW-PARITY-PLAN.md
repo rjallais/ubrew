@@ -152,7 +152,7 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 1. `mise run build` (see AGENTS.md §4 for clean-runner prep); run `./ubrew update`, `./ubrew outdated`, `./ubrew upgrade -n`, `./ubrew upgrade` with a tap downgraded locally in the cache to simulate staleness.
 2. Fixture-based: keep a previous `formula.json` snapshot, drop a second snapshot with 2 added entries, assert `==> New Formulae` lists exactly those entries.
 3. Tap-trust: establish a deterministic untrusted state before asserting — use a dedicated third-party tap fixture or explicitly clear/revoke any pre-existing trust entry for the tap — then `ubrew update` must print the W6 warning; `HOMEBREW_NO_REQUIRE_TAP_TRUST=1 ubrew update` must not.
-4. Non-TTY: run `ubrew upgrade` against a controlled fixture with outdated packages, drain its complete output, then assert it exits with status **1** (abort) and no package mutation when no approval is present (no interactive question is emitted, no prompt is awaited, and nothing is upgraded without an explicit approval). With `--yes` (or `-n/--dry-run`), assert exit status **0**; only the `--yes` case may mutate packages.
+4. Upgrade prompt contract: `prompt_user_yes_no` returns *true* (proceeds) when stdin/stdout are not TTYs, so non-TTY runs auto-proceed — assert exit status 0, no interactive question, and packages upgraded (a `-n/--dry-run` run lists without mutating and exits 0). On a TTY, sealing `n` at the `[y/N]` prompt must print `Aborted.`, exit status 1, and mutate nothing; `--yes` must skip the prompt, mutate, and exit 0.
 5. Do **not** binary-check `--version` after install (AGENTS.md §3) — verify upgrades by keg dir + `ubrew list --versions`.
 
 ## 5. Suggested PR split
