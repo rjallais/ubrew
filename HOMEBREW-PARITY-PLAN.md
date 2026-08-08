@@ -66,10 +66,11 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 ### W2 — Aggregate "Updated N taps" summary (G2)
 
 - Collect per-tap success/fallback/failure results in `run_update()` into a small array (`Updated_Tap` struct: name, result enum).
-- After the loop print:
+- Count **only** taps with a successful state change in the aggregate. After the loop print:
   - `Updated N tap(s) (<name> and <name>).` when N ≤ 3, else `Updated N taps (including <first>, <second>, ...)`.
   - Keep the per-tap `==> Updated tap %s successfully.` lines only under `-v/--verbose` to match Homebrew's quiet default.
-- On zero updates print `Already up-to-date.`
+- Report fallback and failure outcomes separately (a per-tap `==> <name> unchanged (fallback)` / `failed` line), so a fallback or failure is never counted as a successful update.
+- On zero successful updates print `Already up-to-date.` **only** when every tap result is a clean success or a no-op. Suppress it whenever any tap fell back or failed (the per-tap fallback/failure lines are still printed) — a fallback or failed result means the update was incomplete, so the aggregate must never claim everything stayed up-to-date.
 
 ### W3 — New Formulae / New Casks diff listings (G3)
 
@@ -90,7 +91,7 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 
 - Change `FORMULA_LIST_URL` / `CASK_LIST_URL` to `https://formulae.brew.sh/api/formula.jws.json` and `.../cask.jws.json`.
 - Parsing: JWS payloads are `{"payload": "<base64 json>", "signatures": [...]}`; decode the payload to get the same JSON array as today (portable pure-Odin base64 decode lives in the stdlib `core:encoding/base64`).
-- Verification: full signature verification requires Homebrew's JWS keys; **Phase 1** accepts payload without verifying (documented in-code comment) and adds a `UBREW_NO_VERIFY_JWS`/fallback flag. **Phase 2** (optional, follow-up): vendor the Ruby bundler root cert chain / use `cosign`-style verify via an external tool — keep out of scope for this plan.
+- Verification (REQUIRED gate): do **not** silently trust unverified payloads. Either (a) verify signatures against pinned Homebrew public keys and only then make JWS the default source, or (b) keep the unsigned endpoints as the default and explicitly mark JWS-decoded metadata untrusted in-code. `UBREW_NO_VERIFY_JWS` is an **explicit insecure override**, never an automatic fallback; leaving it unset must fail closed. Until verification or (b) ships, do not flip JWS to the default source. **Phase 2** (optional, follow-up): vendor the Ruby bundler root cert chain / use `cosign`-style verify via an external tool — keep out of scope for the default path.
 - Ensure `build_search_index()` and ETag caching work unchanged on decoded payloads.
 
 ### W5 — Outdated header + summary (G5)
@@ -118,7 +119,7 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
   To disable trust checks:
     export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
   ```
-- Print it (once) after tap refresh inside `run_update()`, and after upgrade in `run_upgrade()` when the tapped-untrusted set is non-empty and env var unset.
+- Emit it exactly **once** per command invocation. Consolidate ownership in a single dedup helper (e.g. `show_untrusted_warning_once()`), called from `run_update()` after tap refresh and from `run_upgrade()`; the second caller sees it was already shown and suppresses duplicate output, preserving the existing warning content and silent-skip behavior.
 - Keep the per-tap interactive `prompt_and_trust_tap()` for *install/fetch* paths (that's superior UX to Homebrew there — don't regress it).
 - Replace silent skipping in the update loop with this visible warning (keep the skip itself).
 
@@ -136,7 +137,7 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 - Add `maybe_auto_update()` called at the top of `install` and `upgrade` dispatch:
   - Skipped when `HOMEBREW_NO_AUTO_UPDATE` is set, `CI=1` without TTY, or command was `update` itself.
   - 24h freshness gate already exists in `run_update(--auto-update)`; wire `HOMEBREW_AUTO_UPDATE_SECS` to override the 86400 default.
-- Runs `run_update(auto_update = true)`; failures are warnings, never fatal.
+- Runs `run_update(auto_update = true)`. **Atomicity:** fetch/network failures stay non-fatal warnings, but an `install`/`upgrade` must never continue after a *partially applied* update. Stage the complete metadata snapshot as a versioned generation (e.g. `cache/generations/<id>/` holding every list together), then commit it with a **single atomic switch of one active manifest** (a pointer file or directory symlink flip). Never rename the individual cache files independently. Preserve the previous generation if staging or the switch fails; mark the new state indeterminate; and **stop the dependent command** (propagate the failure) instead of treating it as a warning and continuing on a half-updated cache.
 
 ---
 
@@ -150,8 +151,8 @@ awscli 2.36.11 -> 2.36.13 (24.2MB)
 
 1. `mise run build` (see AGENTS.md §4 for clean-runner prep); run `./ubrew update`, `./ubrew outdated`, `./ubrew upgrade -n`, `./ubrew upgrade` with a tap downgraded locally in the cache to simulate staleness.
 2. Fixture-based: keep a previous `formula.json` snapshot, drop a second snapshot with 2 added entries, assert `==> New Formulae` lists exactly those entries.
-3. Tap-trust: `ubrew tap justrach/nanobrew` untrusted, then `ubrew update` must print the W6 warning; `HOMEBREW_NO_REQUIRE_TAP_TRUST=1 ubrew update` must not.
-4. Non-TTY: pipe `ubrew upgrade` through `head -1` and assert no prompt / auto-yes behavior is preserved.
+3. Tap-trust: establish a deterministic untrusted state before asserting — use a dedicated third-party tap fixture or explicitly clear/revoke any pre-existing trust entry for the tap — then `ubrew update` must print the W6 warning; `HOMEBREW_NO_REQUIRE_TAP_TRUST=1 ubrew update` must not.
+4. Non-TTY: run `ubrew upgrade` against a controlled fixture with outdated packages, drain its complete output, then assert it exits with status **1** (abort) and no package mutation when no approval is present (no interactive question is emitted, no prompt is awaited, and nothing is upgraded without an explicit approval). With `--yes` (or `-n/--dry-run`), assert exit status **0**; only the `--yes` case may mutate packages.
 5. Do **not** binary-check `--version` after install (AGENTS.md §3) — verify upgrades by keg dir + `ubrew list --versions`.
 
 ## 5. Suggested PR split
