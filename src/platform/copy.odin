@@ -108,6 +108,37 @@ exec_cmd :: proc(bin: string, args: []string) -> bool {
 	return false
 }
 
+// exec_cmd_async forks + execs without waiting, so callers can run several
+// independent subprocesses concurrently and reap them later with
+// wait_pid_ok. Identical to exec_cmd except for the non-blocking wait.
+// Returns (-1, false) when fork failed.
+exec_cmd_async :: proc(bin: string, args: []string) -> (posix.pid_t, bool) {
+	argv := make([]cstring, len(args) + 1, context.temp_allocator)
+	for i in 0..<len(args) {
+		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
+	}
+	argv[len(args)] = nil
+
+	bin_cstr := strings.clone_to_cstring(bin, context.temp_allocator)
+
+	pid := posix.fork()
+	if pid == 0 {
+		posix.execvp(bin_cstr, &argv[0])
+		posix.exit(1)
+	} else if pid > 0 {
+		return pid, true
+	}
+	return -1, false
+}
+
+// wait_pid_ok reaps a pid spawned by exec_cmd_async and reports whether it
+// exited cleanly (status 0). Blocking, like exec_cmd's internal wait.
+wait_pid_ok :: proc(pid: posix.pid_t) -> bool {
+	status: c.int
+	posix.waitpid(pid, &status, nil)
+	return status == 0
+}
+
 exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8, suppress_stderr := true) -> (output: string, truncated: bool) {
 	argv := make([]cstring, len(args) + 1, context.temp_allocator)
 	for i in 0..<len(args) {

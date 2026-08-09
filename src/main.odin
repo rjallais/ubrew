@@ -5816,12 +5816,19 @@ run_update :: proc(args: []string) -> bool {
 			}
 		}
 
-		for entry in taps {
-			// Shared mode: taps are git clones in brew's Library/Taps. Pull
-			// each clone with `git pull --ff-only` instead of the Contents-API
-			// probe pipeline. homebrew/core & homebrew/cask are API-based and
-			// never cloned — skip them here entirely.
-			if tap.mode() == .Shared {
+		if tap.mode() == .Shared {
+			// Shared mode: taps are git clones inside brew's Library/Taps.
+			// Pull every trusted clone CONCURRENTLY with a bounded fan-out —
+			// a sequential loop of `git pull --ff-only` costs one full remote
+			// fetch per tap (~1-2 s each), easily 10-15 s for a dozen taps.
+			// homebrew/core & homebrew/cask are API-only and never cloned.
+			Shared_Pull_Job :: struct {
+				name:   string,
+				dest:   string,
+				before: string, // pre-pull HEAD short sha
+			}
+			pulls := make([dynamic]Shared_Pull_Job, 0, len(taps), context.temp_allocator)
+			for entry in taps {
 				if strings.has_prefix(entry.name, "homebrew/") {
 					if verbose {
 						fmt.printf("  [skip] tap %s is API-based, skipping\n", entry.name)
@@ -5835,27 +5842,80 @@ run_update :: proc(args: []string) -> bool {
 					continue
 				}
 				dest := tap.shared_tap_dir(entry.name)
-				if os.is_dir(fmt.tprintf("%s/.git", dest)) {
-					before := git_head_short(dest)
-					if git_pull_ff_only(dest) {
-						after := git_head_short(dest)
-						if len(before) > 0 && before != after {
-							append(&updated_tap_names, strings.clone(entry.name, context.temp_allocator))
-							if verbose {
-								fmt.printf("==> Updated tap %s successfully.\n", entry.name)
-							}
-						} else if verbose {
-							fmt.printf("  [up-to-date] tap %s\n", entry.name)
-						}
-					} else {
-						append(&failed_tap_names, strings.clone(entry.name, context.temp_allocator))
-						if verbose {
-							fmt.printf("Error: Failed to update tap %s.\n", entry.name)
-						}
+				if !os.is_dir(fmt.tprintf("%s/.git", dest)) {
+					if verbose {
+						fmt.printf("  [skip] tap %s has no local clone, skipping pull\n", entry.name)
 					}
-				} else if verbose {
-					fmt.printf("  [skip] tap %s has no local clone, skipping pull\n", entry.name)
+					continue
 				}
+				append(&pulls, Shared_Pull_Job{
+					name   = entry.name,
+					dest   = dest,
+					before = git_head_short(dest),
+				})
+			}
+
+			// Fan out the pulls in a bounded concurrency window and reap
+			// each child as its window completes. The window is sized to
+			// saturate the (mostly network-bound) git fetches: hosts with
+			// fewer cores still work fine since the children sleep in
+			// network I/O, and GitHub throttles concurrent fetches to a
+			// handful anyway.
+			pull_concurrency := 8
+			pull_ok := make([]bool, len(pulls), context.temp_allocator)
+			for start := 0; start < len(pulls); start += pull_concurrency {
+				window := min(len(pulls) - start, pull_concurrency)
+				window_pids := make([]posix.pid_t, window, context.temp_allocator)
+				for i in 0 ..< window {
+					window_pids[i] = -1
+					job := pulls[start + i]
+					pid, fork_ok := platform.exec_cmd_async("git", []string{
+						"git",
+						"-c", "http.connectTimeout=10",
+						"-c", "http.lowSpeedLimit=1000",
+						"-c", "http.lowSpeedTime=30",
+						"-c", "core.askPass=true",
+						"-C", job.dest, "pull", "--ff-only", "--quiet",
+					})
+					if fork_ok {
+						window_pids[i] = pid
+					} else {
+						pull_ok[start + i] = false
+					}
+				}
+				for i in 0 ..< window {
+					if window_pids[i] >= 0 {
+						pull_ok[start + i] = platform.wait_pid_ok(window_pids[i])
+					}
+				}
+			}
+
+			for job, i in pulls {
+				if pull_ok[i] {
+					after := git_head_short(job.dest)
+					if len(job.before) > 0 && job.before != after {
+						append(&updated_tap_names, strings.clone(job.name, context.temp_allocator))
+						if verbose {
+							fmt.printf("==> Updated tap %s successfully.\n", job.name)
+						}
+					} else if verbose {
+						fmt.printf("  [up-to-date] tap %s\n", job.name)
+					}
+				} else {
+					append(&failed_tap_names, strings.clone(job.name, context.temp_allocator))
+					if verbose {
+						fmt.printf("Error: Failed to update tap %s.\n", job.name)
+					}
+				}
+			}
+		}
+
+		for entry in taps {
+			// Shared mode: taps are git clones in brew's Library/Taps and
+			// were already pulled concurrently by the fan-out above. Never
+			// re-pull or probe them sequentially — just stay out of the
+			// Contents-API cache/probe path for Shared-mode setups.
+			if tap.mode() == .Shared {
 				continue
 			}
 
@@ -5957,12 +6017,22 @@ run_update :: proc(args: []string) -> bool {
 		// cache) so we don't list every formula/cask as "new".
 		new_formulae := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
 		new_casks := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
-		if formula_payload_ok && temp_file_formula != "" && os.is_file(api.FORMULA_LIST_CACHE) {
+		// A 0-byte staging file is a pure 304 no-op: the payload did not
+		// change, so skip re-parsing the 30+ MB cached dumps entirely.
+		formula_dirty := false
+		cask_dirty := false
+		if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
+			formula_dirty = true
+		}
+		if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
+			cask_dirty = true
+		}
+		if formula_payload_ok && formula_dirty && os.is_file(api.FORMULA_LIST_CACHE) {
 			old_f := api.load_api_name_map(api.FORMULA_LIST_CACHE)
 			new_formulae = api.diff_api_list_new_entries(old_f, temp_file_formula, context.temp_allocator)
 			api.destroy_api_name_map(old_f)
 		}
-		if cask_payload_ok && temp_file_cask != "" && os.is_file(api.CASK_LIST_CACHE) {
+		if cask_payload_ok && cask_dirty && os.is_file(api.CASK_LIST_CACHE) {
 			old_c := api.load_api_name_map(api.CASK_LIST_CACHE)
 			new_casks = api.diff_api_list_new_entries(old_c, temp_file_cask, context.temp_allocator)
 			api.destroy_api_name_map(old_c)
@@ -6076,6 +6146,18 @@ run_update :: proc(args: []string) -> bool {
 							rebuild_index = true
 						}
 					}
+				}
+			} else if os.is_file(db_path) {
+				// 304 no-op: curl -z got a fresh-enough response and wrote
+				// nothing (0-byte temp). The snapshot is still consistent
+				// (snapshot_complete guards the staging of the API lists),
+				// so advance the freshness marker anyway. Without this the
+				// old logic only ever refreshed upstream.json on a real
+				// change, making the 24h `skip_api` gate dead: every
+				// no-change update re-ran the whole network + tap-pull path.
+				if snapshot_complete {
+					now_time := time.now()
+					os.chtimes(db_path, now_time, now_time)
 				}
 			}
 		}
