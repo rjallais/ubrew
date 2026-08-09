@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
-          persist-credentials: false
+          # Credentials must persist so the formula-PR step can push.
 
       - name: Resolve tag
         id: tag
