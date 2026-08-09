@@ -129,7 +129,11 @@ jobs:
             exit 0
           fi
 
-          gh pr create \
+          # Creating the PR is best-effort: the formula branch is already
+          # pushed, and some repos deny GITHUB_TOKEN the createPullRequest
+          # permission. In that case finish green with clear instructions
+          # instead of red-lighting an otherwise successful release.
+          if ! gh pr create \
             --base main \
             --head "$BRANCH" \
             --title "formula: update to ${TAG}" \
@@ -137,4 +141,13 @@ jobs:
 
           Verified against the release assets by scripts/verify-formula-release.sh during the same run.
 
-          Maintainers: do not bump the formula to a version without a matching release (see docs/RELEASING.md)."
+          Maintainers: do not bump the formula to a version without a matching release (see docs/RELEASING.md)." 2> /tmp/pr_create.err; then
+            if grep -q "createPullRequest" /tmp/pr_create.err; then
+              echo "::warning::GitHub Actions is not permitted to create pull requests in this repo (createPullRequest)."
+              echo "::warning::The $BRANCH branch was pushed; open the PR manually:"
+              echo "::warning::  gh pr create --base main --head $BRANCH --title 'formula: update to ${TAG}'"
+              exit 0
+            fi
+            cat /tmp/pr_create.err >&2
+            exit 1
+          fi

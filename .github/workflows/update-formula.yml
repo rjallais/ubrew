@@ -111,10 +111,22 @@ jobs:
             exit 0
           fi
 
-          gh pr create \
+          # Best-effort PR creation: some repos deny GITHUB_TOKEN the
+          # createPullRequest permission; the branch is already pushed, so
+          # finish green with instructions instead of failing the job.
+          if ! gh pr create \
             --base main \
             --head "$BRANCH" \
             --title "formula: update to ${TAG}" \
             --body "Automated bump of Formula/ubrew.rb for release ${TAG} (manual dispatch; release assets may include macOS tarballs).
 
-          Verified by scripts/verify-formula-release.sh. See docs/RELEASING.md."
+          Verified by scripts/verify-formula-release.sh. See docs/RELEASING.md." 2> /tmp/pr_create.err; then
+            if grep -q "createPullRequest" /tmp/pr_create.err; then
+              echo "::warning::GitHub Actions is not permitted to create pull requests in this repo (createPullRequest)."
+              echo "::warning::The $BRANCH branch was pushed; open the PR manually:"
+              echo "::warning::  gh pr create --base main --head $BRANCH --title 'formula: update to ${TAG}'"
+              exit 0
+            fi
+            cat /tmp/pr_create.err >&2
+            exit 1
+          fi
