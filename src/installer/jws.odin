@@ -1,0 +1,110 @@
+package installer
+
+import "core:encoding/base64"
+import "core:encoding/json"
+import "core:fmt"
+import "core:os"
+import "core:strings"
+
+// JWS_Header represents the parsed header of a JSON Web Signature (JWS).
+JWS_Header :: struct {
+	alg: string,
+	typ: string,
+	kid: string,
+}
+
+base64url_decode :: proc(input: string, allocator := context.temp_allocator) -> (string, bool) {
+	if len(input) == 0 do return "", false
+	s, _ := strings.replace_all(input, "-", "+", context.temp_allocator)
+	s, _ = strings.replace_all(s, "_", "/", context.temp_allocator)
+
+	// A base64 length residue of 1 mod 4 is never valid (each 4-char group
+	// encodes 3 bytes, and a 1-char remainder cannot encode even a partial
+	// byte even in the unpadded form). Reject it before any padding is
+	// appended, otherwise a malformed token would be padded into shape.
+	if (len(s) % 4) == 1 {
+		return "", false
+	}
+
+	pad := (4 - (len(s) % 4)) % 4
+	switch pad {
+	case 1: s = fmt.tprintf("%s=", s)
+	case 2: s = fmt.tprintf("%s==", s)
+	case 3: s = fmt.tprintf("%s===", s)
+	}
+
+	decoded_bytes, err := base64.decode(s, allocator = allocator)
+	if err != nil do return "", false
+	return string(decoded_bytes), true
+}
+
+// verify_jws_token checks a raw JWS string (header.payload.signature) for
+// valid base64url structure, a supported algorithm (RS256 / ES256 / PS256),
+// and a payload whose "sha256" field matches expected_sha256 exactly.
+//
+// SECURITY NOTE: this is an attestation-hash gate, NOT cryptographic
+// signature verification. The signature segment is only checked for
+// presence — it is never verified against a public key, so a forged
+// signature on a structurally valid token passes. Do not use this function
+// as the sole integrity gate for downloaded binaries. expected_sha256 is
+// mandatory: a caller that cannot supply the expected hash gets false, so a
+// missing expectation can never silently widen the trust decision.
+verify_jws_token :: proc(token: string, expected_sha256: string) -> bool {
+	if len(token) == 0 do return false
+	if len(expected_sha256) == 0 do return false
+
+	parts := strings.split(token, ".", context.temp_allocator)
+	if len(parts) != 3 {
+		return false
+	}
+
+	header_json, hok := base64url_decode(parts[0], context.temp_allocator)
+	if !hok do return false
+
+	val, err := json.parse(transmute([]u8)header_json)
+	if err != nil do return false
+	defer json.destroy_value(val)
+
+	obj, is_obj := val.(json.Object)
+	if !is_obj do return false
+
+	alg_str := ""
+	if alg_val, ok := obj["alg"]; ok {
+		if s, s_ok := alg_val.(json.String); s_ok {
+			alg_str = string(s)
+		}
+	}
+
+	// Supported Homebrew JWS signing algorithms: RS256, ES256, PS256
+	if alg_str != "RS256" && alg_str != "ES256" && alg_str != "PS256" {
+		return false
+	}
+
+	// The expected digest must match the payload's "sha256" field exactly.
+	// This is an exact equality decision — a substring match anywhere in
+	// the decoded JSON is not acceptable, since the digest could turn up in
+	// an unrelated field of a forged payload. Malformed JSON, a missing
+	// field, or a non-string / non-exact value is a hard rejection.
+	payload_data, pok := base64url_decode(parts[1], context.temp_allocator)
+	if !pok do return false
+
+	payload_val, perr := json.parse(transmute([]u8)payload_data)
+	if perr != nil do return false
+	defer json.destroy_value(payload_val)
+
+	p_obj, p_ok := payload_val.(json.Object)
+	if !p_ok do return false
+
+	digest_field, d_ok := p_obj["sha256"]
+	if !d_ok do return false
+
+	digest_str, ds_ok := digest_field.(json.String)
+	if !ds_ok do return false
+
+	expected := strings.to_lower(strings.trim_space(expected_sha256), context.temp_allocator)
+	actual := strings.to_lower(strings.trim_space(string(digest_str)), context.temp_allocator)
+	if expected != actual do return false
+
+	// Structural check only: a signature segment must be present.
+	return len(parts[2]) > 0
+}

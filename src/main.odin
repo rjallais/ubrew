@@ -72,20 +72,20 @@ print_usage :: proc() {
 ensure_ubrew_dirs :: proc() -> bool {
     dirs := []string{
         installer.UBREW_ROOT,
-        installer.UBREW_ROOT + "/store",
-        installer.UBREW_ROOT + "/cache",
-        installer.UBREW_ROOT + "/cache/blobs",
-        installer.UBREW_ROOT + "/cache/tmp",
+        fmt.tprintf("%s/store", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache/blobs", installer.UBREW_ROOT),
+        fmt.tprintf("%s/cache/tmp", installer.UBREW_ROOT),
         installer.PREFIX,
         installer.CELLAR_DIR,
         installer.CASKROOM_DIR,
-        installer.PREFIX + "/bin",
-        installer.PREFIX + "/opt",
-        installer.PREFIX + "/lib",
-        installer.PREFIX + "/include",
-        installer.PREFIX + "/share",
-        installer.UBREW_ROOT + "/db",
-        installer.UBREW_ROOT + "/locks",
+        fmt.tprintf("%s/bin", installer.PREFIX),
+        fmt.tprintf("%s/opt", installer.PREFIX),
+        fmt.tprintf("%s/lib", installer.PREFIX),
+        fmt.tprintf("%s/include", installer.PREFIX),
+        fmt.tprintf("%s/share", installer.PREFIX),
+        fmt.tprintf("%s/db", installer.UBREW_ROOT),
+        fmt.tprintf("%s/locks", installer.UBREW_ROOT),
     }
 
     for dir in dirs {
@@ -226,9 +226,9 @@ run_list :: proc(args: []string) {
 
 	for i := 0; i < len(args); i += 1 {
 		arg := args[i]
-		if arg == "--formula" {
+		if arg == "--formula" || arg == "--formulae" {
 			opt_formula = true
-		} else if arg == "--cask" {
+		} else if arg == "--cask" || arg == "--casks" {
 			opt_cask = true
 		} else if arg == "--full-name" {
 			opt_full_name = true
@@ -855,6 +855,66 @@ bundle_install_entries :: proc(entries: []Brewfile_Entry, upgrade_active: bool) 
 	}
 }
 
+write_brewfile_lock :: proc(brewfile_path: string, entries: []Brewfile_Entry) {
+	if brewfile_path == "-" || brewfile_path == "" do return
+	lock_path := fmt.tprintf("%s.lock.json", brewfile_path)
+
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "{\n  \"entries\": {\n")
+
+	kinds := []string{"brew", "cask", "tap"}
+	for k, k_idx in kinds {
+		strings.write_string(&b, fmt.tprintf("    \"%s\": {{\n", k))
+		first := true
+		for e in entries {
+			if e.kind != k do continue
+			if !first do strings.write_string(&b, ",\n")
+			first = false
+
+			ver := "latest"
+			if e.kind == "brew" {
+				keg_dir := fmt.tprintf("%s/%s", platform.get_cellar_dir(), e.name)
+				allocator := context.allocator
+				if infos, err := os.read_directory_by_path(keg_dir, -1, allocator); err == nil {
+					defer os.file_info_slice_delete(infos, allocator)
+					latest := ""
+					for info in infos {
+						if info.type == .Directory && is_version_dir(info.name) {
+							if latest == "" || is_newer(info.name, latest) {
+								latest = info.name
+							}
+						}
+					}
+					if latest != "" do ver = latest
+				}
+			} else if e.kind == "cask" {
+				cask_dir := fmt.tprintf("%s/%s", platform.get_caskroom_dir(), e.name)
+				allocator := context.allocator
+				if infos, err := os.read_directory_by_path(cask_dir, -1, allocator); err == nil {
+					defer os.file_info_slice_delete(infos, allocator)
+					latest := ""
+					for info in infos {
+						if info.type == .Directory && is_version_dir(info.name) {
+							if latest == "" || is_newer(info.name, latest) {
+								latest = info.name
+							}
+						}
+					}
+					if latest != "" do ver = latest
+				}
+			}
+			strings.write_string(&b, fmt.tprintf("      \"%s\": {{\n        \"version\": \"%s\"\n      }}", e.name, ver))
+		}
+		strings.write_string(&b, "\n    }")
+		if k_idx < len(kinds) - 1 do strings.write_string(&b, ",")
+		strings.write_string(&b, "\n")
+	}
+	strings.write_string(&b, "  }\n}\n")
+
+	content := strings.to_string(b)
+	_ = os.write_entire_file_from_string(lock_path, content)
+}
+
 run_bundle :: proc(args: []string) {
 	subcommand := "install"
 	file_opt := ""
@@ -951,7 +1011,42 @@ run_bundle :: proc(args: []string) {
 				upgrade_opt = true
 			} else if arg == "--no-describe" {
 				no_describe_opt = true
-			} else if arg == "--services" {
+			} else if arg == "--no-formula" || arg == "--no-dump-brew" || arg == "--no-cleanup-brew" {
+				// Accept and ignore
+			} else if arg == "--no-cask" || arg == "--no-dump-cask" || arg == "--no-cleanup-cask" {
+				// Accept and ignore
+			} else if arg == "--no-tap" || arg == "--no-dump-tap" || arg == "--no-cleanup-tap" {
+				// Accept and ignore
+			} else if arg == "--no-mas" || arg == "--no-dump-mas" || arg == "--no-cleanup-mas" {
+				// Accept and ignore
+			} else if arg == "--no-vscode" || arg == "--no-dump-vscode" || arg == "--no-cleanup-vscode" {
+				// Accept and ignore
+			} else if arg == "--no-go" || arg == "--no-dump-go" || arg == "--no-cleanup-go" {
+				// Accept and ignore
+			} else if arg == "--no-cargo" || arg == "--no-dump-cargo" || arg == "--no-cleanup-cargo" {
+				// Accept and ignore
+			} else if arg == "--no-uv" || arg == "--no-dump-uv" || arg == "--no-cleanup-uv" {
+				// Accept and ignore
+			} else if arg == "--no-flatpak" || arg == "--no-dump-flatpak" || arg == "--no-cleanup-flatpak" {
+				// Accept and ignore
+			} else if arg == "--no-winget" || arg == "--no-dump-winget" || arg == "--no-cleanup-winget" {
+				// Accept and ignore
+			} else if arg == "--no-krew" || arg == "--no-dump-krew" || arg == "--no-cleanup-krew" {
+				// Accept and ignore
+			} else if arg == "--no-npm" || arg == "--no-dump-npm" || arg == "--no-cleanup-npm" {
+				// Accept and ignore
+			} else if arg == "--sandbox" || arg == "--upgrade-formulae" {
+				// Accept and ignore (boolean flags; never consume the next arg)
+			} else if strings.has_prefix(arg, "--jobs=") || strings.has_prefix(arg, "--appdir=") ||
+			          strings.has_prefix(arg, "--appimagedir=") || strings.has_prefix(arg, "--fontdir=") ||
+			          strings.has_prefix(arg, "--language=") || strings.has_prefix(arg, "--upgrade-formulae=") {
+				// Accept and ignore (--flag=value forms)
+			} else if arg == "--jobs" || arg == "--appdir" || arg == "--appimagedir" ||
+			          arg == "--fontdir" || arg == "--language" {
+				if i + 1 < len(args) {
+					i += 1
+				}
+			} else if arg == "--deny-network" || arg == "--services" {
 				// Accept and ignore
 			} else if arg == "--force-cleanup" {
 				force_cleanup_opt = true
@@ -1285,6 +1380,7 @@ run_bundle :: proc(args: []string) {
 			upgrade_active = true
 		}
 		bundle_install_entries(entries, upgrade_active)
+		write_brewfile_lock(brewfile_path, entries)
 		return
 	}
 
@@ -1937,7 +2033,7 @@ run_deps :: proc(args: []string) {
         if v_infos, v_err := os.read_directory_by_path(cellar_dir, -1, context.temp_allocator); v_err == nil {
             latest_keg := ""
             for v_info in v_infos {
-                if v_info.type == .Directory {
+                if v_info.type == .Directory && is_version_dir(v_info.name) {
                     if latest_keg == "" || is_newer(v_info.name, latest_keg) {
                         latest_keg = v_info.name
                     }
@@ -2423,7 +2519,7 @@ run_deps :: proc(args: []string) {
 }
 
 unlink_formula_bins :: proc(name: string) -> int {
-    bin_dir := installer.PREFIX + "/bin"
+    bin_dir := fmt.tprintf("%s/bin", installer.PREFIX)
     formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
     infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator)
     if err != nil {
@@ -2457,6 +2553,10 @@ run_remove :: proc(args: []string) {
 	cask_only := false
 	targets := make([dynamic]string, context.temp_allocator)
 
+	dry_run := false
+	verbose := false
+	quiet := false
+
 	for a in args {
 		if strings.has_prefix(a, "-") {
 			if a == "-f" || a == "--force" {
@@ -2469,6 +2569,12 @@ run_remove :: proc(args: []string) {
 				formula_only = true
 			} else if a == "--cask" || a == "--casks" {
 				cask_only = true
+			} else if a == "-n" || a == "--dry-run" {
+				dry_run = true
+			} else if a == "-v" || a == "--verbose" {
+				verbose = true
+			} else if a == "-q" || a == "--quiet" {
+				quiet = true
 			} else {
 				fmt.printf("ubrew: unknown uninstall flag '%s'\n", a)
 				os.exit(1)
@@ -2481,6 +2587,13 @@ run_remove :: proc(args: []string) {
 	if len(targets) == 0 {
 		fmt.println("Usage: ubrew uninstall [options] <formula|cask> ...")
 		os.exit(1)
+	}
+
+	if dry_run {
+		for t in targets {
+			fmt.printf("==> Would remove %s\n", t)
+		}
+		return
 	}
 
 	// 1. Dependency check
@@ -2606,7 +2719,7 @@ remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
 		has_versions := false
 		if v_infos, v_err := os.read_directory_by_path(caskroom_cask_dir, -1, context.temp_allocator); v_err == nil {
 			for v_info in v_infos {
-				if v_info.type == .Directory {
+				if v_info.type == .Directory && is_version_dir(v_info.name) {
 					has_versions = true
 					break
 				}
@@ -2806,6 +2919,22 @@ run_install :: proc(args: []string) {
 	if len(args) < 1 {
 		print_install_usage()
 		os.exit(1)
+	}
+
+	// Homebrew parity: refresh taps/API before installing (freshness-gated).
+	// Skipped for --help/--version style invocations.
+	has_help := false
+	for a in args {
+		if a == "-h" || a == "--help" {
+			has_help = true
+			break
+		}
+	}
+	if !has_help {
+		if !maybe_auto_update() {
+			fmt.eprintln("Error: auto-update could not establish a complete metadata snapshot; refusing to install against indeterminate API state. Retry once the network is up (or set HOMEBREW_NO_AUTO_UPDATE=1 to install against the current cache).")
+			os.exit(1)
+		}
 	}
 
 	mode := Target_Type.Unknown
@@ -3137,6 +3266,13 @@ run_install :: proc(args: []string) {
 			continue
 		}
 
+		if !installer.cask_host_supported(c) {
+			fmt.printf("Error: Cask %s is not supported on this host\n", c.token)
+			api.destroy_cask(c)
+			failed = true
+			continue
+		}
+
 		flat := installer.flatten_token(c.token)
 		caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 		is_installed := os.is_dir(caskroom_cask_dir)
@@ -3213,7 +3349,7 @@ run_install :: proc(args: []string) {
 		f := job.f
 		if !build_from_source && len(f.bottle_url) > 0 {
 			sha := strings.to_lower(strings.trim_space(f.bottle_sha256), context.temp_allocator)
-			if store.store_has_relocated_entry(sha) {
+			if store.store_has_relocated_entry(sha, installer.HOMEBREW_PREFIX) {
 				continue // COW cache hit
 			}
 			dl_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
@@ -3296,33 +3432,63 @@ run_install :: proc(args: []string) {
 }
 
 run_reinstall :: proc(args: []string) {
-    if len(args) < 1 {
-        fmt.println("Usage: ubrew reinstall <formula>")
+    targets := make([dynamic]string, context.temp_allocator)
+    dry_run := false
+
+    for a in args {
+        if strings.has_prefix(a, "-") {
+            if a == "-n" || a == "--dry-run" {
+                dry_run = true
+            } else {
+                fmt.printf("ubrew: unknown reinstall flag '%s'\n", a)
+                os.exit(1)
+            }
+        } else {
+            append(&targets, a)
+        }
+    }
+
+    if len(targets) == 0 {
+        fmt.println("Usage: ubrew reinstall [options] <formula> ...")
         os.exit(1)
     }
 
+    if dry_run {
+        for t in targets {
+            fmt.printf("==> Would reinstall %s\n", t)
+        }
+        return
+    }
+
     failed := false
-    for name in args {
-        // Resolve aliases/oldnames (e.g. `dash` -> `dash-shell`) so the cellar
-        // directory used for removal matches the one the install creates.
-        resolved_name := name
-        cloned := false
+    for name in targets {
         if f, err := api.fetch_formula(name); err == nil {
+            resolved_name := name
+            cloned := false
             if f.name != name {
                 resolved_name = strings.clone(f.name)
                 cloned = true
             }
             api.destroy_formula(f)
-        }
-        if !remove_formula(resolved_name, true) {
-            failed = true
+            if !remove_formula(resolved_name, true) {
+                failed = true
+                if cloned { delete(resolved_name) }
+                continue
+            }
+            if !install_formula_by_name(name, false) {
+                failed = true
+            }
             if cloned { delete(resolved_name) }
-            continue
-        }
-        if !install_formula_by_name(name, false) {
+        } else if c, cerr := api.fetch_cask(name); cerr == nil {
+            _ = installer.remove_cask(c)
+            if !installer.install_cask(c) {
+                failed = true
+            }
+            api.destroy_cask(c)
+        } else {
+            fmt.printf("Error: No formula or cask found for: %s\n", name)
             failed = true
         }
-        if cloned { delete(resolved_name) }
     }
     if failed {
         os.exit(1)
@@ -3377,7 +3543,7 @@ run_where :: proc(args: []string) {
     }
 
     // The prefix bin directory is small and flat — walk it directly.
-    bin_root := installer.PREFIX + "/bin"
+    bin_root := fmt.tprintf("%s/bin", installer.PREFIX)
     if os.is_dir(bin_root) {
         w := os.walker_create(bin_root)
         defer os.walker_destroy(&w)
@@ -3404,12 +3570,12 @@ command_exists :: proc(tool: string) -> bool {
 check_directories :: proc(warnings: ^[dynamic]string) {
 	dirs := []string{
 		installer.UBREW_ROOT,
-		installer.UBREW_ROOT + "/cache",
-		installer.UBREW_ROOT + "/store",
+		fmt.tprintf("%s/cache", installer.UBREW_ROOT),
+		fmt.tprintf("%s/store", installer.UBREW_ROOT),
 		installer.PREFIX,
 		installer.CELLAR_DIR,
 		installer.CASKROOM_DIR,
-		installer.PREFIX + "/bin",
+		fmt.tprintf("%s/bin", installer.PREFIX),
 	}
 	for dir in dirs {
 		if !os.is_dir(dir) {
@@ -3428,7 +3594,7 @@ check_tools :: proc(warnings: ^[dynamic]string) {
 }
 
 check_symlinks :: proc(warnings: ^[dynamic]string) {
-	bin_dir := installer.PREFIX + "/bin"
+	bin_dir := fmt.tprintf("%s/bin", installer.PREFIX)
 	if infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator); err == nil {
 		defer os.file_info_slice_delete(infos, context.allocator)
 		for info in infos {
@@ -3447,7 +3613,7 @@ check_symlinks :: proc(warnings: ^[dynamic]string) {
 
 check_path :: proc(warnings: ^[dynamic]string) {
 	path_env := os.get_env("PATH", context.temp_allocator)
-	prefix_bin := installer.PREFIX + "/bin"
+	prefix_bin := fmt.tprintf("%s/bin", installer.PREFIX)
 	if !strings.contains(path_env, prefix_bin) {
 		append(warnings, fmt.aprintf("%s is not in PATH", prefix_bin))
 	}
@@ -3607,7 +3773,7 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
                 cleanup_broken_links_in_dir(info.fullpath, dry_run, removed, failed)
                 
                 // If directory is now empty, remove it (unless it is a root directory)
-                if info.fullpath != installer.PREFIX + "/bin" && info.fullpath != installer.PREFIX + "/lib" && info.fullpath != installer.PREFIX + "/include" && info.fullpath != installer.PREFIX + "/share" {
+                if info.fullpath != fmt.tprintf("%s/bin", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/lib", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/include", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/share", installer.PREFIX) {
                     dir_infos, dir_err := os.read_directory_by_path(info.fullpath, -1, context.allocator)
                     if dir_err == nil {
                         defer os.file_info_slice_delete(dir_infos, context.allocator)
@@ -3650,10 +3816,10 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
         }
     }
 
-    cleanup_broken_links_in_dir(installer.PREFIX + "/bin", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/lib", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/include", dry_run, removed, failed)
-    cleanup_broken_links_in_dir(installer.PREFIX + "/share", dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/bin", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/lib", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/include", installer.PREFIX), dry_run, removed, failed)
+    cleanup_broken_links_in_dir(fmt.tprintf("%s/share", installer.PREFIX), dry_run, removed, failed)
 }
 
 run_cleanup :: proc(args: []string) {
@@ -3922,7 +4088,7 @@ run_cleanup :: proc(args: []string) {
         }
     }
 
-    locks_dir := installer.UBREW_ROOT + "/locks"
+    locks_dir := fmt.tprintf("%s/locks", installer.UBREW_ROOT)
     if os.is_dir(locks_dir) {
         if l_infos, l_err := os.read_directory_by_path(locks_dir, -1, context.temp_allocator); l_err == nil {
             for info in l_infos {
@@ -3943,7 +4109,7 @@ run_cleanup :: proc(args: []string) {
         }
     }
 
-    cleanup_cache_tree(installer.UBREW_ROOT + "/cache", dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
+    cleanup_cache_tree(fmt.tprintf("%s/cache", installer.UBREW_ROOT), dry_run, scrub, prune_all, prune_days, preserved_shas, preserved_filenames, target_shas, target_prefixes[:], pkg_names[:], &removed, &failed)
 
     _, h_entries := history.load(context.temp_allocator)
 
@@ -3978,7 +4144,7 @@ run_cleanup :: proc(args: []string) {
                 if v_infos, v_err := os.read_directory_by_path(formula_dir, -1, context.temp_allocator); v_err == nil {
                     versions := make([dynamic]string, context.temp_allocator)
                     for v_info in v_infos {
-                        if v_info.type == .Directory {
+                        if v_info.type == .Directory && is_version_dir(v_info.name) {
                             append(&versions, strings.clone(v_info.name, context.temp_allocator))
                         }
                     }
@@ -4185,6 +4351,11 @@ run_tap :: proc(args: []string) {
 		return
 	}
 
+	if tap_name == "migrate" {
+		run_tap_migrate(args[1:])
+		return
+	}
+
 	// Backward-compat: `ubrew tap user/repo [url]` (no subcommand)
 	url := ""
 	if len(args) >= 2 {
@@ -4215,6 +4386,244 @@ run_untap :: proc(args: []string) {
 
 	if !tap.tap_remove(tap_name) {
 		os.exit(1)
+	}
+}
+
+// ── ubrew tap migrate (TAP-INTEROP-MIGRATION.md Phase 4) ──
+
+// run_tap_migrate converts ubrew's fetch-based tap state into shared
+// Library/Taps git clones: it ensures a clone exists for every non-homebrew/*
+// tap, removes now-stale Contents-API probe files, repairs trusted_taps.txt
+// (dropping entries that are not valid user/repo names), and with --brewfile
+// reconciles the tap set against the repo Brewfile. -n / --dry-run prints
+// the plan without writing anything.
+run_tap_migrate :: proc(args: []string) {
+	dry_run := false
+	use_brewfile := false
+	for a in args {
+		if a == "-n" || a == "--dry-run" {
+			dry_run = true
+		} else if a == "--brewfile" {
+			use_brewfile = true
+		} else {
+			fmt.printf("Error: unknown option '%s'\n", a)
+			fmt.println("Usage: ubrew tap migrate [-n|--dry-run] [--brewfile]")
+			os.exit(1)
+		}
+	}
+
+	if tap.mode() != .Shared {
+		fmt.println("Nothing to migrate: no Homebrew install with a Library/Taps directory was found (standalone mode).")
+		fmt.println("Taps stay in ubrew's fetch-based cache at $UBREW_ROOT/cache/taps.")
+		return
+	}
+
+	// Rows only, not the merged view: migration must see pre-shared state
+	// recorded in taps.txt even when the clone does not exist yet (the
+	// merged read_taps view filters those out in shared mode).
+	taps := tap.read_taps_rows()
+	defer {
+		for t in taps {
+			tap.destroy_read_tap_entry(t)
+		}
+		delete(taps)
+	}
+
+	would_clone := 0
+	cloned := 0
+	failed := 0
+	removed_files := 0
+
+	// Serialize the destructive clone/re-clone mutations below against
+	// concurrent tap add/remove/git-pull from other ubrew processes (the
+	// same advisory lock run_update and tap_add/tap_remove use; fcntl locks
+	// are per-process so tap_add/remove re-locking inside --brewfile is safe).
+	mig_lock_fd, mig_lock_ok := tap.shared_tap_lock()
+	if !mig_lock_ok {
+		fmt.println("Error: Could not lock the shared taps directory for migration.")
+		return
+	}
+	defer posix.close(mig_lock_fd)
+
+	// 1. Ensure a clone exists for every non-homebrew/* tap.
+	fmt.println("==> Checking shared Library/Taps clones")
+	for entry in taps {
+		if strings.has_prefix(entry.name, "homebrew/") do continue
+		dest := tap.shared_tap_dir(entry.name)
+		if os.is_dir(fmt.tprintf("%s/.git", dest)) {
+			fmt.printf("  [ok] %s -> %s\n", entry.name, dest)
+			continue
+		}
+		if dry_run {
+			fmt.printf("  [would clone] %s -> %s\n", entry.name, dest)
+			would_clone += 1
+			continue
+		}
+		if tap.ensure_shared_clone(entry.name, entry.url) {
+			fmt.printf("  [cloned] %s -> %s\n", entry.name, dest)
+			cloned += 1
+		} else {
+			fmt.printf("  [failed] %s (see warning above)\n", entry.name)
+			failed += 1
+		}
+	}
+
+	// 2. Remove stale Contents-API probe state for taps that now live as
+	//    clones (Formula_listing.json + .hit sidecar). The Formula/ mirror
+	//    dir is kept: clone reads write through to it on demand.
+	fmt.println("==> Removing stale probe caches")
+	// Merged view so taps just added in step 1 / step 4 (clones without
+	// taps.txt rows) are covered too.
+	taps_now := tap.read_taps()
+	defer {
+		for t in taps_now {
+			tap.destroy_read_tap_entry(t)
+		}
+		delete(taps_now)
+	}
+	for entry in taps_now {
+		if strings.has_prefix(entry.name, "homebrew/") do continue
+		dest := tap.shared_tap_dir(entry.name)
+		if !os.is_dir(fmt.tprintf("%s/.git", dest)) do continue
+		cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, entry.name)
+		if !os.is_dir(cache_dir) do continue
+
+		listing := fmt.tprintf("%s/Formula_listing.json", cache_dir)
+		hit := fmt.tprintf("%s/Formula_listing.hit", cache_dir)
+		paths := []string{listing, hit}
+		for path in paths {
+			if !os.is_file(path) do continue
+			if dry_run {
+				fmt.printf("  [would remove] %s\n", path)
+			} else {
+				_ = os.remove(path)
+				fmt.printf("  [removed] %s\n", path)
+			}
+			removed_files += 1
+		}
+	}
+
+	// 3. Repair trusted_taps.txt: drop entries that are not valid user/repo
+	//    tap names (e.g. the corrupted "https:/..." line).
+	trusted := tap.trusted_taps_load()
+	defer {
+		for n in trusted {
+			delete(n)
+		}
+		delete(trusted)
+	}
+	bad := make([dynamic]string, context.temp_allocator)
+	defer delete(bad)
+	for n in trusted {
+		if !tap.is_valid_tap_name(n) {
+			append(&bad, n)
+		}
+	}
+	if len(bad) > 0 {
+		fmt.println("==> Repairing trusted_taps.txt")
+		if dry_run {
+			for n in bad {
+				fmt.printf("  [would drop] %q\n", n)
+			}
+		} else {
+			clean := make([dynamic]string, context.allocator)
+			defer {
+				for n in clean {
+					delete(n)
+				}
+				delete(clean)
+			}
+			for n in trusted {
+				if tap.is_valid_tap_name(n) {
+					append(&clean, strings.clone(n, context.allocator))
+				}
+			}
+			tap.trusted_taps_save(clean)
+			for n in bad {
+				fmt.printf("  [dropped] %q\n", n)
+			}
+		}
+	}
+
+	// 4. Reconcile against the repo Brewfile (desired tap set).
+	if use_brewfile {
+		bf_path := get_brewfile_path("", false)
+		entries, ok := parse_brewfile(bf_path)
+		if !ok {
+			fmt.printf("Error: could not read Brewfile at %s\n", bf_path)
+			os.exit(1)
+		}
+		defer {
+			for e in entries {
+				delete(e.kind)
+				delete(e.name)
+				delete(e.url)
+			}
+			delete(entries)
+		}
+
+		desired := make([dynamic]Brewfile_Entry, context.temp_allocator)
+		defer delete(desired)
+		for e in entries {
+			if e.kind == "tap" {
+				append(&desired, e)
+			}
+		}
+
+		fmt.println("==> Reconciling with Brewfile")
+		for d in desired {
+			in_set := false
+			for t in taps_now {
+				if t.name == d.name {
+					in_set = true
+					break
+				}
+			}
+			if in_set do continue
+			if dry_run {
+				fmt.printf("  [would tap] %s (from Brewfile)\n", d.name)
+				would_clone += 1
+				continue
+			}
+			if tap.tap_add(d.name, "") {
+				// Trust a tap only when the Brewfile entry explicitly marks
+				// it trusted; third-party taps stay untrusted otherwise.
+				if d.trusted {
+					tap.tap_trust(d.name)
+				}
+				if os.is_dir(fmt.tprintf("%s/.git", tap.shared_tap_dir(d.name))) {
+					fmt.printf("  [tapped] %s (from Brewfile)\n", d.name)
+					cloned += 1
+				} else {
+					fmt.printf("  [tapped, no clone] %s (from Brewfile)\n", d.name)
+					failed += 1
+				}
+			} else {
+				fmt.printf("  [failed] %s (from Brewfile)\n", d.name)
+				failed += 1
+			}
+		}
+
+		// Extras: taps present but not listed in the Brewfile (informational).
+		for t in taps_now {
+			if strings.has_prefix(t.name, "homebrew/") do continue
+			in_desired := false
+			for d in desired {
+				if d.name == t.name {
+					in_desired = true
+					break
+				}
+			}
+			if !in_desired {
+				fmt.printf("  [extra] %s (tapped but not in Brewfile)\n", t.name)
+			}
+		}
+	}
+
+	if dry_run {
+		fmt.printf("Dry run: would clone %d tap(s), remove %d stale cache file(s). No changes made.\n", would_clone, removed_files)
+	} else {
+		fmt.printf("Migrated: %d tap(s) cloned, %d failed, %d stale cache file(s) removed.\n", cloned, failed, removed_files)
 	}
 }
 
@@ -4458,6 +4867,12 @@ print_formula :: proc(f: formula.Formula) {
 	if len(f.bottle_url) > 0 {
 		fmt.printf("Bottle:   %s\n", f.bottle_url)
 	}
+	if f.bottle_size > 0 {
+		fmt.printf("Download Size: %s\n", api.format_bytes_human(f.bottle_size))
+	}
+	if f.installed_size > 0 {
+		fmt.printf("Installed Size: %s\n", api.format_bytes_human(f.installed_size))
+	}
 	if len(f.bottle_sha256) > 0 {
 		fmt.printf("Bottle SHA256: %s\n", f.bottle_sha256)
 	}
@@ -4466,6 +4881,10 @@ print_formula :: proc(f: formula.Formula) {
 	}
 	if len(f.source_sha256) > 0 {
 		fmt.printf("SHA256:   %s\n", f.source_sha256)
+	}
+	if f.keg_only {
+		reason := f.keg_only_reason != "" ? f.keg_only_reason : "provided by OS / conflicting"
+		fmt.printf("Keg-only: yes (%s)\n", reason)
 	}
 	fmt.println("========================================")
 
@@ -4582,6 +5001,24 @@ Upgrade_Item :: struct {
  	}
  	return trimmed
  }
+
+ // is_version_dir returns true if the directory name looks like a version
+ // string (starts with a digit, or with 'v'/'V' followed by a digit).
+ // This prevents non-version directories (e.g. package-name subdirectories
+ // inside Cellar/<pkg>/) from being treated as version entries in the
+ // cleanup version-pruning logic.
+ is_version_dir :: proc(name: string) -> bool {
+ 	if len(name) == 0 do return false
+ 	if name[0] >= '0' && name[0] <= '9' do return true
+ 	if (name[0] == 'v' || name[0] == 'V') && len(name) > 1 && name[1] >= '0' && name[1] <= '9' {
+ 		return true
+ 	}
+ 	// Casks with `version :latest` install into `<token>/latest`.
+ 	if name == "latest" do return true
+ 	// HEAD kegs install into `<name>/HEAD-<rev>`.
+ 	if strings.has_prefix(name, "HEAD") do return true
+ 	return false
+ }
  
  is_update_available :: proc(current, latest: string) -> bool {
  	cur_norm := normalize_version(current)
@@ -4612,7 +5049,7 @@ Upgrade_Item :: struct {
  						if v_infos, v_rerr := os.read_directory_by_path(v_dir, -1, context.temp_allocator); v_rerr == nil {
  							latest_ver := ""
  							for v_info in v_infos {
- 								if v_info.type == .Directory {
+ 								if v_info.type == .Directory && is_version_dir(v_info.name) {
  									if latest_ver == "" || is_newer(v_info.name, latest_ver) {
  										latest_ver = v_info.name
  									}
@@ -4655,7 +5092,7 @@ Upgrade_Item :: struct {
  						if v_infos, v_rerr := os.read_directory_by_path(v_dir, -1, context.temp_allocator); v_rerr == nil {
  							latest_ver := ""
  							for v_info in v_infos {
- 								if v_info.type == .Directory {
+ 								if v_info.type == .Directory && is_version_dir(v_info.name) {
  									if latest_ver == "" || is_newer(v_info.name, latest_ver) {
  										latest_ver = v_info.name
  									}
@@ -4799,6 +5236,30 @@ run_outdated :: proc(args: []string) {
 	defer destroy_pins(pins)
 
 	outdated_items := make([dynamic]Outdated_Item, context.temp_allocator)
+
+	// Warm the per-formula / per-cask caches in parallel so the first run
+	// after a `brew update` doesn't hit sequential per-package downloads
+	// (which can take 30+ seconds). Stale caches (older than the bulk
+	// formula.json / cask.json dumps) are re-fetched automatically by the
+	// warm helpers.
+	if !cask_only {
+		f_names := make([dynamic]string, 0, len(installed_formulae), context.temp_allocator)
+		for pkg in installed_formulae {
+			if matches_target(pkg.name, targets[:]) && !strings.contains(pkg.name, "/") {
+				append(&f_names, pkg.name)
+			}
+		}
+		_ = api.warm_formulae_cache_parallel(f_names[:])
+	}
+	if !formula_only {
+		c_tokens := make([dynamic]string, 0, len(installed_casks), context.temp_allocator)
+		for pkg in installed_casks {
+			if matches_target(pkg.name, targets[:]) {
+				append(&c_tokens, pkg.name)
+			}
+		}
+		_ = api.warm_casks_cache_parallel(c_tokens[:])
+	}
 
 	cellar_dir := installer.CELLAR_DIR
 	caskroom_dir := installer.CASKROOM_DIR
@@ -4952,12 +5413,51 @@ run_outdated :: proc(args: []string) {
 		fmt.println("}")
 	} else {
 		print_version_info := verbose || (!quiet && os.is_tty(os.stdout))
-		for item in outdated_items {
-			if print_version_info {
-				joined_versions := strings.join(item.installed_versions, ", ", context.temp_allocator)
-				suffix := item.is_cask ? " (cask)" : ""
-				fmt.printf("%s (%s) < %s%s\n", item.name, joined_versions, item.current_version, suffix)
-			} else {
+		if print_version_info && len(outdated_items) > 0 {
+
+			// Section headers (Homebrew parity) — TTY/verbose only
+			f_count := 0
+			c_count := 0
+			for item in outdated_items {
+				if item.is_cask { c_count += 1 } else { f_count += 1 }
+			}
+
+			if f_count > 0 {
+				fmt.println("==> Outdated Formulae")
+				for item in outdated_items {
+					if item.is_cask do continue
+					joined_versions := strings.join(item.installed_versions, ", ", context.temp_allocator)
+					fmt.printf("%s (%s) < %s\n", item.name, joined_versions, item.current_version)
+				}
+			}
+
+			if c_count > 0 {
+				if f_count > 0 do fmt.println("")
+				fmt.println("==> Outdated Casks")
+				for item in outdated_items {
+					if !item.is_cask do continue
+					joined_versions := strings.join(item.installed_versions, ", ", context.temp_allocator)
+					fmt.printf("%s (%s) < %s (cask)\n", item.name, joined_versions, item.current_version)
+				}
+			}
+
+			// Summary trailer (Homebrew parity)
+			fmt.println("")
+			if f_count > 0 {
+				word := f_count == 1 ? "formula" : "formulae"
+				fmt.printf("You have %d outdated %s installed.\n", f_count, word)
+			}
+			if c_count > 0 {
+				word := c_count == 1 ? "cask" : "casks"
+				fmt.printf("You have %d outdated %s installed.\n", c_count, word)
+			}
+			fmt.println("You can upgrade them with ubrew upgrade")
+			fmt.println("or list them with ubrew outdated.")
+
+		} else {
+
+			// Bare names for non-verbose / piped output (script-friendly)
+			for item in outdated_items {
 				fmt.println(item.name)
 			}
 		}
@@ -4965,9 +5465,62 @@ run_outdated :: proc(args: []string) {
 }
 // ── run_update (Phase 1: HTTP/2 parallel) ──
 
+// maybe_auto_update runs a quiet, freshness-gated `update --auto-update`
+// before install/upgrade commands, mirroring Homebrew's auto-update. It is a
+// no-op when HOMEBREW_NO_AUTO_UPDATE is set or when running in a
+// non-interactive CI environment (no TTY). run_update's own freshness gate
+// (default 24h, HOMEBREW_AUTO_UPDATE_SECS) decides whether anything is
+// actually downloaded, so this is cheap in the common case.
+maybe_auto_update :: proc() -> bool {
+	// Homebrew semantics: setting HOMEBREW_NO_AUTO_UPDATE to ANY non-empty
+	// value disables auto-update.
+	if no_auto := os.get_env("HOMEBREW_NO_AUTO_UPDATE", context.temp_allocator); len(no_auto) > 0 {
+		return true
+	}
+	// Non-interactive CI: skip to avoid surprising network traffic
+	if ci := os.get_env("CI", context.temp_allocator); ci != "" && !os.is_tty(os.stdout) {
+		return true
+	}
+	// Returns false when the freshness-gated refresh could not establish a
+	// complete metadata snapshot (see run_update's W8 atomicity rule); the
+	// caller must refuse to continue rather than run against indeterminate
+	// API state.
+	return run_update([]string{"--auto-update"})
+}
+
 // ── run_update (Phase 1: HTTP/2 parallel) ──
 
-run_update :: proc(args: []string) {
+// git_head_short returns the short HEAD SHA of a repo directory, or "" when
+// the repo is missing/unreadable. Used to detect whether a `git pull`
+// actually advanced the clone (Homebrew only lists taps with new commits as
+// "Updated").
+git_head_short :: proc(dir: string) -> string {
+	buf := make([]u8, 64, context.temp_allocator)
+	out, _ := platform.exec_cmd_capture("git", []string{"git", "-C", dir, "rev-parse", "--short", "HEAD"}, buf)
+	return strings.trim_space(out)
+}
+
+// git_pull_ff_only runs `git pull --ff-only --quiet` inside a shared-mode tap
+// clone. Returns true when the pull succeeded (including "already up to date").
+git_pull_ff_only :: proc(dir: string) -> bool {
+	// Tap remotes are public and this runs non-interactively (before
+	// install/upgrade and during shared-mode updates). Keep the pull from
+	// blocking forever: abort the transfer once it stops making progress,
+	// cap the connect phase, and never fall back to an interactive
+	// credential prompt — the `true` ask-pass helper reports no
+	// credentials instead of hanging on the terminal.
+	args := []string{
+		"git",
+		"-c", "http.connectTimeout=10",
+		"-c", "http.lowSpeedLimit=1000",
+		"-c", "http.lowSpeedTime=30",
+		"-c", "core.askPass=true",
+		"-C", dir, "pull", "--ff-only", "--quiet",
+	}
+	return platform.exec_cmd("git", args[:])
+}
+
+run_update :: proc(args: []string) -> bool {
 	auto_update := false
 	force := false
 	verbose := false
@@ -4989,6 +5542,12 @@ run_update :: proc(args: []string) {
 	}
 
 	platform.GLOBAL_DEBUG = debug
+
+	// W8 atomicity: false means the API lists snapshot was NOT established
+	// (partial or failed refresh). Callers that auto-update (install/upgrade)
+	// must refuse to continue in that case. Starts true: a no-op refresh
+	// (freshness gate) or pure-tap refresh is not a snapshot failure.
+	snapshot_complete := true
 
 	fmt.println("==> Updating ubrew...")
 
@@ -5016,18 +5575,36 @@ run_update :: proc(args: []string) {
 		}
 		if has_upstream {
 			fmt.println("==> Updating git repository...")
+			sha_buf: [64]u8
+			rev_args := []string{"git", "-C", ubrew_git_dir, "rev-parse", "--short", "HEAD"}
+			old_sha, _ := platform.exec_cmd_capture("git", rev_args, sha_buf[:])
+			old_sha = strings.trim_space(old_sha)
 			cmd := []string{"git", "-C", ubrew_git_dir, "pull"}
 			_ = platform.exec_cmd("git", cmd)
+			new_sha_buf: [64]u8
+			new_sha, _ := platform.exec_cmd_capture("git", rev_args, new_sha_buf[:])
+			new_sha = strings.trim_space(new_sha)
+			if old_sha != "" && new_sha != "" && old_sha != new_sha {
+				fmt.printf("==> Updated ubrew from %s to %s.\n", old_sha, new_sha)
+			}
 		}
 	}
 
 	skip_api := false
 	if auto_update && !force {
-		db_path := installer.UBREW_ROOT + "/db/upstream.json"
+		db_path := fmt.tprintf("%s/db/upstream.json", installer.UBREW_ROOT)
 		if fi, err := os.stat(db_path, context.temp_allocator); err == nil {
 			now_sec := time.time_to_unix(time.now())
 			mod_sec := time.time_to_unix(fi.modification_time)
-			if now_sec - mod_sec < 86400 {
+			// Freshness window: default 24h, overridable via
+			// HOMEBREW_AUTO_UPDATE_SECS (seconds), matching Homebrew.
+			fresh_secs: i64 = 86400
+			if aus := os.get_env("HOMEBREW_AUTO_UPDATE_SECS", context.temp_allocator); aus != "" {
+				if parsed, ok := strconv.parse_i64(aus); ok {
+					fresh_secs = parsed
+				}
+			}
+			if now_sec - mod_sec < fresh_secs {
 				skip_api = true
 			}
 		}
@@ -5073,8 +5650,8 @@ run_update :: proc(args: []string) {
 		// 1. Download formula.json + cask.json with ETag in a single curl
 		//    process using --next, saving one fork/exec per call.
 		_ = os.make_directory_all(api.API_CACHE_DIR, os.perm(0o755))
-		etag_file_f := api.FORMULA_LIST_CACHE + ".etag"
-		etag_file_c := api.CASK_LIST_CACHE + ".etag"
+		etag_file_f := fmt.tprintf("%s.etag", api.FORMULA_LIST_CACHE)
+		etag_file_c := fmt.tprintf("%s.etag", api.CASK_LIST_CACHE)
 
 		temp_f1, err1 := os.create_temp_file(api.API_CACHE_DIR, "ubrew_formula_list_*.json")
 		if err1 == nil {
@@ -5087,29 +5664,103 @@ run_update :: proc(args: []string) {
 			os.close(temp_f2)
 		}
 
+		// W8: record per-list transfer outcomes for the atomicity gate
+		// below. A zero-byte staging file is only a genuine 304 "no-op" when
+		// the transfer that produced it finished cleanly (curl exit 0); a
+		// failed transfer leaves that list indeterminate and must abort the
+		// snapshot commit.
+		formula_transfer_ok := false
+		cask_transfer_ok := false
+
 		if temp_file_formula != "" && temp_file_cask != "" {
-			if api.fetch_etag_batch([]string{api.FORMULA_LIST_URL, api.CASK_LIST_URL},
+			_, batch_written, batch_cmd_ok := api.fetch_etag_batch(
+				[]string{api.formula_list_url(), api.cask_list_url()},
 				[]string{temp_file_formula, temp_file_cask},
 				[]string{etag_file_f, etag_file_c},
-				headers[:]) {
-				rebuild_index = true
-			}
+				headers[:])
+			// curl --next runs both transfers inside one process, so a single
+			// exit code gates both staging files. --fail-early (inside
+			// fetch_etag_batch) makes that exit code truthful: the process
+			// dies on the FIRST failed transfer instead of reporting the
+			// last URL's status, so a failed formula list can never be
+			// masked by a successful cask list.
+			formula_transfer_ok = batch_cmd_ok
+			cask_transfer_ok = batch_cmd_ok
+			delete(batch_written)
 		} else {
-			// Fallback: sequential if temp file creation failed
-			if temp_file_formula != "" && api.fetch_single_with_etag(api.FORMULA_LIST_URL, temp_file_formula, etag_file_f, headers[:]) {
-				rebuild_index = true
+			// Fallback: sequential if temp file creation failed, keeping the
+			// same per-list transfer accounting.
+			if temp_file_formula != "" {
+				if f_written, f_ok := api.fetch_single_with_etag(api.formula_list_url(), temp_file_formula, etag_file_f, headers[:]); f_ok {
+					formula_transfer_ok = true
+					if f_written {
+						rebuild_index = true
+					}
+				}
 			}
-			if temp_file_cask != "" && api.fetch_single_with_etag(api.CASK_LIST_URL, temp_file_cask, etag_file_c, headers[:]) {
-				rebuild_index = true
+			if temp_file_cask != "" {
+				if c_written, c_ok := api.fetch_single_with_etag(api.cask_list_url(), temp_file_cask, etag_file_c, headers[:]); c_ok {
+					cask_transfer_ok = true
+					if c_written {
+						rebuild_index = true
+					}
+				}
+			}
+		}
+
+		// Unwrap the JWS envelopes in place so the temp files contain the raw
+		// JSON arrays — but ONLY when the JWS endpoints are actually active
+		// (UBREW_NO_VERIFY_JWS override). The default unsigned endpoints
+		// already return plain arrays, so the unwrap step is skipped and the
+		// cache is never fed marked-up JWS data.
+		//
+		// Track extraction success per list: if unwrapping fails we remove
+		// the ETag sidecar (forcing a fresh download next time) and skip the
+		// diff and cache-promotion steps for that list so we don't operate
+		// on corrupt or envelope data.
+		jws_mode := api.jws_override_active()
+		if jws_mode {
+			fmt.println("Warning: UBREW_NO_VERIFY_JWS is set — metadata is being fetched from the signed JWS endpoints WITHOUT signature verification.")
+		}
+		formula_payload_ok := temp_file_formula == ""
+		cask_payload_ok := temp_file_cask == ""
+		if temp_file_formula != "" {
+			if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				if jws_mode {
+					formula_payload_ok = api.extract_jws_in_place(temp_file_formula)
+				} else {
+					formula_payload_ok = true // unsigned endpoint: plain array, no unwrap needed
+				}
+				if !formula_payload_ok {
+					_ = os.remove(etag_file_f)
+					fmt.println("Warning: failed to unwrap formula.jws.json payload")
+				}
+			} else {
+				formula_payload_ok = true // 304: nothing to unwrap
+			}
+		}
+		if temp_file_cask != "" {
+			if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				if jws_mode {
+					cask_payload_ok = api.extract_jws_in_place(temp_file_cask)
+				} else {
+					cask_payload_ok = true // unsigned endpoint: plain array, no unwrap needed
+				}
+				if !cask_payload_ok {
+					_ = os.remove(etag_file_c)
+					fmt.println("Warning: failed to unwrap cask.jws.json payload")
+				}
+			} else {
+				cask_payload_ok = true // 304: nothing to unwrap
 			}
 		}
 
 		// 3. Download upstream.json sequentially (separate from tap probes
 		//    because -z / --time-cond would apply globally in --parallel mode
 		//    and cause GitHub API probes to return 304 Not Modified).
-		_ = os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
-		db_path := installer.UBREW_ROOT + "/db/upstream.json"
-		temp_f3, terr3 := os.create_temp_file(installer.UBREW_ROOT + "/db", "ubrew_upstream_*.json")
+		_ = os.make_directory_all(fmt.tprintf("%s/db", installer.UBREW_ROOT), os.perm(0o755))
+		db_path := fmt.tprintf("%s/db/upstream.json", installer.UBREW_ROOT)
+		temp_f3, terr3 := os.create_temp_file(fmt.tprintf("%s/db", installer.UBREW_ROOT), "ubrew_upstream_*.json")
 		if terr3 == nil {
 			temp_file_upstream = strings.clone(os.name(temp_f3), context.allocator)
 			os.close(temp_f3)
@@ -5143,7 +5794,71 @@ run_update :: proc(args: []string) {
 		suffixes := []string{"/contents/Formula", "/contents"}
 		TAP_LISTING_MAX_AGE :: 3600 // 1 hour, matches fetch_tap_listing_cached
 
+		// Tap-update accounting. Declared before the loop so the shared-mode
+		// git-pull branch above can populate them; the standalone probe
+		// pipeline fills them during promotion.
+		updated_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
+		failed_tap_names := make([dynamic]string, 0, len(taps), context.temp_allocator)
+
+		// Serialize git pulls against concurrent tap add/remove from other
+		// ubrew processes (advisory lock; brew itself does not honor it).
+		tap_lock_fd: posix.FD
+		have_tap_lock := false
+		if tap.mode() == .Shared {
+			if fd, ok := tap.shared_tap_lock(); ok {
+				tap_lock_fd = fd
+				have_tap_lock = true
+			}
+		}
+		defer {
+			if have_tap_lock {
+				posix.close(tap_lock_fd)
+			}
+		}
+
 		for entry in taps {
+			// Shared mode: taps are git clones in brew's Library/Taps. Pull
+			// each clone with `git pull --ff-only` instead of the Contents-API
+			// probe pipeline. homebrew/core & homebrew/cask are API-based and
+			// never cloned — skip them here entirely.
+			if tap.mode() == .Shared {
+				if strings.has_prefix(entry.name, "homebrew/") {
+					if verbose {
+						fmt.printf("  [skip] tap %s is API-based, skipping\n", entry.name)
+					}
+					continue
+				}
+				if !tap.tap_is_trusted(entry.name) {
+					if verbose {
+						fmt.printf("  [skip] tap %s is untrusted, skipping pull\n", entry.name)
+					}
+					continue
+				}
+				dest := tap.shared_tap_dir(entry.name)
+				if os.is_dir(fmt.tprintf("%s/.git", dest)) {
+					before := git_head_short(dest)
+					if git_pull_ff_only(dest) {
+						after := git_head_short(dest)
+						if len(before) > 0 && before != after {
+							append(&updated_tap_names, strings.clone(entry.name, context.temp_allocator))
+							if verbose {
+								fmt.printf("==> Updated tap %s successfully.\n", entry.name)
+							}
+						} else if verbose {
+							fmt.printf("  [up-to-date] tap %s\n", entry.name)
+						}
+					} else {
+						append(&failed_tap_names, strings.clone(entry.name, context.temp_allocator))
+						if verbose {
+							fmt.printf("Error: Failed to update tap %s.\n", entry.name)
+						}
+					}
+				} else if verbose {
+					fmt.printf("  [skip] tap %s has no local clone, skipping pull\n", entry.name)
+				}
+				continue
+			}
+
 			cache_dir := fmt.tprintf("%s/cache/taps/%s", installer.UBREW_ROOT, entry.name)
 			cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
@@ -5236,29 +5951,108 @@ run_update :: proc(args: []string) {
 			curl_ok = api.fetch_urls_parallel_http2(urls[:], out_files[:], headers[:])
 		}
 
-		// Post-process Homebrew API lists
+		// Compute New Formulae / New Casks diffs (Homebrew parity) BEFORE the
+		// cache files are overwritten below, comparing the fresh downloads
+		// against the previous cached dumps. Skipped on first run (no prior
+		// cache) so we don't list every formula/cask as "new".
+		new_formulae := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
+		new_casks := make([dynamic]api.New_List_Entry, 0, 32, context.temp_allocator)
+		if formula_payload_ok && temp_file_formula != "" && os.is_file(api.FORMULA_LIST_CACHE) {
+			old_f := api.load_api_name_map(api.FORMULA_LIST_CACHE)
+			new_formulae = api.diff_api_list_new_entries(old_f, temp_file_formula, context.temp_allocator)
+			api.destroy_api_name_map(old_f)
+		}
+		if cask_payload_ok && temp_file_cask != "" && os.is_file(api.CASK_LIST_CACHE) {
+			old_c := api.load_api_name_map(api.CASK_LIST_CACHE)
+			new_casks = api.diff_api_list_new_entries(old_c, temp_file_cask, context.temp_allocator)
+			api.destroy_api_name_map(old_c)
+		}
+
+		// Post-process Homebrew API lists — W8 atomicity rule: the formula
+		// and cask lists are committed as a SINGLE all-or-none snapshot.
+		// Both lists must stage — a fresh payload (200) or a genuine 304
+		// no-op after a clean transfer — before EITHER cache file is
+		// renamed; if a transfer failed, a list is missing, empty, or failed
+		// to unwrap, the previous generation stays live and consistent and
+		// the caller (maybe_auto_update) is told the update did not complete
+		// so a dependent install/upgrade refuses to run against
+		// indeterminate data.
+		formula_fetch_ok := temp_file_formula != ""
+		cask_fetch_ok := temp_file_cask != ""
+		formula_staged := false
+		cask_staged := false
+
+		// Track whether any fresh bytes arrived, so a total network failure
+		// is reported as a warning ("using previous snapshot") while a partial
+		// snapshot failure aborts the dependent command.
+		formula_had_data := false
+		cask_had_data := false
+
+		if formula_fetch_ok && formula_payload_ok {
+			if fi, fi_err := os.stat(temp_file_formula, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				formula_staged = true
+				formula_had_data = true
+			} else if formula_transfer_ok {
+				// Genuine no-op: the transfer completed and upstream replied
+				// 304, so the cache already holds the current generation.
+				formula_staged = true
+			}
+		}
+		if cask_fetch_ok && cask_payload_ok {
+			if fi, fi_err := os.stat(temp_file_cask, context.temp_allocator); fi_err == nil && fi.size > 0 {
+				cask_staged = true
+				cask_had_data = true
+			} else if cask_transfer_ok {
+				// Genuine 304 no-op, as above for formulas.
+				cask_staged = true
+			}
+		}
+
+		// W8 all-or-none commit: whatever happens below, the two cache files
+		// are renamed as a single snapshot or not at all. Only when BOTH
+		// lists staged (fresh payload, or a clean 304 no-op) is any temp file
+		// promoted — a partial commit would leave one new-generation file
+		// alongside one stale, the exact mixed state this rule forbids.
+		if formula_staged && cask_staged {
+			snapshot_complete = true
+			if formula_had_data {
+				if os.rename(temp_file_formula, api.FORMULA_LIST_CACHE) != nil {
+					snapshot_complete = false
+					fmt.eprintf("Error: failed to promote formula cache file; previous generation kept.\n")
+				} else {
+					rebuild_index = true
+				}
+			}
+			if cask_had_data {
+				if os.rename(temp_file_cask, api.CASK_LIST_CACHE) != nil {
+					snapshot_complete = false
+					fmt.eprintf("Error: failed to promote cask cache file; previous generation kept.\n")
+				} else {
+					rebuild_index = true
+				}
+			}
+		} else {
+			snapshot_complete = false
+			if formula_had_data || cask_had_data {
+				fmt.eprintf("Error: metadata snapshot incomplete (formulas or casks could not be committed); previous generation kept.\n")
+			} else {
+				fmt.println("Warning: metadata refresh failed (network); using previous snapshot.")
+			}
+		}
+
+		// Clean up staging files (no-ops when a list was renamed into the
+		// cache). The strings were allocated with context.allocator and must
+		// be freed here rather than leaked on the partial/error paths above.
 		if temp_file_formula != "" {
 			defer {
 				os.remove(temp_file_formula)
 				delete(temp_file_formula)
-			}
-			fi, fi_err := os.stat(temp_file_formula, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
-				if os.rename(temp_file_formula, api.FORMULA_LIST_CACHE) == nil {
-					rebuild_index = true
-				}
 			}
 		}
 		if temp_file_cask != "" {
 			defer {
 				os.remove(temp_file_cask)
 				delete(temp_file_cask)
-			}
-			fi, fi_err := os.stat(temp_file_cask, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
-				if os.rename(temp_file_cask, api.CASK_LIST_CACHE) == nil {
-					rebuild_index = true
-				}
 			}
 		}
 		if temp_file_upstream != "" {
@@ -5271,7 +6065,14 @@ run_update :: proc(args: []string) {
 				if data, rerr := os.read_entire_file(temp_file_upstream, context.temp_allocator); rerr == nil && len(data) > 0 {
 					if val, json_err := json.parse(data); json_err == nil {
 						json.destroy_value(val)
-						if os.rename(temp_file_upstream, db_path) == nil {
+						// Freshness marker: advance only when the snapshot
+						// committed cleanly. A failed/partial commit leaves
+						// a mixed generation on disk (e.g. new formula.json
+						// alongside the previous cask.json); if upstream.json
+						// were updated anyway, the next auto-update would
+						// skip the retry for the whole freshness window and
+						// trust the mixed state.
+						if snapshot_complete && os.rename(temp_file_upstream, db_path) == nil {
 							rebuild_index = true
 						}
 					}
@@ -5333,9 +6134,12 @@ run_update :: proc(args: []string) {
 			}
 			if promoted {
 				ok_count += 1
-				fmt.printf("==> Updated tap %s successfully.\n", t.name)
+				append(&updated_tap_names, t.name)
+				if verbose {
+					fmt.printf("==> Updated tap %s successfully.\n", t.name)
+				}
 			} else {
-				fmt.printf("Error: Failed to update tap %s.\n", t.name)
+				append(&failed_tap_names, t.name)
 			}
 		}
 
@@ -5344,16 +6148,101 @@ run_update :: proc(args: []string) {
 			t := t_ptr^
 			if !api.verify_tap_cache(t) {
 				if _, ok := api.fetch_tap_listing_cached(t); ok {
-					fmt.printf("==> Updated tap %s successfully (fallback).\n", t.name)
+					// Moves from failed list to updated list
+					for fname, fi in failed_tap_names {
+						if fname == t.name {
+							ordered_remove(&failed_tap_names, fi)
+							break
+						}
+					}
+					append(&updated_tap_names, t.name)
+					ok_count += 1
+					if verbose {
+						fmt.printf("==> Updated tap %s successfully (fallback).\n", t.name)
+					}
 				}
 			}
 		}
 
+		// Aggregate tap-update summary (Homebrew parity: "Updated N taps (...)")
+		if len(updated_tap_names) > 0 {
+			if len(updated_tap_names) == 1 {
+				fmt.printf("Updated 1 tap (%s).\n", updated_tap_names[0])
+			} else if len(updated_tap_names) == 2 {
+				fmt.printf("Updated 2 taps (%s and %s).\n", updated_tap_names[0], updated_tap_names[1])
+			} else {
+				b := strings.builder_make(context.temp_allocator)
+				strings.write_string(&b, updated_tap_names[0])
+				for i in 1..<len(updated_tap_names) - 1 {
+					strings.write_string(&b, ", ")
+					strings.write_string(&b, updated_tap_names[i])
+				}
+				strings.write_string(&b, " and ")
+				strings.write_string(&b, updated_tap_names[len(updated_tap_names) - 1])
+				fmt.printf("Updated %d taps (%s).\n", len(updated_tap_names), strings.to_string(b))
+			}
+		} else if len(failed_tap_names) == 0 && len(taps) > 0 {
+			if verbose {
+				fmt.println("Taps already up-to-date.")
+			}
+		}
+		for fname in failed_tap_names {
+			fmt.printf("Error: Failed to update tap %s.\n", fname)
+		}
+
+		// New Formulae / New Casks sections (Homebrew parity). The diff
+		// listings are capped at ~50 entries (Homebrew truncates similarly)
+		// and are suppressed during --auto-update unless stdout is a TTY, so
+		// an auto-update never spams piped/scripted output.
+		NEW_LISTING_CAP :: 50
+		show_listings := !auto_update || os.is_tty(os.stdout)
+		if show_listings && len(new_formulae) > 0 {
+			fmt.println("==> New Formulae")
+			shown := 0
+			for e in new_formulae {
+				if shown >= NEW_LISTING_CAP {
+					fmt.printf("  ... and %d more\n", len(new_formulae) - shown)
+					break
+				}
+				if len(e.desc) > 0 {
+					fmt.printf("%s: %s\n", e.name, e.desc)
+				} else {
+					fmt.printf("%s\n", e.name)
+				}
+				shown += 1
+			}
+		}
+		if show_listings && len(new_casks) > 0 {
+			if len(new_formulae) > 0 do fmt.println("")
+			fmt.println("==> New Casks")
+			shown := 0
+			for e in new_casks {
+				if shown >= NEW_LISTING_CAP {
+					fmt.printf("  ... and %d more\n", len(new_casks) - shown)
+					break
+				}
+				if len(e.desc) > 0 {
+					fmt.printf("%s: %s\n", e.name, e.desc)
+				} else {
+					fmt.printf("%s\n", e.name)
+				}
+				shown += 1
+			}
+		}
 
 	}
 
+	// Print batch untrusted-tap warning after refresh (Homebrew parity).
+	// Skipped during --auto-update to avoid repeating the warning on every
+	// install/upgrade; it still shows on explicit `ubrew update`.
+	if !auto_update {
+		tap.print_untrusted_taps_warning_once()
+	}
 
-	fmt.println("==> Homebrew is up-to-date!")
+	if snapshot_complete {
+		fmt.println("==> ubrew is up-to-date.")
+	}
+	return snapshot_complete
 }
 
 // ── run_upgrade (Phase 1: warm cache) ──
@@ -5371,6 +6260,7 @@ print_upgrade_usage :: proc() {
 	fmt.println("  --greedy-auto-updates      Also upgrade casks with 'auto_updates true'")
 	fmt.println("  --force, -f                Upgrade even if the latest version is already installed")
 	fmt.println("  --dry-run, -n              Print what would be upgraded but do not upgrade")
+	fmt.println("  --yes, -y, --no-ask        Skip the upgrade confirmation prompt")
 	fmt.println("  --verbose, -v              Make output verbose")
 	fmt.println("  --debug, -d                Print debugging/tracing information")
 	fmt.println("  --quiet, -q                Make output quiet")
@@ -5378,6 +6268,27 @@ print_upgrade_usage :: proc() {
 }
 
 run_upgrade :: proc(args: []string) {
+	// Homebrew parity: refresh taps/API before upgrading (freshness-gated).
+	// Skipped for --help invocations.
+	has_help := false
+	for a in args {
+		if a == "-h" || a == "--help" {
+			has_help = true
+			break
+		}
+	}
+	if !has_help {
+		if !maybe_auto_update() {
+			fmt.eprintln("Error: auto-update could not establish a complete metadata snapshot; refusing to upgrade.")
+			os.exit(1)
+		}
+	}
+
+	// W6: surface untrusted taps before upgrading. maybe_auto_update runs a
+	// quiet --auto-update (which deliberately suppresses the warning), so the
+	// command itself prints it here, at most once per invocation.
+	tap.print_untrusted_taps_warning_once()
+
 	formula_only := false
 	cask_only := false
 	opt_greedy := false
@@ -5389,6 +6300,7 @@ run_upgrade :: proc(args: []string) {
 	verbose := false
 	quiet := false
 	min_version := ""
+	assume_yes := false
 
 	pkg_names := make([dynamic]string, context.temp_allocator)
 
@@ -5424,9 +6336,10 @@ run_upgrade :: proc(args: []string) {
 					fmt.println("Error: --minimum-version requires an argument")
 					os.exit(1)
 				}
+			} else if arg == "-y" || arg == "--yes" || arg == "--no-ask" {
+				assume_yes = true
 			} else if arg == "-d" || arg == "--debug" ||
 			          arg == "--display-times" ||
-			          arg == "-y" || arg == "--no-ask" ||
 			          arg == "-i" || arg == "--interactive" ||
 			          arg == "--force-bottle" ||
 			          arg == "--fetch-HEAD" ||
@@ -5647,19 +6560,28 @@ run_upgrade :: proc(args: []string) {
 		return
 	}
 
-	fmt.printf("==> Upgrading %d package(s):\n", len(upgrades))
+	// "Would upgrade" preview (Homebrew parity wording)
+	pkg_word := len(upgrades) == 1 ? "package" : "packages"
+	if dry_run {
+		fmt.printf("==> Would upgrade %d outdated %s\n", len(upgrades), pkg_word)
+	} else {
+		fmt.printf("==> Upgrading %d outdated %s\n", len(upgrades), pkg_word)
+	}
 	for pkg in upgrades {
 		tag := " (cask)" if pkg.is_cask else ""
-		fmt.printf("    %s %s -> %s%s\n", pkg.name, pkg.old_version, pkg.new_version, tag)
+		// TODO: bottle size via HEAD request on the bottle URL (Phase 2)
+		fmt.printf("  %s %s -> %s%s\n", pkg.name, pkg.old_version, pkg.new_version, tag)
 	}
 
 	if dry_run {
 		return
 	}
 
-	developer_active := (developer_state() == .On || developer_env_set())
-	if developer_active {
-		if !prompt_user_yes_no("Do you want to proceed?") {
+	// Always confirm before upgrading on an interactive TTY (Homebrew parity).
+	// -y/--yes/--no-ask skips the prompt; non-TTY auto-proceeds (see
+	// prompt_user_yes_no, which returns true when stdin/stdout aren't TTYs).
+	if !assume_yes {
+		if !prompt_user_yes_no("==> Do you want to proceed with the upgrade?") {
 			fmt.println("Aborted.")
 			os.exit(1)
 		}
@@ -5906,11 +6828,215 @@ run_autoremove :: proc(args: []string) {
 
 // ── pinning ──
 
-PINS_FILE :: installer.UBREW_ROOT + "/db/pinned.txt"
+run_uses :: proc(args: []string) {
+    opt_installed := false
+    targets := make([dynamic]string, context.temp_allocator)
+
+    for arg in args {
+        if arg == "--installed" {
+            opt_installed = true
+        } else if !strings.has_prefix(arg, "-") {
+            append(&targets, arg)
+        }
+    }
+
+    if len(targets) == 0 {
+        fmt.println("Usage: ubrew uses [--installed] <formula> ...")
+        os.exit(1)
+    }
+
+    cellar := platform.get_cellar_dir()
+    infos, err := os.read_directory_by_path(cellar, -1, context.allocator)
+    if err != nil {
+        return
+    }
+    defer os.file_info_slice_delete(infos, context.allocator)
+
+    for fi in infos {
+        if !os.is_dir(fi.fullpath) { continue }
+        keg_name := fi.name
+        keg_path := fmt.tprintf("%s/%s", cellar, keg_name)
+        v_infos, verr := os.read_directory_by_path(keg_path, -1, context.allocator)
+        if verr != nil { continue }
+        defer os.file_info_slice_delete(v_infos, context.allocator)
+
+        matched := false
+        for vfi in v_infos {
+            if !os.is_dir(vfi.fullpath) { continue }
+            keg_ver_dir := fmt.tprintf("%s/%s", keg_path, vfi.name)
+            receipt, r_ok := installer.read_install_receipt(keg_ver_dir)
+            // --installed restricts the report to installed formulae: an
+            // entry with no install receipt is not treated as installed.
+            if opt_installed && !r_ok {
+                continue
+            }
+            if r_ok {
+                deps := receipt.runtime_dependencies
+                // Homebrew receipts can store runtime_dependencies as an
+                // array of objects, which ubrew's parser reads as empty;
+                // fall back to the formula API (mirroring get_runtime_deps)
+                // so shared-Cellar kegs are covered.
+                api_f: formula.Formula
+                api_ok := false
+                if len(deps) == 0 {
+                    if f, ferr := api.fetch_formula(keg_name); ferr == nil {
+                        api_f = f
+                        api_ok = true
+                        deps = f.dependencies
+                    }
+                }
+                for target in targets {
+                    for dep in deps {
+                        if dep == target {
+                            matched = true
+                            break
+                        }
+                    }
+                    if matched do break
+                }
+                if api_ok do api.destroy_formula(api_f)
+                installer.destroy_install_receipt(receipt)
+            }
+            if matched do break
+        }
+        if matched {
+            fmt.println(keg_name)
+        }
+    }
+}
+
+run_cat :: proc(args: []string) {
+    if len(args) == 0 {
+        fmt.println("Usage: ubrew cat <formula|cask> ...")
+        os.exit(1)
+    }
+    for target in args {
+        if strings.has_prefix(target, "-") { continue }
+        if f, err := api.fetch_formula(target); err == nil {
+            fmt.printf("Name:       %s\n", f.name)
+            fmt.printf("Desc:       %s\n", f.desc)
+            fmt.printf("Homepage:   %s\n", f.homepage)
+            fmt.printf("Version:    %s\n", f.version)
+            if len(f.dependencies) > 0 {
+                fmt.printf("Dependencies: ")
+                for dep, idx in f.dependencies {
+                    if idx > 0 { fmt.printf(", ") }
+                    fmt.printf("%s", dep)
+                }
+                fmt.println()
+            }
+            api.destroy_formula(f)
+        } else if c, cerr := api.fetch_cask(target); cerr == nil {
+            fmt.printf("Token:      %s\n", c.token)
+            fmt.printf("Name:       %s\n", c.name)
+            fmt.printf("Homepage:   %s\n", c.homepage)
+            fmt.printf("Version:    %s\n", c.version)
+            api.destroy_cask(c)
+        } else {
+            fmt.printf("ubrew: no formula or cask found for '%s'\n", target)
+        }
+    }
+}
+
+run_which :: proc(args: []string) {
+    if len(args) == 0 {
+        fmt.println("Usage: ubrew which <cmd> ...")
+        os.exit(1)
+    }
+    bin_dir := platform.get_bin_dir()
+    for cmd_name in args {
+        if strings.has_prefix(cmd_name, "-") { continue }
+        target_path := fmt.tprintf("%s/%s", bin_dir, cmd_name)
+        if os.exists(target_path) {
+            fmt.println(target_path)
+        } else {
+            fmt.printf("ubrew: binary '%s' not found in %s\n", cmd_name, bin_dir)
+            os.exit(1)
+        }
+    }
+}
+
+run_fetch :: proc(args: []string) {
+    if len(args) == 0 {
+        fmt.println("Usage: ubrew fetch <formula> ...")
+        os.exit(1)
+    }
+    for target in args {
+        if strings.has_prefix(target, "-") { continue }
+        if f, err := api.fetch_formula(target); err == nil {
+            fmt.printf("==> Fetching bottle for formula %s...\n", f.name)
+            if f.bottle_url != "" {
+                if f.bottle_sha256 == "" {
+                    fmt.printf("Error: no bottle SHA256 for %s; refusing to cache an unverified bottle\n", f.name)
+                } else {
+                    _ = os.make_directory_all(installer.CACHE_DIR, os.perm(0o755))
+                    cache_path := fmt.tprintf("%s/%s-%s.bottle.tar.gz", installer.CACHE_DIR, f.name, f.version)
+                    // Single download: progress bar, no --parallel.
+                    args_curl := []string{"curl", "-#", "-fL", f.bottle_url, "-o", cache_path}
+                    if platform.exec_cmd("curl", args_curl) {
+                        if installer.sha256_matches(cache_path, f.bottle_sha256) {
+                            fmt.printf("Downloaded to: %s\n", cache_path)
+                        } else {
+                            fmt.printf("Error: Checksum mismatch for %s\n", f.bottle_url)
+                            _ = os.remove(cache_path)
+                        }
+                    } else {
+                        fmt.printf("Error: Failed to download %s\n", f.bottle_url)
+                    }
+                }
+            } else {
+                fmt.printf("No bottle URL for %s\n", f.name)
+            }
+            api.destroy_formula(f)
+        } else {
+            fmt.printf("Error: Formula '%s' not found\n", target)
+        }
+    }
+}
+
+
+
+run_readall :: proc(args: []string) {
+    fmt.println("==> Validating local formula and cask indexes...")
+    cellar := platform.get_cellar_dir()
+    caskroom := platform.get_caskroom_dir()
+    
+    valid_count := 0
+
+    allocator := context.allocator
+    if infos, err := os.read_directory_by_path(cellar, -1, allocator); err == nil {
+        defer os.file_info_slice_delete(infos, allocator)
+        for fi in infos {
+            if !os.is_dir(fi.fullpath) do continue
+            keg_path := fmt.tprintf("%s/%s", cellar, fi.name)
+            if v_infos, verr := os.read_directory_by_path(keg_path, -1, allocator); verr == nil {
+                defer os.file_info_slice_delete(v_infos, allocator)
+                for vfi in v_infos {
+                    if !os.is_dir(vfi.fullpath) do continue
+                    keg_ver_dir := fmt.tprintf("%s/%s", keg_path, vfi.name)
+                    if receipt, r_ok := installer.read_install_receipt(keg_ver_dir); r_ok {
+                        valid_count += 1
+                        installer.destroy_install_receipt(receipt)
+                    }
+                }
+            }
+        }
+    }
+
+    if infos, err := os.read_directory_by_path(caskroom, -1, allocator); err == nil {
+        defer os.file_info_slice_delete(infos, allocator)
+        for fi in infos {
+            if !os.is_dir(fi.fullpath) do continue
+            valid_count += 1
+        }
+    }
+
+    fmt.printf("Readall complete: %d local formula/cask entry(ies) syntax OK.\n", valid_count)
+}
 
 read_pins :: proc() -> [dynamic]string {
     pins := make([dynamic]string, context.allocator)
-    data, err := os.read_entire_file(PINS_FILE, context.allocator)
+    data, err := os.read_entire_file(fmt.tprintf("%s/db/pinned.txt", installer.UBREW_ROOT), context.allocator)
     if err != nil {
         return pins
     }
@@ -5934,9 +7060,9 @@ destroy_pins :: proc(pins: [dynamic]string) {
 }
 
 write_pins :: proc(pins: []string) -> bool {
-    mkerr := os.make_directory_all(installer.UBREW_ROOT + "/db", os.perm(0o755))
+    mkerr := os.make_directory_all(fmt.tprintf("%s/db", installer.UBREW_ROOT), os.perm(0o755))
     if mkerr != nil {
-        if !os.is_dir(installer.UBREW_ROOT + "/db") {
+        if !os.is_dir(fmt.tprintf("%s/db", installer.UBREW_ROOT)) {
             fmt.printf("ubrew: failed to create pins dir: %v\n", mkerr)
             return false
         }
@@ -5947,7 +7073,7 @@ write_pins :: proc(pins: []string) -> bool {
         strings.write_byte(&b, '\n')
     }
     payload := strings.to_string(b)
-    return os.write_entire_file(PINS_FILE, payload) == nil
+    return os.write_entire_file(fmt.tprintf("%s/db/pinned.txt", installer.UBREW_ROOT), payload) == nil
 }
 
 is_pinned :: proc(pins: [dynamic]string, name: string) -> bool {
@@ -6566,8 +7692,8 @@ run_unlink :: proc(args: []string) {
                 unlink_dir_contents(dst_path, name, dry_run, unlinked, failed)
             } else {
                 if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
-                    prefix := fmt.tprintf(installer.CELLAR_DIR + "/%s/", name)
-                    if strings.contains(target, prefix) {
+                    prefix := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
+                    if strings.has_prefix(target, prefix) {
                         if dry_run {
                             fmt.printf("Would unlink: %s\n", dst_path)
                             unlinked^ += 1
@@ -6605,7 +7731,7 @@ run_unlink :: proc(args: []string) {
 
         if v_infos, v_err := os.read_directory_by_path(rack, -1, context.temp_allocator); v_err == nil {
             for v_info in v_infos {
-                if v_info.type == .Directory {
+                if v_info.type == .Directory && is_version_dir(v_info.name) {
                     keg_root := v_info.fullpath
                     if keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator); keg_err == nil {
                         for ki in keg_infos {
@@ -6842,7 +7968,7 @@ run_formulae :: proc(args: []string) {
         for name in names {
             insert_name(&seen, name)
         }
-    } else if data, rerr2 := api.fetch_cached_api_list(api.FORMULA_LIST_URL, api.FORMULA_LIST_CACHE); rerr2 == nil {
+    } else if data, rerr2 := api.fetch_cached_api_list(api.formula_list_url(), api.FORMULA_LIST_CACHE); rerr2 == nil {
         // Fallback: read the raw 30MB formula.json if the index doesn't
         // exist yet (first run before `update`).
         defer delete(data)
@@ -7778,16 +8904,16 @@ run_exec :: proc(args: []string) {
 // compound literal (the literal lives on the caller's stack), so the
 // lists live at file scope.
 ubrew_primary_commands := []string{
-    "autoremove", "bundle", "casks", "cleanup", "command", "command-not-found-init",
-    "commands", "completions",
-    "deps", "desc", "developer", "doctor", "exec", "formulae", "gc", "help", "history", "home",
+    "alias", "autoremove", "bundle", "casks", "cat", "cleanup", "command", "command-not-found-init",
+    "commands", "completions", "config",
+    "deps", "desc", "developer", "doctor", "exec", "fetch", "formulae", "gc", "help", "history", "home",
     "info", "init", "install", "leaves", "link", "list", "migrate", "mirror",
-    "nuke", "outdated", "pin", "reinstall", "remove", "search",
-    "shellenv", "tap", "trust", "unlink", "unpin", "untap", "untrust", "update", "upgrade",
-    "version", "where", "which-formula",
+    "nuke", "outdated", "pin", "readall", "reinstall", "remove", "search",
+    "shellenv", "tap", "trust", "unlink", "unpin", "untap", "untrust", "update", "upgrade", "uses",
+    "version", "where", "which", "which-formula",
 }
 ubrew_alias_commands := []string{
-    "abv", "clean", "dr", "homepage", "i", "ln", "ls", "rm", "s",
+    "abv", "clean", "dr", "env", "homepage", "i", "ln", "ls", "rm", "s",
     "service", "ui", "uninstall", "up", "wh", "x",
 }
 
@@ -7834,16 +8960,56 @@ run_path_query :: proc(which: string, args: []string) {
     		fmt.printf("%s/%s\n", installer.CASKROOM_DIR, name)
     	}
     case "--cache":
-        fmt.printf("%s/cache\n", installer.UBREW_ROOT)
+        if len(args) == 0 {
+            fmt.println(installer.CACHE_DIR)
+            return
+        }
+        for name in args {
+            if strings.has_prefix(name, "-") do continue
+            if f, err := api.fetch_formula(name); err == nil {
+                if f.bottle_sha256 != "" {
+                    blob_buf := [512]u8{}
+                    blob_path := store.blob_path(f.bottle_sha256, blob_buf[:])
+                    if os.is_file(blob_path) {
+                        fmt.println(blob_path)
+                    } else {
+                        fmt.printf("%s/%s-%s.bottle.tar.gz\n", installer.CACHE_DIR, f.name, f.version)
+                    }
+                } else {
+                    fmt.printf("%s/%s-%s.bottle.tar.gz\n", installer.CACHE_DIR, f.name, f.version)
+                }
+                api.destroy_formula(f)
+            } else if c, cerr := api.fetch_cask(name); cerr == nil {
+                if c.sha256 != "" {
+                    blob_buf := [512]u8{}
+                    blob_path := store.blob_path(c.sha256, blob_buf[:])
+                    if os.is_file(blob_path) {
+                        fmt.println(blob_path)
+                    } else {
+                        fmt.println(installer.cask_download_path(c))
+                    }
+                } else {
+                    fmt.println(installer.cask_download_path(c))
+                }
+                api.destroy_cask(c)
+            } else {
+                fmt.printf("%s/%s\n", installer.CACHE_DIR, name)
+            }
+        }
     case "--repo", "--repository":
-        // ubrew has no per-tap clone; report the ubrew root for `--repo`
-        // with no args, and the tap cache dir otherwise.
+        // With no args, report the ubrew root. With args, report the per-tap
+        // store path: the git clone in shared mode (matching `brew --repo
+        // <tap>`), else the fetch cache dir.
         if len(args) == 0 {
             fmt.println(installer.UBREW_ROOT)
             return
         }
         for name in args {
-            fmt.printf("%s/cache/taps/%s\n", installer.UBREW_ROOT, name)
+            if tap.mode() == .Shared && !strings.has_prefix(name, "homebrew/") {
+                fmt.println(tap.shared_tap_dir(name))
+            } else {
+                fmt.printf("%s/cache/taps/%s\n", installer.UBREW_ROOT, name)
+            }
         }
     case:
         fmt.printf("ubrew: unknown path query '%s'\n", which)
@@ -7851,34 +9017,74 @@ run_path_query :: proc(which: string, args: []string) {
     }
 }
 
+run_config :: proc() {
+    fmt.println("=== ubrew configuration ===")
+    fmt.printf("UBREW_ROOT   = %s\n", platform.get_ubrew_root())
+    fmt.printf("UBREW_PREFIX = %s\n", platform.get_ubrew_prefix())
+    fmt.printf("UBREW_CELLAR = %s\n", platform.get_cellar_dir())
+    fmt.printf("UBREW_CASKROOM = %s\n", platform.get_caskroom_dir())
+    fmt.printf("UBREW_BIN    = %s\n", platform.get_bin_dir())
+    fmt.println("--- Homebrew equivalents ---")
+    fmt.printf("HOMEBREW_PREFIX = %s\n", platform.get_homebrew_prefix())
+    fmt.printf("HOMEBREW_CELLAR = %s\n", platform.get_cellar_dir())
+    fmt.printf("HOMEBREW_CASKROOM = %s\n", platform.get_caskroom_dir())
+    fmt.printf("HOMEBREW_BIN = %s\n", platform.get_bin_dir())
+}
+
 run_shellenv :: proc(args: []string) {
     shell := "bash"
     if len(args) > 0 {
         shell = args[0]
     }
-    bin := fmt.tprintf("%s/bin", installer.PREFIX)
+    bin := platform.get_bin_dir()
+    prefix := platform.get_homebrew_prefix()
+    cellar := platform.get_cellar_dir()
+    // HOMEBREW_REPOSITORY is the brew git checkout root: on Linux that is
+    // <prefix>/Homebrew (where Library/Taps lives); on macOS the checkout
+    // IS the prefix itself (/opt/homebrew or /usr/local).
+    repository: string
+    when ODIN_OS == .Linux {
+        repository = fmt.tprintf("%s/Homebrew", prefix)
+    } else {
+        repository = prefix
+    }
     switch shell {
     case "bash", "zsh", "sh":
+        fmt.printf("export HOMEBREW_PREFIX=\"%s\"\n", prefix)
+        fmt.printf("export HOMEBREW_CELLAR=\"%s\"\n", cellar)
+        fmt.printf("export HOMEBREW_REPOSITORY=\"%s\"\n", repository)
+        fmt.printf("export UBREW_PREFIX=\"%s\"\n", platform.get_ubrew_prefix())
+        fmt.printf("export UBREW_CELLAR=\"%s\"\n", cellar)
         fmt.printf("export PATH=\"%s:$PATH\"\n", bin)
-        fmt.printf("export UBREW_PREFIX=\"%s\"\n", installer.PREFIX)
-        fmt.printf("export UBREW_CELLAR=\"%s\"\n", installer.CELLAR_DIR)
     case "fish":
+        fmt.printf("set -gx HOMEBREW_PREFIX \"%s\"\n", prefix)
+        fmt.printf("set -gx HOMEBREW_CELLAR \"%s\"\n", cellar)
+        fmt.printf("set -gx HOMEBREW_REPOSITORY \"%s\"\n", repository)
+        fmt.printf("set -gx UBREW_PREFIX \"%s\"\n", platform.get_ubrew_prefix())
+        fmt.printf("set -gx UBREW_CELLAR \"%s\"\n", cellar)
         fmt.printf("set -gx PATH \"%s\" $PATH\n", bin)
-        fmt.printf("set -gx UBREW_PREFIX \"%s\"\n", installer.PREFIX)
-        fmt.printf("set -gx UBREW_CELLAR \"%s\"\n", installer.CELLAR_DIR)
     case "csh", "tcsh":
+        fmt.printf("setenv HOMEBREW_PREFIX \"%s\"\n", prefix)
+        fmt.printf("setenv HOMEBREW_CELLAR \"%s\"\n", cellar)
+        fmt.printf("setenv HOMEBREW_REPOSITORY \"%s\"\n", repository)
+        fmt.printf("setenv UBREW_PREFIX \"%s\"\n", platform.get_ubrew_prefix())
+        fmt.printf("setenv UBREW_CELLAR \"%s\"\n", cellar)
         fmt.printf("setenv PATH \"%s:$PATH\"\n", bin)
-        fmt.printf("setenv UBREW_PREFIX \"%s\"\n", installer.PREFIX)
-        fmt.printf("setenv UBREW_CELLAR \"%s\"\n", installer.CELLAR_DIR)
     case "pwsh":
+        fmt.printf("$env:HOMEBREW_PREFIX = \"%s\"\n", prefix)
+        fmt.printf("$env:HOMEBREW_CELLAR = \"%s\"\n", cellar)
+        fmt.printf("$env:HOMEBREW_REPOSITORY = \"%s\"\n", repository)
+        fmt.printf("$env:UBREW_PREFIX = \"%s\"\n", platform.get_ubrew_prefix())
+        fmt.printf("$env:UBREW_CELLAR = \"%s\"\n", cellar)
         fmt.printf("$env:PATH = \"%s:$env:PATH\"\n", bin)
-        fmt.printf("$env:UBREW_PREFIX = \"%s\"\n", installer.PREFIX)
-        fmt.printf("$env:UBREW_CELLAR = \"%s\"\n", installer.CELLAR_DIR)
     case "nu":
         fmt.println("# Add to your config.nu:")
+        fmt.printf("$env.HOMEBREW_PREFIX = '%s'\n", prefix)
+        fmt.printf("$env.HOMEBREW_CELLAR = '%s'\n", cellar)
+        fmt.printf("$env.HOMEBREW_REPOSITORY = '%s'\n", repository)
+        fmt.printf("$env.UBREW_PREFIX = '%s'\n", platform.get_ubrew_prefix())
+        fmt.printf("$env.UBREW_CELLAR = '%s'\n", cellar)
         fmt.printf("$env.PATH = ($env.PATH | split row (char esep) | prepend '%s')\n", bin)
-        fmt.printf("$env.UBREW_PREFIX = '%s'\n", installer.PREFIX)
-        fmt.printf("$env.UBREW_CELLAR = '%s'\n", installer.CELLAR_DIR)
     case:
         fmt.printf("ubrew: unsupported shell '%s' (try bash|zsh|fish|csh|tcsh|pwsh|nu)\n", shell)
         os.exit(1)
@@ -8075,6 +9281,17 @@ run_completions :: proc(args: []string) {
 }
 
 main :: proc() {
+    // Initialize runtime paths from UBREW_*/HOMEBREW_* env vars
+    // before any path-dependent work (install, list, doctor, etc).
+    installer.init_paths()
+    api.init_paths()
+    store.init_paths()
+    tap.init_paths()
+    history.init_paths()
+
+    // Homebrew env vars (HOMEBREW_NO_AUTO_UPDATE, HOMEBREW_AUTO_UPDATE_SECS,
+    // etc.) are honored where relevant by maybe_auto_update and run_update;
+    // no consume step is needed here.
     if len(os.args) < 2 || os.args[1] == "--help" || os.args[1] == "-h" {
         print_usage()
         os.exit(0)
@@ -8083,6 +9300,22 @@ main :: proc() {
     cmd := os.args[1]
     args_slice := os.args[2:]
 
+    // User-defined alias expansion
+    // Never let an alias shadow a built-in command; a mistaken
+    // `install=nuke` entry must not turn `ubrew install` into a
+    // destructive dispatch.
+    is_builtin := false
+    for k in ubrew_known_commands(true) {
+        if cmd == k {
+            is_builtin = true
+            break
+        }
+    }
+    user_aliases := read_aliases()
+    if target_cmd, found := user_aliases[cmd]; found && !is_builtin {
+        cmd = target_cmd
+    }
+
     if cmd == "help" {
         if len(os.args) < 3 {
             print_usage()
@@ -8090,6 +9323,19 @@ main :: proc() {
         }
         cmd = os.args[2]
         args_slice = []string{"--help"}
+    }
+
+    // handle alias/readall dispatch AFTER help rewrites cmd, so
+    // `ubrew help alias` / `ubrew help readall` resolve instead of
+    // reporting an unknown command.
+    if cmd == "alias" {
+        run_alias(args_slice)
+        return
+    }
+
+    if cmd == "readall" {
+        run_readall(args_slice)
+        return
     }
 
     if cmd == "version" || cmd == "--version" || cmd == "-v" {
@@ -8152,6 +9398,26 @@ main :: proc() {
         return
     }
 
+    if cmd == "uses" {
+        run_uses(args_slice)
+        return
+    }
+
+    if cmd == "cat" {
+        run_cat(args_slice)
+        return
+    }
+
+    if cmd == "which" {
+        run_which(args_slice)
+        return
+    }
+
+    if cmd == "fetch" {
+        run_fetch(args_slice)
+        return
+    }
+
     if cmd == "migrate" {
         run_migrate()
         return
@@ -8173,7 +9439,12 @@ main :: proc() {
     }
 
     if cmd == "update" || cmd == "up" {
-        run_update(args_slice)
+        // Propagate run_update's snapshot result (W8): an explicit update
+        // must fail when the metadata snapshot could not be established,
+        // matching how install/upgrade abort on maybe_auto_update failure.
+        if !run_update(args_slice) {
+            os.exit(1)
+        }
         return
     }
 
@@ -8283,7 +9554,12 @@ main :: proc() {
         return
     }
 
-    if cmd == "shellenv" {
+    if cmd == "config" {
+        run_config()
+        return
+    }
+
+    if cmd == "shellenv" || cmd == "env" {
         run_shellenv(args_slice)
         return
     }
@@ -8605,17 +9881,37 @@ run_search :: proc(args_slice: []string) {
             if strings.has_prefix(query_lower, "/") && strings.has_suffix(query_lower, "/") && len(query_lower) >= 2 {
                 query_lower = query_lower[1:len(query_lower)-1]
             }
+            if strings.contains(query_lower, "/") {
+                tap_part, f_part := api.parse_tap_token(query_lower)
+                // parse_tap_token yields the "" literal for an empty part;
+                // only free heap strings (len > 0).
+                defer if len(tap_part) > 0 { delete(tap_part) }
+                defer if len(f_part) > 0 { delete(f_part) }
+                // Search is read-only: never tap a repository as a side
+                // effect of a query. append_tap_formulae_matches only reads
+                // already-tapped (or cloned) taps.
+                if len(f_part) > 0 {
+                    api.append_tap_formulae_matches(&matched_formulae, f_part, 100)
+                }
+            }
             api.append_tap_formulae_matches(&matched_formulae, query_lower, 100)
         }
     }
 
     if len(matched_formulae) > 0 {
-        fmt.println("Formulae:")
-        for r in matched_formulae {
-            if r.version != "" {
-                fmt.printf("  %s (%s)\n    %s\n", r.name, r.version, r.desc)
-            } else {
-                fmt.printf("  %s\n    %s\n", r.name, r.desc)
+        if flags.desc {
+            fmt.println("Formulae:")
+            for r in matched_formulae {
+                if r.version != "" {
+                    fmt.printf("  %s (%s)\n    %s\n", r.name, r.version, r.desc)
+                } else {
+                    fmt.printf("  %s\n    %s\n", r.name, r.desc)
+                }
+            }
+        } else {
+            fmt.println("==> Formulae")
+            for r in matched_formulae {
+                fmt.println(r.name)
             }
         }
     }
@@ -8624,12 +9920,19 @@ run_search :: proc(args_slice: []string) {
         if len(matched_formulae) > 0 {
             fmt.println()
         }
-        fmt.println("Casks:")
-        for r in matched_casks {
-            if r.version != "" {
-                fmt.printf("  %s (%s)\n    %s\n", r.token, r.version, r.desc)
-            } else {
-                fmt.printf("  %s\n    %s\n", r.token, r.desc)
+        if flags.desc {
+            fmt.println("Casks:")
+            for r in matched_casks {
+                if r.version != "" {
+                    fmt.printf("  %s (%s)\n    %s\n", r.token, r.version, r.desc)
+                } else {
+                    fmt.printf("  %s\n    %s\n", r.token, r.desc)
+                }
+            }
+        } else {
+            fmt.println("==> Casks")
+            for r in matched_casks {
+                fmt.println(r.token)
             }
         }
     }
@@ -9042,6 +10345,8 @@ run_trust :: proc(args: []string) {
 	for a in args {
 		if a == "--json=v1" {
 			json_opt = true
+		} else if a == "--formula" || a == "--cask" || a == "--command" {
+			continue
 		} else if strings.has_prefix(a, "-") {
 			fmt.printf("Error: unknown trust option '%s'\n", a)
 			os.exit(1)
@@ -9075,12 +10380,23 @@ run_trust :: proc(args: []string) {
 	}
 	
 	for name in pkg_names {
-		if tap.tap_trust(name) {
-			fmt.printf("==> Trusted tap: %s\n", name)
+		target_tap := name
+		t_name, f_name := api.parse_tap_token(name)
+		if len(t_name) > 0 {
+			target_tap = t_name
+		}
+		if tap.tap_trust(target_tap) {
+			fmt.printf("==> Trusted tap: %s\n", target_tap)
 		} else {
-			fmt.printf("Error: Failed to trust tap %s\n", name)
+			fmt.printf("Error: Failed to trust tap %s\n", target_tap)
+			// parse_tap_token only allocates non-empty names (a bare
+			// "formula" token yields the "" literal), so guard the delete.
+			if len(t_name) > 0 do delete(t_name)
+			if len(f_name) > 0 do delete(f_name)
 			os.exit(1)
 		}
+		if len(t_name) > 0 do delete(t_name)
+		if len(f_name) > 0 do delete(f_name)
 	}
 }
 

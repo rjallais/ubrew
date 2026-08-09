@@ -2,12 +2,19 @@ package store
 
 import "core:os"
 import "core:fmt"
+import "../platform"
 
-BLOBS_DIR :: "/opt/ubrew/cache/blobs"
+BLOBS_DIR := platform.DEFAULT_UBREW_ROOT + "/cache/blobs"
+
+init_blob_paths :: proc() {
+	BLOBS_DIR = fmt.aprintf("%s/cache/blobs", platform.get_ubrew_root())
+}
 
 blob_path :: proc(sha256: string, buf: []u8) -> string {
-	assert(len(buf) >= len(BLOBS_DIR) + 1 + len(sha256), "Buffer too small for blob path")
-	return fmt.bprintf(buf[:], "%s/%s", BLOBS_DIR, sha256)
+	// The build compiles asserts out (-disable-assert), so the historical
+	// size assert was dead code; bounded_path returns "" for an oversized
+	// buffer instead. Callers must treat "" as "no blob path" and bail.
+	return bounded_path(buf, "%s/%s", BLOBS_DIR, sha256)
 }
 
 blob_has :: proc(sha256: string) -> bool {
@@ -16,6 +23,9 @@ blob_has :: proc(sha256: string) -> bool {
 	}
 	buf: [512]u8
 	path := blob_path(sha256, buf[:])
+	if len(path) == 0 {
+		return false
+	}
 	return os.is_file(path)
 }
 

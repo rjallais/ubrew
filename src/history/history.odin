@@ -7,8 +7,15 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "../platform"
 
-HISTORY_FILE :: "/opt/ubrew/db/history.json"
+// Runtime history path. Re-bound by init_paths() after platform.init_paths().
+HISTORY_FILE: string = "/opt/ubrew/db/history.json"
+
+init_paths :: proc() {
+	root := platform.get_ubrew_root()
+	HISTORY_FILE = fmt.aprintf("%s/db/history.json", root)
+}
 
 Action :: enum {
 	Install,
@@ -102,7 +109,7 @@ load :: proc(allocator := context.allocator) -> (names: [dynamic]string, entries
 	if rerr != nil {
 		return
 	}
-	defer delete(data)
+	defer delete(data, allocator)
 
 	content := strings.trim_space(string(data))
 	if len(content) == 0 { return }
@@ -195,7 +202,7 @@ save :: proc(names: [dynamic]string, entries_map: map[string][dynamic]Entry) -> 
 
 	strings.write_string(&b, "}}\n")
 
-	dir := "/opt/ubrew/db"
+	dir := os.dir(HISTORY_FILE)
 	os.make_directory_all(dir, os.perm(0o755))
 
 	output := strings.to_string(b)

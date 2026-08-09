@@ -5,6 +5,9 @@ package api
 
 import "core:testing"
 import "core:strings"
+import "core:os"
+import "core:fmt"
+import "../tap"
 
 // ---------------------------------------------------------------------------
 // lower_contains — case-insensitive substring search
@@ -57,6 +60,126 @@ test_extract_owner_repo_standard :: proc(t: ^testing.T) {
                 pair[0], pair[1], result)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// synth_tap_listing_from_dir — listing synthesis from a local clone (Phase 2)
+// ---------------------------------------------------------------------------
+
+@(test)
+test_synth_tap_listing_from_dir :: proc(t: ^testing.T) {
+    fixture := temp_test_dir(t, "ubrew-synth-*")
+    defer os.remove_all(fixture)
+
+    _ = os.make_directory_all(fmt.tprintf("%s/Formula", fixture), os.perm(0o755))
+    _ = os.make_directory_all(fmt.tprintf("%s/Formula/w", fixture), os.perm(0o755))
+    _ = os.make_directory_all(fmt.tprintf("%s/Casks", fixture), os.perm(0o755))
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/Formula/wget.rb", fixture), "class Wget < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/Formula/w/wget2.rb", fixture), "class Wget2 < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/Casks/foo.rb", fixture), "cask \"foo\" do\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/wget2.rb", fixture), "class Wget2 < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/bar.rb", fixture), "class Bar < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/README.md", fixture), "not a formula")
+
+    listing, ok := synth_tap_listing_from_dir(fixture)
+    testing.expectf(t, ok, "synth_tap_listing_from_dir should succeed")
+    defer delete(listing)
+
+    text := string(listing)
+    testing.expectf(t, strings.has_prefix(text, "["), "listing must be a JSON array, got %q", text)
+    testing.expectf(t, strings.has_suffix(text, "]"), "listing must end with ], got %q", text)
+    wants := []string{"wget.rb", "wget2.rb", "foo.rb", "bar.rb"}
+    for want in wants {
+        testing.expectf(t, strings.contains(text, fmt.tprintf("\"%s\"", want)), "listing should contain %q, got %q", want, text)
+    }
+    testing.expectf(t, !strings.contains(text, "README"), "listing must not contain non-rb files, got %q", text)
+    // Dedupe: wget2.rb lives in both Formula/w/ and the clone root, two
+    // scanned directories — it must appear exactly once in the listing.
+    testing.expectf(t, strings.count(text, "\"wget2.rb\"") == 1, "wget2.rb must appear exactly once, got %q", text)
+}
+
+@(test)
+test_synth_tap_listing_from_dir_missing :: proc(t: ^testing.T) {
+    listing, ok := synth_tap_listing_from_dir("/nonexistent/ubrew/fixture")
+    testing.expectf(t, !ok, "missing clone must not synthesize a listing")
+    testing.expectf(t, listing == nil, "missing clone must return nil data")
+}
+
+// ---------------------------------------------------------------------------
+// scan_dir_for_formulae — local .rb scanning with query matching (Phase 2)
+// ---------------------------------------------------------------------------
+
+@(test)
+test_scan_dir_for_formulae :: proc(t: ^testing.T) {
+    fixture := temp_test_dir(t, "ubrew-scan-*")
+    defer os.remove_all(fixture)
+
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/foo.rb", fixture), "class Foo < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/foobar.rb", fixture), "class Foobar < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/bar.rb", fixture), "class Bar < Formula\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/NOTES.txt", fixture), "not a formula")
+
+    out := make([dynamic]Formula_Search_Result, context.allocator)
+    defer {
+        for r in out {
+            delete(r.name)
+            delete(r.desc)
+            delete(r.version)
+        }
+        delete(out)
+    }
+
+    t_obj := tap.Tap{name = "testuser/tapfixture"}
+    at_limit, found_any := scan_dir_for_formulae(&out, t_obj, fixture, "fo", 25)
+    testing.expectf(t, !at_limit, "limit 25 must not be reached with 2 matches")
+    testing.expectf(t, found_any, "directory with .rb files must report found_any")
+
+    // "foo" and "foobar" match "fo"; "bar" and NOTES.txt do not.
+    testing.expectf(t, len(out) == 2, "expected 2 matches, got %d", len(out))
+    got_foo := false
+    got_foobar := false
+    for r in out {
+        if r.name == "testuser/tapfixture/foo" do got_foo = true
+        if r.name == "testuser/tapfixture/foobar" do got_foobar = true
+    }
+    testing.expectf(t, got_foo, "expected testuser/tapfixture/foo in results")
+    testing.expectf(t, got_foobar, "expected testuser/tapfixture/foobar in results")
+}
+
+@(test)
+test_append_tap_search_result_dedupe :: proc(t: ^testing.T) {
+    out := make([dynamic]Formula_Search_Result, context.allocator)
+    defer {
+        for r in out {
+            delete(r.name)
+            delete(r.desc)
+            delete(r.version)
+        }
+        delete(out)
+    }
+    t_obj := tap.Tap{name = "user/tap"}
+
+    testing.expectf(t, !append_tap_search_result(&out, t_obj, "wget", "wget", 25), "first add should not hit limit")
+    testing.expectf(t, !append_tap_search_result(&out, t_obj, "wget", "wget", 25), "duplicate add must be rejected")
+    testing.expectf(t, len(out) == 1, "duplicate add must not grow results, got %d", len(out))
+    testing.expectf(t, append_tap_search_result(&out, t_obj, "wget2", "wget", 1), "second distinct add should hit limit")
+    testing.expectf(t, len(out) == 2, "expected 2 results, got %d", len(out))
+}
+
+// temp_test_dir creates a unique temp directory (create_temp_file then reuse
+// the name) and returns its heap-allocated path; caller removes with os.remove_all.
+temp_test_dir :: proc(t: ^testing.T, pattern: string) -> string {
+    f, err := os.create_temp_file("", pattern)
+    if err != nil {
+        testing.fail_now(t, "create_temp_file failed")
+    }
+    name := strings.clone(os.name(f), context.allocator)
+    os.close(f)
+    os.remove(name)
+    if mk_err := os.make_directory_all(name, os.perm(0o755)); mk_err != nil {
+        testing.fail_now(t, "make_directory_all failed")
+    }
+    return name
 }
 
 @(test)

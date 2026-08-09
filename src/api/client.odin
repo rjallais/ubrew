@@ -3,6 +3,7 @@ package api
 import "core:fmt"
 import "core:os"
 import "core:encoding/json"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "core:c"
@@ -40,18 +41,65 @@ get_registry_path :: proc(allocator := context.temp_allocator) -> string {
 	
 	return strings.clone("registry/upstream.json", allocator)
 }
-API_CACHE_DIR :: "/opt/ubrew/cache/api"
-FORMULA_LIST_CACHE :: API_CACHE_DIR + "/formula.json"
-CASK_LIST_CACHE :: API_CACHE_DIR + "/cask.json"
-FORMULA_LIST_URL :: "https://formulae.brew.sh/api/formula.json"
-CASK_LIST_URL :: "https://formulae.brew.sh/api/cask.json"
+// Runtime API cache paths. Re-bound by init_paths() after platform.init_paths().
+API_CACHE_DIR:        string = "/opt/ubrew/cache/api"
+FORMULA_LIST_CACHE:   string = "/opt/ubrew/cache/api/formula.json"
+CASK_LIST_CACHE:      string = "/opt/ubrew/cache/api/cask.json"
+// Homebrew API list endpoints.
+//
+// Default source is the UNSIGNED dumps (formula.json / cask.json). The
+// signed JWS envelopes (formula.jws.json / cask.jws.json) are used ONLY
+// when the user explicitly opts in via UBREW_NO_VERIFY_JWS, and are then
+// marked unverified in code (jws_override_active) because the signature is
+// not currently cryptographically verified — matching the parity-plan gate
+// (do not make JWS the default until verification ships; never fall back
+// automatically; leaving the override unset must fail closed by simply not
+// using the signed source).
+//
+// When JWS is active, extract_api_payload unwraps the envelope so the
+// cache files always hold plain JSON arrays.
+FORMULA_LIST_URL_UNSIGNED :: "https://formulae.brew.sh/api/formula.json"
+CASK_LIST_URL_UNSIGNED    :: "https://formulae.brew.sh/api/cask.json"
+FORMULA_LIST_URL :: "https://formulae.brew.sh/api/formula.jws.json"
+CASK_LIST_URL :: "https://formulae.brew.sh/api/cask.jws.json"
+
+// jws_override_active reports whether UBREW_NO_VERIFY_JWS is set (values
+// 1/true/yes). This is the explicit insecure override: it switches the
+// fetch source to the signed JWS endpoints while signature verification is
+// not implemented, and is the in-code marker that any JWS-decoded metadata
+// is untrusted. It is never set automatically and never used as a fallback.
+jws_override_active :: proc() -> bool {
+	v := os.get_env("UBREW_NO_VERIFY_JWS", context.temp_allocator)
+	lower := strings.to_lower(v, context.temp_allocator)
+	return v == "1" || lower == "true" || lower == "yes"
+}
+
+// formula_list_url / cask_list_url return the runtime source endpoint.
+// All downloads go through these (never the raw constants) so the
+// default-unsigned / override-signed selection is honored uniformly.
+formula_list_url :: proc() -> string {
+	return FORMULA_LIST_URL_UNSIGNED if !jws_override_active() else FORMULA_LIST_URL
+}
+cask_list_url :: proc() -> string {
+	return CASK_LIST_URL_UNSIGNED if !jws_override_active() else CASK_LIST_URL
+}
 
 // Phase 2: SQLite search database. Built from the 30MB formula.json /
 // 15MB cask.json dumps on first search (or `update`). Uses SQL LIKE
 // for fast case-insensitive substring matching via SQLite's B-tree scan.
-SEARCH_DB_PATH :: API_CACHE_DIR + "/search-index.db"
-FORMULA_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.db"
-CASK_SEARCH_INDEX :: API_CACHE_DIR + "/search-index.db"
+SEARCH_DB_PATH:       string = "/opt/ubrew/cache/api/search-index.db"
+FORMULA_SEARCH_INDEX: string = "/opt/ubrew/cache/api/search-index.db"
+CASK_SEARCH_INDEX:    string = "/opt/ubrew/cache/api/search-index.db"
+
+init_paths :: proc() {
+	platform.init_paths()
+	API_CACHE_DIR        = fmt.aprintf("%s/cache/api", platform.ubrew_root)
+	FORMULA_LIST_CACHE   = fmt.aprintf("%s/formula.json", API_CACHE_DIR)
+	CASK_LIST_CACHE      = fmt.aprintf("%s/cask.json", API_CACHE_DIR)
+	SEARCH_DB_PATH       = fmt.aprintf("%s/search-index.db", API_CACHE_DIR)
+	FORMULA_SEARCH_INDEX = SEARCH_DB_PATH
+	CASK_SEARCH_INDEX    = SEARCH_DB_PATH
+}
 
 registry_mmap_parse :: proc(path: string) -> (json.Value, json.Error) {
 	mf, ok := kernel.mapped_file_open(path)
@@ -98,6 +146,61 @@ json_array_or_nil :: proc(obj: json.Object, key: string) -> (out: json.Array, ok
         }
     }
     return out, false
+}
+
+// cask_variation_key returns the Homebrew `variations` object key matching
+// the current Linux host arch. The Homebrew JSON API uses `x86_64_linux`
+// and `arm64_linux` for Linux platforms, and falls back to macOS-specific
+// keys (e.g. `sequoia`, `sonoma`) for Darwin. ubrew only installs casks on
+// Linux, so only those two variants are returned.
+cask_variation_key :: proc() -> string {
+    // Linux only: the Homebrew JSON API uses `x86_64_linux` / `arm64_linux`
+    // for Linux, while Darwin variants live at the top-level url/sha256.
+    when ODIN_OS == .Linux {
+        when ODIN_ARCH == .arm64 {
+            return "arm64_linux"
+        } else {
+            return "x86_64_linux"
+        }
+    } else {
+        // On Darwin the top-level url/sha256 already carry the macOS variant.
+        return ""
+    }
+}
+
+// expand_brew_prefix replaces the literal string "$HOMEBREW_PREFIX" in `s`
+// with the platform-appropriate prefix (platform.HOMEBREW_PREFIX). The
+// Homebrew JSON API returns artifact paths containing "$HOMEBREW_PREFIX"
+// (e.g. "$HOMEBREW_PREFIX/Caskroom/..." or "$HOMEBREW_PREFIX/bin/...")
+// that must be resolved before they can be used as filesystem paths.
+// Returns a heap-allocated string (context.allocator).
+expand_brew_prefix :: proc(s: string) -> string {
+    if !strings.contains(s, "$HOMEBREW_PREFIX") {
+        return strings.clone(s, context.allocator)
+    }
+    // Prefer the runtime-resolved prefix so UBREW_PREFIX / HOMEBREW_PREFIX
+    // env overrides are honoured when expanding artifact paths.
+    prefix := platform.homebrew_prefix
+    if prefix == "" {
+        prefix = platform.HOMEBREW_PREFIX
+    }
+    out, _ := strings.replace_all(s, "$HOMEBREW_PREFIX", prefix, context.allocator)
+    return out
+}
+
+// strip_caskroom_prefix removes the Homebrew staged_path prefix
+// (e.g. "$HOMEBREW_PREFIX/Caskroom/<token>/<version>/") from the start
+// of a path if it exists, returning the archive-relative path.
+strip_caskroom_prefix :: proc(path, token, version: string) -> string {
+    hb_prefix := platform.homebrew_prefix
+    if hb_prefix == "" {
+        hb_prefix = platform.HOMEBREW_PREFIX
+    }
+    prefix := fmt.tprintf("%s/Caskroom/%s/%s/", hb_prefix, token, version)
+    if strings.has_prefix(path, prefix) {
+        return strings.clone(path[len(prefix):], context.allocator)
+    }
+    return strings.clone(path, context.allocator)
 }
 
 lower_contains :: proc(haystack: string, needle_lower: string) -> bool {
@@ -154,13 +257,24 @@ fetch_cached_api_list :: proc(url, cache_path: string) -> (data: []u8, err: os.E
 	if read_err != nil {
 		return nil, read_err
 	}
+	defer delete(body)
+
+	// The list source may be a JWS envelope (only when the explicit
+	// UBREW_NO_VERIFY_JWS override is set); unwrap it so the cache file
+	// holds a plain JSON array, matching the shape produced by run_update.
+	// Plain-array sources (the default unsigned endpoints) pass through
+	// unchanged.
+	//
+	// Ownership of `payload` transfers to the caller — the caller's
+	// `defer delete(data)` releases it exactly once (matching the cached
+	// branch upstream, which returns the freshly read cache file).
+	payload := extract_api_payload(body)
 
 	if os.is_dir(API_CACHE_DIR) {
-		cp_args := []string{"cp", temp_file, cache_path}
-		_ = platform.exec_cmd("cp", cp_args)
+		_ = os.write_entire_file(cache_path, payload)
 	}
 
-	return body, nil
+	return payload, nil
 }
 
 json_field_string_raw :: proc(obj, key: string) -> string {
@@ -411,10 +525,10 @@ append_api_cask_matches_fast :: proc(data: []u8, out: ^[dynamic]Cask_Search_Resu
 				if !lower_contains(token, query_lower) && !lower_contains(name, query_lower) && !lower_contains(desc, query_lower) {
 					continue
 				}
-				// Homebrew core casks are macOS-only; skip on other platforms
-				when ODIN_OS != .Darwin {
-					continue
-				}
+				// No platform gate here: mirrors cask_available_on_current_os
+				// (returns true on Linux) so the no-index JSON fallback
+				// surfaces the same cross-platform casks as the SQLite
+				// index when it is unavailable.
 				if cask_results_contains(out^[:], token) {
 					continue
 				}
@@ -703,10 +817,6 @@ fetch_cask_tap :: proc(token: string) -> (c: cask.Cask, tap_name: string, ok: bo
 		delete(tap_entries)
 	}
 
-	if len(tap_entries) == 0 {
-		return c, "", false
-	}
-
 	// Find the matching tap entry
 	matched: tap.Tap
 	matched_ok := false
@@ -715,6 +825,18 @@ fetch_cask_tap :: proc(token: string) -> (c: cask.Cask, tap_name: string, ok: bo
 			matched = tap.tap_from_entry(e)
 			matched_ok = true
 			break
+		}
+	}
+	if !matched_ok && len(target_tap) > 0 && strings.count(target_tap, "/") == 1 {
+		// Never auto-tap an untrusted third-party repository: the tap must
+		// be explicitly trusted (via `ubrew tap trust`) before it is added
+		// or queried.
+		if tap.tap_is_trusted(target_tap) && tap.tap_add(target_tap, "") {
+			matched = tap.tap_from_entry(tap.Read_Tap_Entry{
+				name = target_tap,
+				url  = "",
+			})
+			matched_ok = true
 		}
 	}
 	if !matched_ok {
@@ -764,6 +886,9 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
     data, read_err := os.read_entire_file(cache_path, context.allocator)
     needs_download := read_err != nil || len(data) == 0
+    if !needs_download && cache_stale(cache_path, CASK_LIST_CACHE) {
+        needs_download = true
+    }
 
     if needs_download {
         if read_err == nil {
@@ -828,8 +953,54 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     }
 
     c.version = strings.clone(root_obj["version"].(json.String))
-    c.url = strings.clone(root_obj["url"].(json.String))
-    c.sha256 = strings.clone(root_obj["sha256"].(json.String))
+
+    // The top-level "url" and "sha256" fields default to the macOS variant.
+    // The "variations" object carries platform-specific overrides keyed by
+    // the target platform (e.g. "x86_64_linux", "arm64_linux"). On Linux we
+    // MUST pick the matching variation, otherwise we download a Darwin
+    // binary that cannot run (e.g. a Mach-O adb on an ELF host).
+    url_str := strings.clone(root_obj["url"].(json.String))
+    sha_str := strings.clone(root_obj["sha256"].(json.String))
+    if variations_obj, v_ok := json_object_or_nil(root_obj, "variations"); v_ok {
+        var_key := cask_variation_key()
+        if var_entry, ve_ok := json_object_or_nil(variations_obj, var_key); ve_ok {
+            if v_url, u_exists := var_entry["url"]; u_exists {
+                if u_str, u_ok := v_url.(json.String); u_ok {
+                    delete(url_str)
+                    url_str = strings.clone(u_str)
+                }
+            }
+            if v_sha, s_exists := var_entry["sha256"]; s_exists {
+                if s_str, s_ok := v_sha.(json.String); s_ok {
+                    delete(sha_str)
+                    sha_str = strings.clone(s_str)
+                }
+            }
+        }
+    }
+
+    // The "variations" object can also override the base "artifacts" array
+    // (e.g. the grok-build cask ships macOS aarch64 artifacts at the top
+    // level but carries an "x86_64_linux" variation with a Linux-native
+    // binary artifact). If we don't pick up the variation's artifacts, we
+    // download the correct platform binary (via the variation url) but then
+    // look for the macOS artifact filename inside it — failing with "No
+    // artifacts were installed."
+    artifacts_to_parse, ok2 := root_obj["artifacts"]
+    if variations_obj, v_ok := json_object_or_nil(root_obj, "variations"); v_ok {
+        var_key := cask_variation_key()
+        if var_entry, ve_ok := json_object_or_nil(variations_obj, var_key); ve_ok {
+            if v_arts, a_exists := var_entry["artifacts"]; a_exists {
+                if _, arr_ok := v_arts.(json.Array); arr_ok {
+                    artifacts_to_parse = v_arts
+                    ok2 = true
+                }
+            }
+        }
+    }
+
+    c.url = url_str
+    c.sha256 = sha_str
     c.homepage = strings.clone(root_obj["homepage"].(json.String))
     if auto_val, exists := root_obj["auto_updates"]; exists {
         if auto_bool, ok := auto_val.(json.Boolean); ok {
@@ -838,8 +1009,7 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
     }
 
     artifacts_list := make([dynamic]cask.Artifact)
-    if arts, ok2 := root_obj["artifacts"]; ok2 {
-        arts_arr := arts.(json.Array)
+    if arts_arr, arts_ok := artifacts_to_parse.(json.Array); ok2 && arts_ok {
         for art_item in arts_arr {
             art_obj := art_item.(json.Object)
 
@@ -862,16 +1032,62 @@ fetch_cask_homebrew :: proc(token: string) -> (c: cask.Cask, err: json.Error) {
                 bin_arr := bin_val.(json.Array)
                 if len(bin_arr) > 0 {
                     if src_str, ok4 := bin_arr[0].(json.String); ok4 {
-                        src := strings.clone(src_str)
-                        target := src
-                        if len(bin_arr) > 1 {
+                        // The Homebrew JSON API returns absolute staged
+                        // paths like "$HOMEBREW_PREFIX/Caskroom/<token>/<ver>/platform-tools/adb".
+                        // ubrew's installer extracts the archive to its own
+                        // Caskroom dir, so the archive-relative path
+                        // (everything after the staged_path prefix) is the
+                        // only part that matters as a source path.
+                        expanded_src := expand_brew_prefix(src_str)
+                        src := strip_caskroom_prefix(expanded_src, c.token, c.version)
+                        delete(expanded_src)
+                        // Resolve the symlink target. Prefer the sibling
+                        // "target" field (JSON API layout), then the legacy
+                        // hash inside the binary array (Ruby cask layout),
+                        // then default to the source basename so the binary
+                        // lands in bin_dir with its own name.
+                        // NOTE: os.base() returns a *view* into the input
+                        // string — it must be cloned before being stored as
+                        // an artifact field, since destroy_cask will call
+                        // delete() on it.
+                        base_of_src := os.base(src)
+                        target_name := strings.clone(base_of_src, context.allocator)
+                        has_target_name := false
+                        // 1) Sibling "target" on the artifact object.
+                        if t_val, t_ok := art_obj["target"]; t_ok {
+                            if t_str, t_ok2 := t_val.(json.String); t_ok2 {
+                                expanded_t := expand_brew_prefix(t_str)
+                                base := os.base(expanded_t)
+                                if len(base) > 0 {
+                                    delete(target_name)
+                                    target_name = strings.clone(base, context.allocator)
+                                    has_target_name = true
+                                }
+                                delete(expanded_t)
+                            }
+                        }
+                        // 2) Legacy hash inside the binary array
+                        //    (Ruby cask layout: binary "src", target: "dst").
+                        if !has_target_name && len(bin_arr) > 1 {
                             if obj, ok5 := bin_arr[1].(json.Object); ok5 {
                                 if t, ok6 := obj["target"]; ok6 {
-                                    target = strings.clone(t.(json.String))
+                                    if t_str, ok7 := t.(json.String); ok7 {
+                                        expanded_t := expand_brew_prefix(t_str)
+                                        base := os.base(expanded_t)
+                                        if len(base) > 0 {
+                                            delete(target_name)
+                                            target_name = strings.clone(base, context.allocator)
+                                            has_target_name = true
+                                        }
+                                        delete(expanded_t)
+                                    }
                                 }
                             }
                         }
-                        append(&artifacts_list, cask.Binary_Artifact{source = src, target = target})
+                        append(&artifacts_list, cask.Binary_Artifact{
+                            source = src,
+                            target = target_name,
+                        })
                     }
                 }
             }
@@ -1059,12 +1275,13 @@ current_tap_platform :: proc() -> tap.Platform {
 
 // ruby_to_formula converts a parsed Ruby_Formula into a formula.Formula
 // suitable for the install pipeline. Returns the converted formula and ok.
-// Note: `homepage` and `license` are not stored in the Formula struct; they
-// are dropped here since the install pipeline does not consume them. The
-// original Ruby_Formula is the source of truth for those fields.
+// Note: `license` is not stored in the Formula struct; it is dropped here
+// since the install pipeline does not consume it. The original Ruby_Formula
+// is the source of truth for that field.
 ruby_to_formula :: proc(rf: tap.Ruby_Formula, tap_name: string) -> (f: formula.Formula, ok: bool) {
     f.name = strings.clone(rf.name, context.allocator)
     f.desc = strings.clone(rf.desc, context.allocator)
+    f.homepage = strings.clone(rf.homepage, context.allocator)
     f.version = strings.clone(rf.version, context.allocator)
 
     f.source_url = strings.clone(rf.url, context.allocator)
@@ -1150,10 +1367,6 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
         delete(tap_entries)
     }
 
-    if len(tap_entries) == 0 {
-        return f, "", false
-    }
-
     if len(formula_name) == 0 {
         // If token is just "user/repo" and the repo's name matches a formula
         // in the tap, fetch that. Otherwise we cannot infer the formula.
@@ -1165,6 +1378,18 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
                 matched = tap.tap_from_entry(e)
                 matched_ok = true
                 break
+            }
+        }
+        if !matched_ok && len(target_tap) > 0 && strings.count(target_tap, "/") == 1 {
+            // Never auto-tap an untrusted third-party repository: the tap
+            // must be explicitly trusted (via `ubrew tap trust`) before it
+            // is added or queried (matches the cask path below).
+            if tap.tap_is_trusted(target_tap) && tap.tap_add(target_tap, "") {
+                matched = tap.tap_from_entry(tap.Read_Tap_Entry{
+                    name = target_tap,
+                    url  = "",
+                })
+                matched_ok = true
             }
         }
         if !matched_ok {
@@ -1186,6 +1411,17 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
             matched = tap.tap_from_entry(e)
             matched_ok = true
             break
+        }
+    }
+    if !matched_ok && len(target_tap) > 0 && strings.count(target_tap, "/") == 1 {
+        // Never auto-add an untrusted third-party tap: it must be explicitly
+        // trusted (ubrew tap trust) before we clone or query it.
+        if tap.tap_is_trusted(target_tap) && tap.tap_add(target_tap, "") {
+            matched = tap.tap_from_entry(tap.Read_Tap_Entry{
+                name = target_tap,
+                url  = "",
+            })
+            matched_ok = true
         }
     }
     if !matched_ok {
@@ -1228,7 +1464,7 @@ fetch_formula_tap :: proc(token: string) -> (f: formula.Formula, tap_name: strin
 // `oldnames` or `aliases` arrays contain the given name. If found, the current
 // canonical formula name is returned. This handles cases like "dash" -> "dash-shell".
 resolve_formula_alias :: proc(name: string) -> (canonical: string, ok: bool) {
-    data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
+    data, read_err := fetch_cached_api_list(formula_list_url(), FORMULA_LIST_CACHE)
     if read_err != nil {
         return "", false
     }
@@ -1420,6 +1656,11 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
     cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
     data, read_err := os.read_entire_file(cache_path, context.allocator)
     needs_download := read_err != nil || len(data) == 0
+    // Invalidate the per-formula cache when `ubrew update` has refreshed the
+    // bulk formula.json more recently, so version bumps are picked up.
+    if !needs_download && cache_stale(cache_path, FORMULA_LIST_CACHE) {
+        needs_download = true
+    }
 
     if needs_download {
         if read_err == nil {
@@ -1466,6 +1707,7 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
 
     f.name = strings.clone(root_obj["name"].(json.String))
     f.desc = strings.clone(root_obj["desc"].(json.String))
+    f.homepage = strings.clone(root_obj["homepage"].(json.String))
 
     versions := root_obj["versions"].(json.Object)
     f.version = strings.clone(versions["stable"].(json.String))
@@ -1502,8 +1744,19 @@ fetch_formula_homebrew :: proc(name: string) -> (f: formula.Formula, err: json.E
                     target_obj := target_val.(json.Object)
                     f.bottle_url = strings.clone(target_obj["url"].(json.String))
                     f.bottle_sha256 = strings.clone(target_obj["sha256"].(json.String))
+                    if size_val, size_ok := target_obj["size"]; size_ok {
+                        if size_num, size_num_ok := size_val.(json.Integer); size_num_ok {
+                            f.bottle_size = i64(size_num)
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    if inst_val, inst_ok := root_obj["installed_size"]; inst_ok {
+        if inst_num, inst_num_ok := inst_val.(json.Integer); inst_num_ok {
+            f.installed_size = i64(inst_num)
         }
     }
 
@@ -1656,8 +1909,159 @@ destroy_formula :: proc(f: formula.Formula) {
         delete(b)
     }
     delete(f.binaries)
+    delete(f.homepage)
     delete(f.tap)
 }
+
+// ── New Formulae / New Casks diffing (Homebrew `brew update` parity) ──
+// The full formula.json / cask.json dumps are compared against the previous
+// cached dumps so `ubrew update` can list what changed since last time.
+
+New_List_Entry :: struct {
+    name: string,
+    desc: string,
+}
+
+// load_api_name_map parses a formula.json / cask.json array file into a
+// map of name -> description (allocated with context.allocator). Returns an
+// empty map when the file is missing or unparseable; callers pair with
+// destroy_api_name_map.
+load_api_name_map :: proc(path: string) -> map[string]string {
+    m := make(map[string]string, context.allocator)
+    if !os.is_file(path) {
+        return m
+    }
+    data, rerr := os.read_entire_file(path, context.allocator)
+    if rerr != nil || len(data) == 0 {
+        return m
+    }
+    defer delete(data, context.allocator)
+
+    val, perr := json.parse(data)
+    if perr != nil {
+        return m
+    }
+    defer json.destroy_value(val)
+
+    arr, ok := val.(json.Array)
+    if !ok {
+        return m
+    }
+    for item in arr {
+        obj, ok2 := item.(json.Object)
+        if !ok2 do continue
+        name := json_string_or_empty(obj, "name")
+        if name == "" do continue
+        m[strings.clone(name, context.allocator)] = strings.clone(json_string_or_empty(obj, "desc"), context.allocator)
+    }
+    return m
+}
+
+destroy_api_name_map :: proc(m: map[string]string) {
+    for k, v in m {
+        delete(k)
+        delete(v)
+    }
+    delete(m)
+}
+
+// diff_api_list_new_entries returns entries present in new_path but absent
+// from the old_name_map. Result is a [dynamic]New_List_Entry allocated with
+// the given allocator; each entry's strings are cloned with that allocator.
+diff_api_list_new_entries :: proc(old_name_map: map[string]string, new_path: string, allocator := context.allocator) -> [dynamic]New_List_Entry {
+    result := make([dynamic]New_List_Entry, allocator)
+    if !os.is_file(new_path) {
+        return result
+    }
+    data, rerr := os.read_entire_file(new_path, allocator)
+    if rerr != nil || len(data) == 0 {
+        return result
+    }
+    defer delete(data, allocator)
+
+    val, perr := json.parse(data)
+    if perr != nil {
+        return result
+    }
+    defer json.destroy_value(val)
+
+    arr, ok := val.(json.Array)
+    if !ok {
+        return result
+    }
+    for item in arr {
+        obj, ok2 := item.(json.Object)
+        if !ok2 do continue
+        name := json_string_or_empty(obj, "name")
+        if name == "" do continue
+        if _, exists := old_name_map[name]; exists {
+            continue
+        }
+        append(&result, New_List_Entry{
+            name = strings.clone(name, allocator),
+            desc = strings.clone(json_string_or_empty(obj, "desc"), allocator),
+        })
+    }
+    return result
+}
+
+// ── JWS envelope handling (Homebrew formula.jws.json / cask.jws.json) ──
+// Homebrew serves the API dumps as RFC 7797 JWS envelopes of the form
+// {"payload": "<raw json>", "signatures": [...]} with b64=false in the
+// protected header, so the payload is UNENCODED JSON (not base64url).
+// NOTE (Phase 1): the JWS signature is not yet verified; verification is a
+// follow-up (vendor Homebrew's PS512 key + verify against the payload).
+
+// extract_api_payload returns the raw formula/cask JSON array bytes from a
+// downloaded API file. JWS envelopes are unwrapped; files that are already
+// plain JSON arrays (or unparseable) are copied as-is. The returned slice is
+// freshly allocated with the provided allocator; callers must delete it.
+extract_api_payload :: proc(data: []u8, allocator := context.allocator) -> (payload: []u8) {
+	fallback :: proc(data: []u8, allocator := context.allocator) -> []u8 {
+		out := make([]u8, len(data), allocator)
+		copy(out, data)
+		return out
+	}
+
+	trimmed := strings.trim_left_space(string(data))
+	if !strings.has_prefix(trimmed, "{") {
+		return fallback(data, allocator)
+	}
+
+	val, perr := json.parse(data)
+	if perr != nil {
+		return fallback(data, allocator)
+	}
+	defer json.destroy_value(val)
+
+	obj, ok := val.(json.Object)
+	if !ok {
+		return fallback(data, allocator)
+	}
+	if pv, exists := obj["payload"]; exists {
+		if ps, ok2 := pv.(json.String); ok2 {
+			out := make([]u8, len(ps), allocator)
+			copy(out, ps)
+			return out
+		}
+	}
+	return fallback(data, allocator)
+}
+
+// extract_jws_in_place rewrites a downloaded JWS envelope file in place so
+// it contains the raw JSON array (the payload). Plain-array files are left
+// untouched. Returns true when the file now contains a usable payload.
+extract_jws_in_place :: proc(path: string) -> bool {
+	data, rerr := os.read_entire_file(path, context.allocator)
+	if rerr != nil || len(data) == 0 {
+		return false
+	}
+	defer delete(data)
+	payload := extract_api_payload(data)
+	defer delete(payload)
+	return os.write_entire_file(path, payload) == nil
+}
+
 
 Formula_Search_Result :: struct {
     name:    string,
@@ -1885,7 +2289,7 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
 				}
 			}
 		} else {
-			data, read_err := fetch_cached_api_list(FORMULA_LIST_URL, FORMULA_LIST_CACHE)
+			data, read_err := fetch_cached_api_list(formula_list_url(), FORMULA_LIST_CACHE)
 			if read_err == nil {
 				defer delete(data)
 				append_api_formulae_matches_fast(data, &results, query_lower, limit)
@@ -1902,10 +2306,118 @@ search_formulae :: proc(query: string, limit: int = 25) -> (out: []Formula_Searc
     return results[:], nil
 }
 
+// append_tap_search_result appends a matching formula to the search results
+// if it isn't already present (dedupe by short name or full token). Returns
+// true when the result limit is reached (callers should stop scanning).
+append_tap_search_result :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, formula_name, query_lower: string, limit: int) -> bool {
+	name_lc := strings.to_lower(formula_name, context.temp_allocator)
+	tap_lc := strings.to_lower(t.name, context.temp_allocator)
+	token := fmt.tprintf("%s/%s", t.name, formula_name)
+	token_lc := strings.to_lower(token, context.temp_allocator)
+
+	if !strings.contains(name_lc, query_lower) && !strings.contains(tap_lc, query_lower) && !strings.contains(token_lc, query_lower) {
+		return false
+	}
+
+	exists := false
+	for r in out^ {
+		if r.name == formula_name || r.name == token {
+			exists = true
+			break
+		}
+	}
+	if exists {
+		return false
+	}
+
+	append(out, Formula_Search_Result{
+		name    = strings.clone(token),
+		desc    = strings.clone(fmt.tprintf("(from %s tap)", t.name)),
+		version = strings.clone(""),
+	})
+	return len(out^) >= limit
+}
+
+// scan_dir_for_formulae scans a single directory for .rb files and appends
+// matches via append_tap_search_result. Returns (at_limit, found_any) where
+// found_any is true when the directory contained any .rb file at all (even
+// non-matching ones), so callers can tell "tap has local formulae" apart
+// from "nothing here".
+scan_dir_for_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, dir_path, query_lower: string, limit: int) -> (at_limit: bool, found_any: bool) {
+	infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
+	if err != nil {
+		return false, false
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+
+	found_any = false
+	for info in infos {
+		if info.type == .Directory do continue
+		if !strings.has_suffix(info.name, ".rb") do continue
+		found_any = true
+
+		formula_name := info.name[:len(info.name) - 3]
+		if append_tap_search_result(out, t, formula_name, query_lower, limit) {
+			return true, true
+		}
+	}
+	return false, found_any
+}
+
+// scan_local_tap_formulae walks a tap's local directories (shared
+// Library/Taps clone first, then the standalone fetch cache) and appends any
+// formula matching `query_lower`. Handles Homebrew's letter-nested layout
+// (Formula/<c>/<name>.rb) one level deep. Returns found_any — true when the
+// tap has local .rb files — so callers can skip the network listing.
+scan_local_tap_formulae :: proc(out: ^[dynamic]Formula_Search_Result, t: tap.Tap, query_lower: string, limit: int) -> bool {
+	user := t.name
+	repo := ""
+	if idx := strings.index(t.name, "/"); idx >= 0 {
+		user = t.name[:idx]
+		repo = t.name[idx + 1:]
+	}
+
+	// Candidate roots: the shared Library/Taps clone (homebrew-<repo>
+	// convention first, plain <repo> second), then the standalone cache.
+	candidates := []string{
+		tap.shared_tap_dir(t.name),
+		fmt.tprintf("%s/Homebrew/Library/Taps/%s/%s", platform.get_homebrew_prefix(), user, repo),
+		fmt.tprintf("%s/cache/taps/%s", platform.get_ubrew_root(), t.name),
+	}
+
+	found_any := false
+	for base_dir in candidates {
+		if !os.is_dir(base_dir) do continue
+
+		subdirs := []string{"/Formula", "/Casks", ""}
+		for sub in subdirs {
+			dir_path := fmt.tprintf("%s%s", base_dir, sub)
+			if !os.is_dir(dir_path) do continue
+
+			at_limit, any := scan_dir_for_formulae(out, t, dir_path, query_lower, limit)
+			found_any = found_any || any
+			if at_limit do return true
+
+			// Letter-nested subdirs (homebrew/core layout): one level deep,
+			// single-letter directories only.
+			infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
+			if err != nil do continue
+			defer os.file_info_slice_delete(infos, context.allocator)
+			for info in infos {
+				if info.type != .Directory || len(info.name) != 1 do continue
+				at_limit, any := scan_dir_for_formulae(out, t, fmt.tprintf("%s/%s", dir_path, info.name), query_lower, limit)
+				found_any = found_any || any
+				if at_limit do return true
+			}
+		}
+	}
+	return found_any
+}
+
 // append_tap_formulae_matches walks the tapped 3rd-party repositories and
 // appends search results for any formula whose name, desc, or tap prefix
 // matches `query_lower`. It first enumerates the Formula/ directory of each
-// tap via the GitHub API (or local cache), then parses each .rb file.
+// tap via local disk or GitHub API, then parses each .rb file.
 append_tap_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, query_lower: string, limit: int) {
     tap_entries := tap.read_taps()
     defer {
@@ -1923,6 +2435,11 @@ append_tap_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, query_
             return
         }
         t := tap.tap_from_entry(entry)
+
+        if scan_local_tap_formulae(out, t, query_lower, limit) {
+            tap.destroy_tap(t)
+            continue
+        }
 
         listing_data, ok := fetch_tap_listing_cached(t)
         if !ok {
@@ -1963,13 +2480,11 @@ append_tap_formulae_matches :: proc(out: ^[dynamic]Formula_Search_Result, query_
 
             name_lc := strings.to_lower(formula_name, context.temp_allocator)
             tap_lc := strings.to_lower(t.name, context.temp_allocator)
-            if !strings.contains(name_lc, query_lower) && !strings.contains(tap_lc, query_lower) {
+            token := fmt.tprintf("%s/%s", t.name, formula_name)
+            token_lc := strings.to_lower(token, context.temp_allocator)
+            if !strings.contains(name_lc, query_lower) && !strings.contains(tap_lc, query_lower) && !strings.contains(token_lc, query_lower) {
                 continue
             }
-
-            // Use the full "tap_name/formula_name" so users can install with
-            // `ubrew install user/repo/formula`.
-            token := fmt.tprintf("%s/%s", t.name, formula_name)
             exists := false
             for r in out^ {
                 if r.name == token {
@@ -2056,6 +2571,105 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
     return strings.clone(fmt.tprintf("%s/%s", owner, repo), context.allocator)
 }
 
+// listing_write_entry appends one {"name": "<name>"} entry to a synthesized
+// tap listing, inserting a comma separator between entries. Names containing
+// quotes or backslashes would break the JSON (or inject fields), so they are
+// skipped before any comma is written; valid names are written as before.
+listing_write_entry :: proc(b: ^strings.Builder, first: ^bool, name: string) {
+	if strings.contains(name, "\"") || strings.contains(name, "\\") {
+		return
+	}
+	if !first^ {
+		strings.write_string(b, ",")
+	}
+	first^ = false
+	strings.write_string(b, "{\"name\": \"")
+	strings.write_string(b, name)
+	strings.write_string(b, "\"}")
+}
+
+// synth_walk_dir appends every unique .rb filename found directly inside
+// `dir_path` to the synthesized listing.
+synth_walk_dir :: proc(b: ^strings.Builder, first: ^bool, seen: ^[dynamic]string, dir_path: string) {
+	infos, err := os.read_directory_by_path(dir_path, -1, context.allocator)
+	if err != nil {
+		return
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+	for info in infos {
+		if info.type == .Directory do continue
+		if !strings.has_suffix(info.name, ".rb") do continue
+		already := false
+		for s in seen^ {
+			if s == info.name {
+				already = true
+				break
+			}
+		}
+		if already do continue
+		append(seen, strings.clone(info.name, context.temp_allocator))
+		listing_write_entry(b, first, info.name)
+	}
+}
+
+// synth_tap_listing_from_clone builds a GitHub-Contents-API-shaped listing (a
+// JSON array of {"name": "x.rb"} objects) by walking a shared-mode local
+// clone: Formula/, Casks/, the repo root, and one level of letter-nested
+// subdirs. Returns ok=false when no clone exists so callers fall back to the
+// network. The returned []u8 is heap-allocated (context.allocator), matching
+// fetch_tap_listing_cached's contract.
+synth_tap_listing_from_clone :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
+	dest := tap.shared_tap_dir(t.name)
+	if !os.is_dir(dest) {
+		return nil, false
+	}
+	return synth_tap_listing_from_dir(dest)
+}
+
+// synth_tap_listing_from_dir is the testable core of
+// synth_tap_listing_from_clone: it walks `dest` (a clone directory, or any
+// fixture in tests) and emits the listing JSON. The returned []u8 is
+// heap-allocated (context.allocator), matching fetch_tap_listing_cached's
+// contract.
+synth_tap_listing_from_dir :: proc(dest: string) -> (data: []u8, ok: bool) {
+	if !os.is_dir(dest) {
+		return nil, false
+	}
+
+	seen := make([dynamic]string, context.temp_allocator)
+	defer delete(seen)
+
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "[")
+	first := true
+
+	roots := []string{
+		fmt.tprintf("%s/Formula", dest),
+		fmt.tprintf("%s/Casks", dest),
+		dest,
+	}
+	for root in roots {
+		if !os.is_dir(root) do continue
+		synth_walk_dir(&b, &first, &seen, root)
+
+		// Letter-nested subdirs (homebrew/core layout): one level deep,
+		// single-letter directories only.
+		infos, err := os.read_directory_by_path(root, -1, context.allocator)
+		if err != nil do continue
+		defer os.file_info_slice_delete(infos, context.allocator)
+		for info in infos {
+			if info.type != .Directory || len(info.name) != 1 do continue
+			synth_walk_dir(&b, &first, &seen, fmt.tprintf("%s/%s", root, info.name))
+		}
+	}
+
+	strings.write_string(&b, "]")
+	result := strings.to_string(b)
+	out := make([]u8, len(result), context.allocator)
+	copy(out, result)
+	return out, true
+}
+
 // fetch_tap_listing_cached returns the cached tap formula listing (a JSON
 // array of objects with a "name" field per GitHub's API), refreshing from
 // GitHub if the cache is missing or stale (older than 1 hour). It tries
@@ -2064,9 +2678,19 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
 //   2. <tap.url>/contents/                (root, e.g. pkgxdev/homebrew-made)
 //   3. <github.com/user/homebrew-repo>/... (homebrew- prefix convention)
 // The first one that returns a non-empty JSON array is used.
+// In shared mode with a local clone the listing is synthesized from the
+// working tree instead, skipping the network entirely.
 fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
-    cache_dir := fmt.tprintf("/opt/ubrew/cache/taps/%s", t.name)
-    cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
+	// Shared mode with a local clone: synthesize the listing from the
+	// working tree — no Contents API round-trip, no cache staleness.
+	if tap.mode() == .Shared {
+		if synth, s_ok := synth_tap_listing_from_clone(t); s_ok {
+			return synth, true
+		}
+	}
+
+	cache_dir := fmt.tprintf("%s/%s", tap.TAPS_CACHE_DIR, t.name)
+	cache_path := fmt.tprintf("%s/Formula_listing.json", cache_dir)
 
     // Try the cache first if fresh.
     info, serr := os.stat(cache_path, context.allocator)
@@ -2124,7 +2748,7 @@ fetch_tap_listing_cached :: proc(t: tap.Tap) -> (data: []u8, ok: bool) {
     // Path suffixes to try against each repo. Combined with the API host
     // below, these produce the JSON Contents API endpoint rather than the
     // HTML web page.
-    suffixes := []string{"/contents/Formula", "/contents"}
+    suffixes := []string{"/contents/Formula", "/contents/Casks", "/contents"}
 
     _ = os.make_directory_all(cache_dir, os.perm(0o755))
 
@@ -2214,7 +2838,7 @@ search_casks :: proc(query: string, limit: int = 25) -> (out: []Cask_Search_Resu
             }
         }
     } else {
-        data, read_err := fetch_cached_api_list(CASK_LIST_URL, CASK_LIST_CACHE)
+        data, read_err := fetch_cached_api_list(cask_list_url(), CASK_LIST_CACHE)
         if read_err == nil {
             defer delete(data)
             append_api_cask_matches_fast(data, &results, query_lower, limit)
@@ -2278,17 +2902,26 @@ fetch_urls_parallel_http2 :: proc(urls, out_files: []string, headers: []string, 
 }
 
 // fetch_single_with_etag downloads a single URL to out_file using curl's
-// --etag-compare and --etag-save. Returns true if the file was actually
-// downloaded (200 response), false if 304 Not Modified or on error.
-// The etag_file stores the ETag header value between runs.
-fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []string = nil) -> bool {
+// --etag-compare and --etag-save. Returns (written, completed): written is
+// true when the file was actually updated with new bytes (200 response)
+// versus a 304 Not Modified; completed is true when the curl transfer
+// finished cleanly (exit 0), covering both a fresh download and a genuine
+// 304. completed=false means the transfer failed, in which case an empty or
+// unchanged out_file is NOT a trustworthy "no-op" — the caller must not
+// treat it as a valid cache state. The etag_file stores the ETag header
+// value between runs.
+fetch_single_with_etag :: proc (url, out_file, etag_file: string, headers: []string = nil) -> (written: bool, completed: bool) {
     args := make([dynamic]string, context.temp_allocator)
     defer delete(args)
     append(&args, "curl")
     append(&args, "-sfL")
     append(&args, "--compressed")
     append(&args, "--http2")
-    if os.is_file(etag_file) {
+    // A 304 can only be received when the request carries a conditional
+    // ETag; record whether one existed so an empty output file afterwards
+    // can be told apart from an interrupted transfer.
+    had_conditional := os.is_file(etag_file)
+    if had_conditional {
         append(&args, "--etag-compare")
         append(&args, etag_file)
     }
@@ -2310,19 +2943,34 @@ fetch_single_with_etag :: proc(url, out_file, etag_file: string, headers: []stri
     }
 
     ok := platform.exec_cmd("curl", args[:])
-    if !ok { return false }
+    if !ok { return false, false }
     fi, fi_err := os.stat(out_file, context.temp_allocator)
-    if fi_err != nil || fi.size == 0 { return false }
-    return fi.size != pre_size || fi.modification_time != pre_mtime
+    if fi_err != nil { return false, false }
+    if fi.size == 0 {
+        // Empty output is a trustworthy "no-op" only when the transfer was
+        // conditional (a 304 was possible). Without an ETag sidecar the
+        // server could not have replied 304, so an empty file means no
+        // bytes arrived and the cache must not be committed as a snapshot.
+        return false, had_conditional
+    }
+    return fi.size != pre_size || fi.modification_time != pre_mtime, true
 }
 
 // fetch_etag_batch downloads multiple URLs sequentially in a single curl
 // process using --next between transfers. Each URL gets its own ETag file.
 // Saves one fork/exec per additional URL vs calling fetch_single_with_etag N
-// times. Returns true if any output file was actually written (200 response).
-fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []string) -> bool {
+// times. Returns:
+//   any_written — true when at least one out_file received new bytes (200).
+//   written     — per-URL flag of that; the caller owns the slice and must
+//                 delete() it with the caller's allocator.
+//   cmd_ok      — curl's exit status (true == the transfer completed
+//                 cleanly). With --next, a genuine 304 and a failed transfer
+//                 both leave out_file untouched, so a caller may treat
+//                 written[i] == false as a real no-op ONLY when cmd_ok is
+//                 true; otherwise the list is indeterminate.
+fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []string) -> (any_written: bool, written: []bool, cmd_ok: bool) {
     if len(urls) == 0 || len(urls) != len(out_files) || len(urls) != len(etag_files) {
-        return false
+        return false, nil, false
     }
 
     // Snapshot pre-transfer sizes AND mtimes so we can detect actual
@@ -2342,8 +2990,14 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
 
     args := make([dynamic]string, context.temp_allocator)
     defer delete(args)
+    // A per-URL 304 can only be received when that request carried a
+    // conditional ETag. Record which transfers were conditional so an
+    // empty output file afterwards can be told apart from an entry that
+    // never received bytes.
+    had_conditional := make([]bool, len(urls), context.temp_allocator)
 
     for i in 0..<len(urls) {
+        had_conditional[i] = os.is_file(etag_files[i])
         if i > 0 {
             append(&args, "--next")
         } else {
@@ -2352,6 +3006,13 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
         append(&args, "-sfL")
         append(&args, "--compressed")
         append(&args, "--http2")
+        // Fail the whole process on the first failed transfer. curl's
+        // default, when chaining transfers with --next, is to return the
+        // exit status of the LAST URL only — a failed formula transfer
+        // followed by a successful cask transfer would then report success
+        // and the caller could treat the empty formula staging file as a
+        // clean 304 no-op.
+        append(&args, "--fail-early")
         if os.is_file(etag_files[i]) {
             append(&args, "--etag-compare")
             append(&args, etag_files[i])
@@ -2368,21 +3029,53 @@ fetch_etag_batch :: proc(urls, out_files, etag_files: []string, headers: []strin
     }
 
     ok := platform.exec_cmd("curl", args[:])
-    if !ok { return false }
 
-    any_updated := false
-    for i in 0..<len(out_files) {
-        if fi, err := os.stat(out_files[i], context.temp_allocator); err == nil && fi.size > 0 {
-            // Either the byte count changed (200 with new payload) or
-            // the mtime advanced past the pre-snapshot (curl's write
-            // bumps mtime on every successful download). The mtime
-            // check covers in-place edits where size is unchanged.
+    written = make([]bool, len(urls), context.allocator)
+    any_written = false
+    if ok {
+        for i in 0..<len(out_files) {
+            fi, stat_err := os.stat(out_files[i], context.temp_allocator)
+            if stat_err != nil {
+                // The output file for this entry is missing; the outcome is
+                // indeterminate and must not be committed as a valid no-op.
+                ok = false
+                continue
+            }
+            if fi.size == 0 {
+                // Empty output is a genuine 304 no-op only when the request
+                // was conditional (ETag sidecar present). Without it the
+                // server could not have replied 304, so this entry received
+                // no bytes and is indeterminate.
+                if !had_conditional[i] {
+                    ok = false
+                }
+                continue
+            }
+            // Either the byte count changed (200 with new payload) or the
+            // mtime advanced past the pre-snapshot (curl's write bumps mtime
+            // on every successful download). The mtime check covers in-place
+            // edits where size is unchanged.
             if fi.size != pre_sizes[i] || fi.modification_time != pre_mtimes[i] {
-                any_updated = true
+                written[i] = true
+                any_written = true
             }
         }
     }
-    return any_updated
+    return any_written, written, ok
+}
+
+// cache_stale returns true when the per-formula/per-cask cache file at
+// `per_cache` should be re-fetched because the bulk list at `bulk_cache`
+// (formula.json / cask.json, refreshed by `ubrew update`) is newer than it.
+// Returns false when either file is missing or the per-file is at least as
+// new as the bulk list, so first-run and pre-update paths keep using the
+// per-file they already have.
+cache_stale :: proc(per_cache, bulk_cache: string) -> bool {
+    bulk_fi, bulk_err := os.stat(bulk_cache, context.temp_allocator)
+    if bulk_err != nil do return false
+    per_fi, per_err := os.stat(per_cache, context.temp_allocator)
+    if per_err != nil do return true
+    return time.time_to_unix(bulk_fi.modification_time) > time.time_to_unix(per_fi.modification_time)
 }
 
 // warm_formulae_cache_parallel batch-fetches the per-formula JSON files
@@ -2410,7 +3103,7 @@ warm_formulae_cache_parallel :: proc(names: []string) -> int {
         cache_path := fmt.tprintf("%s/formula-%s.json", API_CACHE_DIR, name)
         if !refresh && os.is_file(cache_path) {
             fi, fi_err := os.stat(cache_path, context.temp_allocator)
-            if fi_err == nil && fi.size > 0 {
+            if fi_err == nil && fi.size > 0 && !cache_stale(cache_path, FORMULA_LIST_CACHE) {
                 continue
             }
         }
@@ -2442,7 +3135,7 @@ warm_casks_cache_parallel :: proc(tokens: []string) -> int {
 		cache_path := fmt.tprintf("%s/cask-%s.json", API_CACHE_DIR, token)
 		if !refresh && os.is_file(cache_path) {
 			fi, fi_err := os.stat(cache_path, context.temp_allocator)
-			if fi_err == nil && fi.size > 0 {
+			if fi_err == nil && fi.size > 0 && !cache_stale(cache_path, CASK_LIST_CACHE) {
 				continue
 			}
 		}
@@ -2731,7 +3424,7 @@ refresh_homebrew_api_lists :: proc() -> bool {
 	}
 	append(&curl_args, "-o")
 	append(&curl_args, temp_file1)
-	append(&curl_args, FORMULA_LIST_URL)
+	append(&curl_args, formula_list_url())
 
 	// Second URL: cask.json
 	if os.is_file(CASK_LIST_CACHE) {
@@ -2740,7 +3433,7 @@ refresh_homebrew_api_lists :: proc() -> bool {
 	}
 	append(&curl_args, "-o")
 	append(&curl_args, temp_file2)
-	append(&curl_args, CASK_LIST_URL)
+	append(&curl_args, cask_list_url())
 
 	if !platform.exec_cmd("curl", curl_args[:]) {
 		return false
@@ -2748,14 +3441,22 @@ refresh_homebrew_api_lists :: proc() -> bool {
 
 	fi1, fi_err1 := os.stat(temp_file1, context.temp_allocator)
 	if fi_err1 == nil && fi1.size > 0 {
-		cp_args := []string{"cp", temp_file1, FORMULA_LIST_CACHE}
-		_ = platform.exec_cmd("cp", cp_args)
+		if data1, rerr := os.read_entire_file(temp_file1, context.allocator); rerr == nil {
+			payload1 := extract_api_payload(data1)
+			_ = os.write_entire_file(FORMULA_LIST_CACHE, payload1)
+			delete(payload1)
+			delete(data1)
+		}
 	}
 
 	fi2, fi_err2 := os.stat(temp_file2, context.temp_allocator)
 	if fi_err2 == nil && fi2.size > 0 {
-		cp_args := []string{"cp", temp_file2, CASK_LIST_CACHE}
-		_ = platform.exec_cmd("cp", cp_args)
+		if data2, rerr := os.read_entire_file(temp_file2, context.allocator); rerr == nil {
+			payload2 := extract_api_payload(data2)
+			_ = os.write_entire_file(CASK_LIST_CACHE, payload2)
+			delete(payload2)
+			delete(data2)
+		}
 	}
 
 	return os.is_file(FORMULA_LIST_CACHE) && os.is_file(CASK_LIST_CACHE)
@@ -2798,7 +3499,7 @@ tap_api_url :: proc(t: tap.Tap, owner_repo: string, suffix: string) -> string {
 }
 
 verify_tap_cache :: proc(t: tap.Tap) -> bool {
-	cache_path := fmt.tprintf("%s/cache/taps/%s/Formula_listing.json", "/opt/ubrew", t.name)
+	cache_path := fmt.tprintf("%s/cache/taps/%s/Formula_listing.json", platform.get_ubrew_root(), t.name)
 	data, rerr := os.read_entire_file(cache_path, context.allocator)
 	if rerr != nil {
 		return false
@@ -2985,17 +3686,10 @@ formula_available_on_current_os :: proc(platform_tag: string) -> bool {
 	return true
 }
 
-// cask_available_on_current_os returns true if a platform tag from the
-// cask search index indicates the cask is available on the current OS.
 cask_available_on_current_os :: proc(platform_tag: string) -> bool {
-	if len(platform_tag) == 0 || platform_tag == "A" || platform_tag == "LM" {
-		return true
-	}
-	when ODIN_OS == .Linux {
-		return platform_tag == "L"
-	} else when ODIN_OS == .Darwin {
-		return true // Allow searching/listing Linux casks on Darwin
-	}
+	// Allow searching and listing casks across platforms. On Linux, many casks
+	// (fonts, wall-papers, cross-platform binary archives like android-platform-tools)
+	// carry "M" tags in Homebrew's index, but are installable on Linux by ubrew.
 	return true
 }
 
@@ -3076,7 +3770,7 @@ build_search_db :: proc() -> bool {
 
 	os.make_directory_all(API_CACHE_DIR)
 
-	tmp_path := SEARCH_DB_PATH + ".tmp"
+	tmp_path := fmt.tprintf("%s.tmp", SEARCH_DB_PATH)
 
 	db: ^Connection
 	cpath := strings.clone_to_cstring(tmp_path, context.temp_allocator)
@@ -3662,5 +4356,44 @@ warm_mixed_cache_parallel :: proc(formula_names, cask_tokens: []string) -> int {
 	}
 	_ = fetch_urls_parallel_http2(urls[:], out_files[:], nil)
 	return len(urls)
+}
+
+format_bytes_human :: proc(bytes: i64, allocator := context.temp_allocator) -> string {
+	return formula.format_bytes_human(bytes, allocator)
+}
+
+get_remote_content_length :: proc(url: string) -> i64 {
+	if len(url) == 0 do return 0
+	temp_f, terr := os.create_temp_file("", "ubrew_head_*.txt")
+	if terr != nil do return 0
+	temp_file := strings.clone(os.name(temp_f), context.temp_allocator)
+	os.close(temp_f)
+	defer os.remove(temp_file)
+
+	// -L follows redirects (Homebrew bottle URLs on ghcr.io redirect), so the
+	// header dump contains every response in the chain. The first
+	// content-length belongs to the redirect (typically 0) — keep the LAST
+	// match, which is the final response's. -I implies HEAD, so -X HEAD is
+	// redundant.
+	args := []string{"curl", "-sIL", url, "-o", temp_file}
+	if !platform.exec_cmd("curl", args) do return 0
+
+	data, rerr := os.read_entire_file(temp_file, context.temp_allocator)
+	if rerr != nil do return 0
+
+	last: i64 = 0
+	lines := strings.split(string(data), "\n", context.temp_allocator)
+	for line in lines {
+		trimmed := strings.trim_space(line)
+		if strings.has_prefix(strings.to_lower(trimmed, context.temp_allocator), "content-length:") {
+			parts := strings.split(trimmed, ":", context.temp_allocator)
+			if len(parts) == 2 {
+				if val, ok := strconv.parse_int(strings.trim_space(parts[1])); ok {
+					last = i64(val)
+				}
+			}
+		}
+	}
+	return last
 }
 
