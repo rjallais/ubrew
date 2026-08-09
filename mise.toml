@@ -1,5 +1,5 @@
 [tools]
-odin = "dev-2026-07a"
+odin = "dev-2026-08"
 
 [env]
 UBREW_TELEMETRY = "0" # Disable telemetry in development environments

@@ -12,7 +12,13 @@ TAPS_DB_PATH:       string = "/opt/ubrew/db/taps.txt"
 TAPS_CACHE_DIR:     string = "/opt/ubrew/cache/taps"
 TRUSTED_TAPS_FILE:  string = "/opt/ubrew/db/trusted_taps.txt"
 
+tap_paths_initialized: bool = false
+
 init_paths :: proc() {
+	if tap_paths_initialized {
+		return
+	}
+	tap_paths_initialized = true
 	root := platform.get_ubrew_root()
 	TAPS_DB_PATH       = fmt.aprintf("%s/db/taps.txt", root)
 	TAPS_CACHE_DIR     = fmt.aprintf("%s/cache/taps", root)
@@ -264,7 +270,7 @@ shared_tap_lock :: proc() -> (posix.FD, bool) {
 		l_type   = posix.Lock_Type.WRLCK,
 		l_whence = c.short(0), // SEEK_SET
 	}
-	if posix.fcntl(fd, posix.FCNTL_Cmd.SETLKW, &fl) != 0 {
+	if posix.fcntl(fd, posix.FCNTL_Cmd.SETLK, &fl) != 0 {
 		posix.close(fd)
 		return -1, false
 	}
@@ -1082,7 +1088,7 @@ homebrew_trusted_taps_at :: proc(prefix: string) -> [dynamic]string {
 // The overlay is read-only — mutating commands must use
 // trusted_taps_load_own so Homebrew entries are never copied into
 // ubrew's file.
-trusted_taps_load :: proc() -> ([dynamic]string, bool) {
+trusted_taps_load :: proc() -> [dynamic]string {
 	names := make([dynamic]string, context.allocator)
 	load_trusted_file(TRUSTED_TAPS_FILE, &names)
 	homebrew := homebrew_trusted_taps()
@@ -1104,7 +1110,7 @@ trusted_taps_load :: proc() -> ([dynamic]string, bool) {
 			append(&names, strings.clone(n, context.allocator))
 		}
 	}
-	return names, false
+	return names
 }
 
 // trusted_taps_load_own returns only the entries owned by ubrew's own
@@ -1157,7 +1163,7 @@ tap_is_trusted :: proc(name: string) -> bool {
 	if no_require == "1" || strings.to_lower(no_require, context.temp_allocator) == "true" || strings.to_lower(no_require, context.temp_allocator) == "yes" {
 		return true
 	}
-	names, _ := trusted_taps_load()
+	names := trusted_taps_load()
 	defer {
 		for n in names {
 			delete(n)
@@ -1247,9 +1253,11 @@ tap_untrust :: proc(name: string) -> bool {
 		}
 	}
 	names := trusted_taps_load_own()
-	defer delete(names)
-	found := false
+	// new_names borrows the strings (shallow header copies) from names; the
+	// backing string allocations remain owned by names, so there is no
+	// ownership ambiguity and no per-element delete on new_names.
 	new_names := make([dynamic]string, context.allocator)
+	found := false
 	for n in names {
 		if n == name {
 			found = true
@@ -1258,12 +1266,21 @@ tap_untrust :: proc(name: string) -> bool {
 		}
 	}
 	trusted_taps_save(new_names)
-	delete(new_names)
+	// Free every trusted-tap string exactly once, after save has consumed
+	// new_names: delete the strings owned by names, then both dynamic-array
+	// backing stores.
+	defer {
+		for n in names {
+			delete(n)
+		}
+		delete(names)
+		delete(new_names)
+	}
 	return found
 }
 
 get_trusted_taps :: proc(allocator := context.allocator) -> []string {
-	names, _ := trusted_taps_load()
+	names := trusted_taps_load()
 	result := make([]string, len(names), allocator)
 	for n, i in names {
 		result[i] = strings.clone(n, allocator)

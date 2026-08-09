@@ -2558,11 +2558,11 @@ write_install_receipt :: proc(keg_dir: string, r: Install_Receipt) -> bool {
 		homebrew_version     = UBREW_HOMEBREW_VERSION,
 		built_as_bottle      = r.poured_from_bottle,
 		installed_as_dependency = !r.installed_on_request,
-		loaded_from_api      = true,
+		loaded_from_api      = false,
 		time                 = time.time_to_unix(time.now()),
 		used_options         = nil,
 		unused_options       = nil,
-		compiler             = "clang",
+		compiler             = r.poured_from_bottle ? "" : "clang",
 		source = {
 			path = "",
 			tap  = r.tap != "" ? r.tap : "homebrew/core",

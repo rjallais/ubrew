@@ -204,6 +204,16 @@ test_read_tap_ruby_from_clone_gated_by_mode :: proc(t: ^testing.T) {
 // Shared-mode tap add/remove against a real file:// git origin
 // ---------------------------------------------------------------------------
 
+git_available :: proc() -> bool {
+    // exec_cmd_capture's second return is the "truncated" flag, not a
+    // success flag; when git is missing the child exits non-zero and the
+    // captured output is empty, so a non-empty "git version ..." output is
+    // the reliable availability signal.
+    buf := make([]u8, 256, context.temp_allocator)
+    out, _ := platform.exec_cmd_capture("git", []string{"git", "--version"}, buf[:])
+    return len(out) > 0
+}
+
 git_cmd :: proc(args: ..string) -> bool {
     full := make([dynamic]string, context.temp_allocator)
     defer delete(full)
@@ -216,6 +226,10 @@ git_cmd :: proc(args: ..string) -> bool {
 
 @(test)
 test_shared_tap_add_clone_and_remove :: proc(t: ^testing.T) {
+    if !git_available() {
+        fmt.println("SKIP: git not available; skipping shared-mode tap test")
+        return
+    }
     sync.mutex_lock(&tap_state_mutex)
     defer sync.mutex_unlock(&tap_state_mutex)
 
@@ -298,6 +312,10 @@ test_shared_tap_add_clone_and_remove :: proc(t: ^testing.T) {
 
 @(test)
 test_ensure_shared_clone_tolerates_existing_user_dir :: proc(t: ^testing.T) {
+    if !git_available() {
+        fmt.println("SKIP: git not available; skipping shared-mode tap test")
+        return
+    }
     sync.mutex_lock(&tap_state_mutex)
     defer sync.mutex_unlock(&tap_state_mutex)
 
@@ -332,6 +350,10 @@ test_ensure_shared_clone_tolerates_existing_user_dir :: proc(t: ^testing.T) {
 
 @(test)
 test_tap_from_entry_shared_branch_is_owned :: proc(t: ^testing.T) {
+    if !git_available() {
+        fmt.println("SKIP: git not available; skipping shared-mode tap test")
+        return
+    }
     sync.mutex_lock(&tap_state_mutex)
     defer sync.mutex_unlock(&tap_state_mutex)
 
@@ -496,6 +518,10 @@ test_tap_remove_rejects_symlink :: proc(t: ^testing.T) {
 
 @(test)
 test_ensure_shared_clone_reclones_on_remote_mismatch :: proc(t: ^testing.T) {
+    if !git_available() {
+        fmt.println("SKIP: git not available; skipping shared-mode tap test")
+        return
+    }
     sync.mutex_lock(&tap_state_mutex)
     defer sync.mutex_unlock(&tap_state_mutex)
 

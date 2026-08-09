@@ -2572,8 +2572,13 @@ extract_owner_repo_from_github_url :: proc(url: string) -> string {
 }
 
 // listing_write_entry appends one {"name": "<name>"} entry to a synthesized
-// tap listing, inserting a comma separator between entries.
+// tap listing, inserting a comma separator between entries. Names containing
+// quotes or backslashes would break the JSON (or inject fields), so they are
+// skipped before any comma is written; valid names are written as before.
 listing_write_entry :: proc(b: ^strings.Builder, first: ^bool, name: string) {
+	if strings.contains(name, "\"") || strings.contains(name, "\\") {
+		return
+	}
 	if !first^ {
 		strings.write_string(b, ",")
 	}

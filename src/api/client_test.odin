@@ -77,6 +77,7 @@ test_synth_tap_listing_from_dir :: proc(t: ^testing.T) {
     _ = os.write_entire_file_from_string(fmt.tprintf("%s/Formula/wget.rb", fixture), "class Wget < Formula\nend\n")
     _ = os.write_entire_file_from_string(fmt.tprintf("%s/Formula/w/wget2.rb", fixture), "class Wget2 < Formula\nend\n")
     _ = os.write_entire_file_from_string(fmt.tprintf("%s/Casks/foo.rb", fixture), "cask \"foo\" do\nend\n")
+    _ = os.write_entire_file_from_string(fmt.tprintf("%s/wget2.rb", fixture), "class Wget2 < Formula\nend\n")
     _ = os.write_entire_file_from_string(fmt.tprintf("%s/bar.rb", fixture), "class Bar < Formula\nend\n")
     _ = os.write_entire_file_from_string(fmt.tprintf("%s/README.md", fixture), "not a formula")
 
@@ -92,9 +93,8 @@ test_synth_tap_listing_from_dir :: proc(t: ^testing.T) {
         testing.expectf(t, strings.contains(text, fmt.tprintf("\"%s\"", want)), "listing should contain %q, got %q", want, text)
     }
     testing.expectf(t, !strings.contains(text, "README"), "listing must not contain non-rb files, got %q", text)
-    // Dedupe: wget.rb must appear exactly once even though the root also
-    // holds .rb files (it appears only in Formula/ here — check count of
-    // the nested entry to prove no duplicate scanning).
+    // Dedupe: wget2.rb lives in both Formula/w/ and the clone root, two
+    // scanned directories — it must appear exactly once in the listing.
     testing.expectf(t, strings.count(text, "\"wget2.rb\"") == 1, "wget2.rb must appear exactly once, got %q", text)
 }
 

@@ -10,18 +10,36 @@ STORE_DIR           := "/opt/ubrew/store"
 STORE_RELOCATED_DIR := "/opt/ubrew/store-relocated"
 CELLAR_DIR          := platform.DEFAULT_HOMEBREW_PREFIX + "/Cellar"
 
+store_paths_initialized: bool = false
+
 init_paths :: proc() {
+	if store_paths_initialized {
+		return
+	}
+	store_paths_initialized = true
 	root := platform.get_ubrew_root()
 	STORE_DIR           = fmt.aprintf("%s/store", root)
 	STORE_RELOCATED_DIR = fmt.aprintf("%s/store-relocated", root)
 	CELLAR_DIR          = strings.clone(platform.get_cellar_dir(), context.allocator)
 }
 
+// bounded_path renders `format` into `buf` like fmt.bprintf, but returns ""
+// instead of a silently truncated result when `buf` is too small. The build
+// compiles asserts out (-disable-assert, -no-bounds-check) and fmt.bprintf
+// truncates an oversized result with no error signal, so callers must treat a
+// "" return as "could not render path" and bail before any os call.
+bounded_path :: proc(buf: []u8, format: string, args: ..any) -> string {
+	if len(buf) <= len(fmt.tprintf(format, ..args)) {
+		return ""
+	}
+	return fmt.bprintf(buf, format, ..args)
+}
+
 store_entry_path :: proc(sha256: string, buf: []u8) -> string {
 	if !is_valid_sha256(sha256) {
 		return ""
 	}
-	return fmt.bprintf(buf[:], "%s/%s", STORE_DIR, sha256)
+	return bounded_path(buf, "%s/%s", STORE_DIR, sha256)
 }
 
 store_ensure_dir :: proc() -> bool {
@@ -40,7 +58,7 @@ store_relocated_entry_path :: proc(sha256, prefix: string, buf: []u8) -> string 
 	if len(prefix) < 2 || prefix[0] != '/' {
 		return ""
 	}
-	return fmt.bprintf(buf[:], "%s%s/%s", STORE_RELOCATED_DIR, prefix, sha256)
+	return bounded_path(buf, "%s%s/%s", STORE_RELOCATED_DIR, prefix, sha256)
 }
 
 store_has_relocated_entry :: proc(sha256, prefix: string) -> bool {
@@ -66,7 +84,10 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 	}
 
 	src_buf: [512]u8
-	src_result := fmt.bprintf(src_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)
+	src_result := bounded_path(src_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)
+	if len(src_result) == 0 {
+		return false
+	}
 
 	dst_buf: [512]u8
 	dst_result := store_relocated_entry_path(sha256, prefix, dst_buf[:])
@@ -106,14 +127,23 @@ store_materialize_from_relocated :: proc(sha256: string, name: string, version: 
 	}
 
 	dst_buf: [512]u8
-	dst_result := fmt.bprintf(dst_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)
+	dst_result := bounded_path(dst_buf[:], "%s/%s/%s", CELLAR_DIR, name, version)
+	if len(dst_result) == 0 {
+		return false
+	}
 
 	parent_buf: [512]u8
-	parent_result := fmt.bprintf(parent_buf[:], "%s/%s", CELLAR_DIR, name)
+	parent_result := bounded_path(parent_buf[:], "%s/%s", CELLAR_DIR, name)
+	if len(parent_result) == 0 {
+		return false
+	}
 	os.make_directory_all(parent_result, os.perm(0o755))
 
 	tmp_buf: [512]u8
-	tmp_result := fmt.bprintf(tmp_buf[:], "%s/.%s.tmp", CELLAR_DIR, sha256)
+	tmp_result := bounded_path(tmp_buf[:], "%s/.%s.tmp", CELLAR_DIR, sha256)
+	if len(tmp_result) == 0 {
+		return false
+	}
 	_ = os.remove_all(tmp_result)
 	if !platform.cow_copy(src_result, tmp_result) {
 		_ = os.remove_all(tmp_result)

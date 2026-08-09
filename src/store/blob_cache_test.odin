@@ -55,3 +55,12 @@ test_blob_path_format :: proc(t: ^testing.T) {
     testing.expectf(t, result == expected,
         "expected %q, got %q", expected, result)
 }
+
+@(test)
+test_blob_path_undersized_buffer_returns_empty :: proc(t: ^testing.T) {
+    sha := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    buf: [8]u8
+    result := blob_path(sha, buf[:])
+    testing.expectf(t, result == "",
+        "undersized buffer must yield empty path, got %q", result)
+}

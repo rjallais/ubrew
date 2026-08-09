@@ -7,17 +7,13 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "../platform"
 
 // Runtime history path. Re-bound by init_paths() after platform.init_paths().
 HISTORY_FILE: string = "/opt/ubrew/db/history.json"
 
 init_paths :: proc() {
-	// Late import avoided: history is a leaf package; callers pass the
-	// resolved path or we rebuild from the conventional UBREW_ROOT env.
-	root := os.get_env("UBREW_ROOT", context.temp_allocator)
-	if root == "" {
-		root = "/opt/ubrew"
-	}
+	root := platform.get_ubrew_root()
 	HISTORY_FILE = fmt.aprintf("%s/db/history.json", root)
 }
 

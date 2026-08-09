@@ -18,6 +18,14 @@ base64url_decode :: proc(input: string, allocator := context.temp_allocator) -> 
 	s, _ := strings.replace_all(input, "-", "+", context.temp_allocator)
 	s, _ = strings.replace_all(s, "_", "/", context.temp_allocator)
 
+	// A base64 length residue of 1 mod 4 is never valid (each 4-char group
+	// encodes 3 bytes, and a 1-char remainder cannot encode even a partial
+	// byte even in the unpadded form). Reject it before any padding is
+	// appended, otherwise a malformed token would be padded into shape.
+	if (len(s) % 4) == 1 {
+		return "", false
+	}
+
 	pad := (4 - (len(s) % 4)) % 4
 	switch pad {
 	case 1: s = fmt.tprintf("%s=", s)

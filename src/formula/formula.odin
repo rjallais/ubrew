@@ -37,7 +37,7 @@ Formula :: struct {
 // are promoted to the next unit when display rounding would cross the
 // boundary (e.g. 1024*1024-1 bytes must not read "1024.0 KB").
 format_bytes_human :: proc(bytes: i64, allocator := context.temp_allocator) -> string {
-	if bytes <= 0 do return fmt.aprintf("%s", "N/A", allocator = allocator)
+	if bytes <= 0 do return "N/A"
 	if bytes < 1024 do return fmt.aprintf("%d B", bytes, allocator = allocator)
 	kb := f64(bytes) / 1024.0
 	if kb < 1024 {

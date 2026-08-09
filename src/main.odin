@@ -4505,7 +4505,7 @@ run_tap_migrate :: proc(args: []string) {
 
 	// 3. Repair trusted_taps.txt: drop entries that are not valid user/repo
 	//    tap names (e.g. the corrupted "https:/..." line).
-	trusted, _ := tap.trusted_taps_load()
+	trusted := tap.trusted_taps_load()
 	defer {
 		for n in trusted {
 			delete(n)
@@ -8913,7 +8913,7 @@ ubrew_primary_commands := []string{
     "version", "where", "which", "which-formula",
 }
 ubrew_alias_commands := []string{
-    "abv", "clean", "dr", "homepage", "i", "ln", "ls", "rm", "s",
+    "abv", "clean", "dr", "env", "homepage", "i", "ln", "ls", "rm", "s",
     "service", "ui", "uninstall", "up", "wh", "x",
 }
 
@@ -9439,7 +9439,12 @@ main :: proc() {
     }
 
     if cmd == "update" || cmd == "up" {
-        run_update(args_slice)
+        // Propagate run_update's snapshot result (W8): an explicit update
+        // must fail when the metadata snapshot could not be established,
+        // matching how install/upgrade abort on maybe_auto_update failure.
+        if !run_update(args_slice) {
+            os.exit(1)
+        }
         return
     }
 

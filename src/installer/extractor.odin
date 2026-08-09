@@ -119,7 +119,55 @@ rpm_extract_via_cpio :: proc(file_path, dest_dir: string) -> bool {
 	status2: c.int
 	posix.waitpid(pid1, &status1, nil)
 	posix.waitpid(pid2, &status2, nil)
-	return status1 == 0 && status2 == 0
+	// decode wait statuses: success only when each child exited normally
+	// with exit code 0 (a signal termination or crash must fail the copy).
+	return posix.WIFEXITED(status1) && posix.WEXITSTATUS(status1) == 0 &&
+	       posix.WIFEXITED(status2) && posix.WEXITSTATUS(status2) == 0
+}
+
+// extract_ar_members extracts only the named `members` from a .deb archive
+// (the data.tar payload) into out_dir. GNU binutils ar --output extracts to
+// the target directory in one exec; older GNU ar and FreeBSD ar lack it, so
+// fall back to a fork+chdir child whose file writes land in out_dir. Only
+// the requested members are ever extracted, so control tarballs and archive
+// junk are never left behind.
+extract_ar_members :: proc(file_path, out_dir: string, members: []string) -> bool {
+	args := make([dynamic]string, context.temp_allocator)
+	defer delete(args)
+	append(&args, "ar")
+	append(&args, "x")
+	append(&args, file_path)
+	append(&args, fmt.tprintf("--output=%s", out_dir))
+	for m in members {
+		append(&args, m)
+	}
+	if platform.exec_cmd("ar", args[:]) {
+		return true
+	}
+
+	// Fallback: chdir in a child process and re-run `ar x <member>` so the
+	// extracted members land in out_dir without --output.
+	pid := posix.fork()
+	if pid < 0 {
+		return false
+	}
+	if pid == 0 {
+		if posix.chdir(strings.clone_to_cstring(out_dir, context.temp_allocator)) == .OK {
+			fargs := make([]cstring, 3 + len(members), context.temp_allocator)
+			fargs[0] = strings.clone_to_cstring("ar", context.temp_allocator)
+			fargs[1] = strings.clone_to_cstring("x", context.temp_allocator)
+			fargs[2] = strings.clone_to_cstring(file_path, context.temp_allocator)
+			for m, i in members {
+				fargs[3 + i] = strings.clone_to_cstring(m, context.temp_allocator)
+			}
+			fargs[len(fargs) - 1] = nil
+			posix.execvp(fargs[0], &fargs[0])
+		}
+		posix.exit(1)
+	}
+	status: c.int
+	posix.waitpid(pid, &status, nil)
+	return posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0
 }
 
 extract_package :: proc(file_path, dest_dir: string, format: Package_Format) -> bool {
@@ -129,10 +177,19 @@ extract_package :: proc(file_path, dest_dir: string, format: Package_Format) -> 
 		_ = os.make_directory_all(tmp_dir, os.perm(0o755))
 		defer os.remove_all(tmp_dir)
 
-		// Extract the .deb contents into tmp_dir using ar. GNU binutils
-		// supports --output=; on failure we return false (the previous code
-		// had a `cd`-based fallback that we cannot express without shell).
-		if !platform.exec_cmd("ar", []string{"ar", "x", file_path, fmt.tprintf("--output=%s", tmp_dir)}) {
+		// Extract only the data.tar payload members (never control.tar.* or
+		// other archive junk) via `ar x <data.tar*>` into tmp_dir. Works on
+		// GNU ar with --output and falls back to a chdir wrapper where
+		// --output is unsupported (older GNU, FreeBSD ar).
+		data_members := []string{
+			"data.tar",
+			"data.tar.gz",
+			"data.tar.xz",
+			"data.tar.bz2",
+			"data.tar.zst",
+			"data.tar.lzma",
+		}
+		if !extract_ar_members(file_path, tmp_dir, data_members) {
 			return false
 		}
 
