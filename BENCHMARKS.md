@@ -567,3 +567,124 @@ Following the implementation of parallelized API list refreshing and payload com
 1. **Cold-Update Slashed by 5.51×**: The first cold cache run dropped from 7.347s to 1.328s via single-connection multiplexed parallel download phase.
 2. **Deterministic execution**: Standard deviation reduced to 448.7ms (down from 3.898s) due to payload reduction eliminating network variance.
 3. **Warm/Cached Efficiency**: Warm check executes in 538.3ms, which is fully competitive with official Homebrew and Ubrew.
+
+## Round 6 — ubrew v0.2.0 vs Homebrew 6.x (hyperfine, Linux x86_64)
+
+First head-to-head of **ubrew 0.2.0** (Odin, aggressive build) against **Homebrew 6.0.15** on
+Linux x86_64, measured with `hyperfine` (harness: `bench/bench_ubrew_vs_brew.sh`).
+
+Host: Intel Core i7-8550U (8 cores), stable internet, `HOMEBREW_NO_AUTO_UPDATE=1`,
+`HOMEBREW_NO_INSTALL_CLEANUP=1`, `UBREW_TELEMETRY=0`. ubrew kegs live in
+`$PREFIX/Cellar` (own staging prefix `/opt/ubrew/prefix`), brew kegs in
+`$PREFIX/Homebrew/Cellar` (bin in `$PREFIX/bin`). Package: `tree` (no deps). All numbers are
+means of N runs; ± = one standard deviation across runs (includes network variance for
+update/cold).
+
+| scenario | ubrew 0.2.0 | brew 6.0.15 | speedup | runs |
+|---|---:|---:|---:|---:|
+| `version` startup | 1.9 ms | 69.9 ms | **36x** | 10 |
+| `info tree` | 2.6 ms | 937.6 ms | **359x** | 10 |
+| `search tree` | 110.4 ms | 1.103 s | **10x** | 10 |
+| `install tree` (no-op, installed) | 2.9 ms | 786.7 ms | **267x** | 10 |
+| `update` | 7.915 s | 2.080 s | **0.26x** (brew 3.8x faster) | 5 |
+| `install tree` warm (keg removed, caches kept) | 19.9 ms | 1.422 s | **72x** | 5 |
+| `install tree` cold (keg + blob/store/bottle caches wiped) | 323.1 ms | 4.475 s | **14x** | 3 |
+
+### Notes
+
+- **ubrew wins everything except `update`.** The `update` regression (7.9s vs 2.1s) is the known
+  cold-cache case: ubrew re-fetches the 14-tap GitHub Contents API listings, while brew's
+  `update` is a git fetch of two repos. Warm ubrew updates with populated tap caches are faster
+  (see Round 5 P12: 538ms).
+- **`search` is the least lopsided win** (10x): ubrew scans a TSV/SQLite index; brew shells to
+  Ruby + API JSON. **`info`** is dominated by brew's interpreter + API decode (938ms vs 2.6ms).
+- **Warm install 19.9ms** uses the COW store-relocated cache; brew's warm reinstall is 71x
+  slower mostly due to Ruby startup + keg extraction/cleanup.
+- **Cold install 323ms vs 4.48s**: ubrew downloads (curl, single TLS), extracts natively, and
+  relocates; brew pays Ruby startup + `ghcr.io` fetch + rubygem extraction + post-install hooks.
+  Network variance visible in σ (65ms ubrew / 566ms brew).
+
+### Notes & caveats
+
+- Version strings are now pinned to **0.2.0**: `ubrew version` prints `ubrew 0.2.0`, and
+  install receipts get `homebrew_version: "0.2.0"` via `UBREW_HOMEBREW_VERSION` in
+  `src/installer/installer.odin`. `Formula/ubrew.rb` is also at `version "0.2.0"` and pulls the
+  released `ubrew-linux-x86_64.tar.gz` (sha256 `b7beea5d…b9ca`) with a patchelf-based runtime
+  relink. ⚠ The v0.2.0 release asset itself still prints `ubrew 0.1.0` — it was cut before this
+  session's version bump, so re-cut the release when shipping the next artifact.
+- Interop quirk found: brew 6.x rejects ubrew-written kegs ("is not a valid keg") when the
+  `INSTALL_RECEIPT.json` `homebrew_version` is "ubrew-0.1.0" (old receipt format). The source
+  now writes `0.2.0` per the AGENTS.md rule.
+- `brew install` runs with auto-update disabled to make the no-op/warm comparisons
+  deterministic; real-world brew (with auto-update) is occasionally slower.
+
+### Reproducing
+
+```bash
+bash bench/bench_ubrew_vs_brew.sh           # full suite, default runs
+RUNS_FAST=20 bash bench/bench_ubrew_vs_brew.sh   # more samples for fast scenarios
+# results written to bench/results/<timestamp>/ as .md + .json
+```
+
+## Round 7 — `update` regression fixed: parallel shared-mode tap pulls (hyperfine)
+
+Round 6's only regression was `update` (7.915 s vs brew 2.080 s — brew 3.8x faster). Root cause
+found by sampling the process tree during `ubrew update`: in **Shared mode** (`tap.mode() ==
+.Shared`, ubrew managing the git clones inside brew's own `Library/Taps`) `run_update` pulled
+every trusted tap clone **sequentially** with `git pull --ff-only`. Each pull is a full remote
+`git fetch` (~1–2 s each), so a dozen taps serialized to ~10–15 s.
+
+Fix (`src/main.odin` + `src/platform/copy.odin`):
+- Replaced the sequential loop with a bounded fan-out: up to 8 `git pull --ff-only` children run
+  concurrently (`platform.exec_cmd_async` for fork+exec without wait, `platform.wait_pid_ok` for
+  the reap), with per-slot PID tracking so a mid-window fork failure can't shift result
+  accounting. Before/after HEAD comparisons keep the identical "Updated N taps (…)" /
+  up-to-date / failed messages as the sequential version.
+- The legacy sequential Shared-mode branch is now a plain `continue` guard, so each tap is
+  pulled exactly once.
+- **304 skip**: when `formula.json`/`cask.json` come back Not Modified (0-byte staging file),
+  the in-memory API diff (`load_api_name_map` on the 30+ MB cached dumps) is skipped — no
+  point parsing the old snapshot byte-for-byte when the payload didn't change.
+
+Re-benchmark: same harness flags as Round 6 (hyperfine, `--prepare "true"`, 5 runs + 1 warmup):
+
+| scenario | ubrew 0.2.0 (fixed) | brew 6.0.15 | Round 6 ubrew | Δ vs brew |
+|---|---:|---:|---:|---:|
+| `update` | **2.636 s ± 0.308** | 2.281 s ± 0.082 | 7.915 s | 3.8x slower → **1.16x slower** (parity) |
+
+`ubrew update` is ~3x faster end-to-end (7.915 s → 2.636 s; range 2.293–2.948 s). Results:
+`bench/results/round7-parallel-pulls/5-update.json` / `5-update.md`.
+
+The residual ~0.35 s over brew is structural, not a bug: ubrew fetches each of the 10 trusted
+tap clones (a raw 10-way concurrent `git fetch` floor against GitHub was measured at ~2.7 s),
+whereas brew's `update` only refreshes the two `homebrew/` core repos.
+
+## Round 8 — auto-update freshness gate fix (source-level, not a `update`-invariant)
+
+While profiling `update`, a second bug surfaced in the *auto-update* path (`may_auto_update`,
+used by install/upgrade): the 24 h freshness gate keys off `db/upstream.json`'s mtime, but the
+marker was only advanced when the file actually changed (200 response + rename). On the common
+no-change case (curl `-z` → 304), the marker never moved, so every auto-update re-ran the whole
+network + tap pull path. Fixed: after a clean snapshot (304 no-op included), `upstream.json`'s
+mtime is advanced (`os.chtimes`), so installs/upgrades properly skip the refresh within the
+`HOMEBREW_AUTO_UPDATE_SECS` (default 24 h) window. An explicit `ubrew update` always refreshes
+(bails to `force` semantics) — matching Homebrew's behavior.
+
+## Round 9 — `upgrade` / `autoremove` (hyperfine, Linux x86_64)
+
+Same harness and flags as Rounds 6–7 (`bench/bench_ubrew_vs_brew.sh` scenarios 8–10): warm,
+deterministic **no-op** runs — there is nothing to upgrade and nothing to remove. The harness
+clears both `tree` kegs before the upgrade/autoremove scenarios (`--prepare`), because brew
+aborts `upgrade`/`autoremove` when it encounters a ubrew-written keg with an incompatible
+install receipt ("is not a valid keg" interop quirk); with the kegs gone it treats the registry
+as empty, exactly like ubrew.
+
+| scenario | ubrew 0.2.0 | brew 6.0.15 | speedup | runs |
+|---|---:|---:|---:|---:|
+| `upgrade --formulae` (no-op) | 274.3 ms ± 27.3 | 638.1 ms ± 44.2 | **2.3x** | 5 |
+| `upgrade --casks` (no-op) | 163.7 ms ± 22.7 | 1.130 s ± 0.146 | **6.9x** | 5 |
+| `autoremove` (no-op) | 43.3 ms ± 7.8 | 911.4 ms ± 82.2 | **21.1x** | 10 |
+
+ubrew's `autoremove` is essentially an index scan (35–60 ms); brew's 0.9 s is Ruby startup plus
+a full dependency-graph reconciliation. These are no-op numbers — a real upgrade/removal would
+include download + keg work on both sides.

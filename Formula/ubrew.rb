@@ -1,61 +1,42 @@
 class Ubrew < Formula
-  desc "The fastest macOS package manager. Written in Odin."
+  desc "The fastest package manager. Written in Odin."
   homepage "https://github.com/rjallais/ubrew"
   license "Apache-2.0"
-  version "0.1.0"
+  version "0.2.0"
 
   on_macos do
+    # No v0.2.0 macOS artifacts are published yet. The URLs below track the
+    # release layout; fill the real SHA256 (and remove the TODO) when a macOS
+    # build exists. Until then macOS installs fail loudly at download.
     if Hardware::CPU.arm?
-      url "https://github.com/rjallais/ubrew/releases/download/v0.1.0/ubrew-arm64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # TODO: replace with real SHA256 before merging/releasing
+      url "https://github.com/rjallais/ubrew/releases/download/v0.2.0/ubrew-arm64-apple-darwin.tar.gz"
+      sha256 "PLACEHOLDER" # TODO: real SHA256 once a macOS v0.2.0 asset ships
     else
-      url "https://github.com/rjallais/ubrew/releases/download/v0.1.0/ubrew-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # TODO: replace with real SHA256 before merging/releasing
+      url "https://github.com/rjallais/ubrew/releases/download/v0.2.0/ubrew-x86_64-apple-darwin.tar.gz"
+      sha256 "PLACEHOLDER" # TODO: real SHA256 once a macOS v0.2.0 asset ships
     end
   end
 
   on_linux do
-    url "https://github.com/rjallais/ubrew/archive/9db7d00eca63eadc56b42bb65757cc0a30a45fe3.tar.gz"
-    sha256 "63b84ad6b59b7efbafd62fb5b54d0d922d79bb0860c760db048794de4b82a1d0"
-
-    depends_on "odin" => :build
+    # v0.2.0 is a prebuilt Linux binary release (ubrew + libsqlite3-fts5.so).
+    url "https://github.com/rjallais/ubrew/releases/download/v0.2.0/ubrew-linux-x86_64.tar.gz"
+    sha256 "b7beea5d27117447b8593c76a596f1ca1311b9ef1369cf4438bead5acb64b9ca"
     depends_on "patchelf" => :build
-
-    resource "sqlite-amalgamation" do
-      url "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip"
-      sha256 "6cebd1d8403fc58c30e93939b246f3e6e58d0765a5cd50546f16c00fd805d2c3"
-    end
   end
 
   def install
     if OS.linux?
-      # Build libsqlite3-fts5.so from the SQLite amalgamation with FTS5 support
-      odin_sqlite_dir = buildpath/"src/vendor/odin-sqlite3"
-      odin_sqlite_dir.mkpath # ensure the target dir exists (defensive)
-      resource("sqlite-amalgamation").stage do
-        system ENV.cc, "-c", "-O2", "-fPIC", "-DSQLITE_ENABLE_FTS5",
-               "sqlite3.c", "-o", "sqlite3-fts5.o"
-        system ENV.cc, "-shared", "sqlite3-fts5.o", "-lm",
-               "-o", odin_sqlite_dir/"libsqlite3-fts5.so"
-        system "strip", odin_sqlite_dir/"libsqlite3-fts5.so"
-      end
-
-      # Build ubrew with the custom FTS5 library.
-      # Odin embeds the absolute build-path of the .so as DT_NEEDED.
-      # We add an explicit RUNPATH for #{lib} and fix up the NEEDED entry
-      # with patchelf so the binary finds the .so at its installed location.
-      system "odin", "build", "src", "-out:ubrew",
-             "-define:SQLITE3_CUSTOM_FTS5=true",
-             "-o:speed", "-no-bounds-check",
-             "-extra-linker-flags:-Wl,-rpath,#{lib}"
-
-      # Fix the DT_NEEDED from absolute build path -> bare library name
-      old_needed = odin_sqlite_dir/"libsqlite3-fts5.so"
-      system "patchelf", "--replace-needed", old_needed.to_s, "libsqlite3-fts5.so",
-             "ubrew"
-
       bin.install "ubrew"
-      lib.install odin_sqlite_dir/"libsqlite3-fts5.so"
+      lib.install "libsqlite3-fts5.so"
+      # The released binary embeds the *absolute* build-time path of
+      # libsqlite3-fts5.so as DT_NEEDED. Rewrite it to a bare name and add
+      # #{lib} to the RUNPATH so the loader finds the library at install time.
+      # (The NEEDED string is fixed for a given release tarball; if the
+      # artifact is rebuilt, this path must be updated to match.)
+      system "patchelf", "--replace-needed",
+             "/run/media/rjallais/TOSHIBA-500/nanobrew-src/src/vendor/odin-sqlite3/libsqlite3-fts5.so",
+             "libsqlite3-fts5.so", bin/"ubrew"
+      system "patchelf", "--add-rpath", lib.to_s, bin/"ubrew"
     else
       bin.install "ubrew"
     end
