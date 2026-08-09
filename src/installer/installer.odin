@@ -559,6 +559,42 @@ relocate_keg_placeholders :: proc(dir: string) -> bool {
 	return true
 }
 
+// normalize_unpacked_keg_dir post-processes a bottle tarball unpack under
+// Cellar/<name>/. Homebrew bottles normally unpack to
+// Cellar/<name>/<version>/ directly, but some (older or third-party)
+// bottles use a different top-level directory name and need a rename.
+//
+// The Cellar is shared with Homebrew and can hold several version kegs, so
+// this must only ever rename the directory the current unpack created —
+// `existing` maps directory names that were already present before the
+// unpack. Never touch a pre-existing keg.
+normalize_unpacked_keg_dir :: proc(formula_cellar_dir: string, version: string, existing: map[string]bool) {
+	infos, read_err := os.read_directory_by_path(formula_cellar_dir, -1, context.allocator)
+	if read_err != nil {
+		return
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+
+	for info in infos {
+		if info.type != .Directory {
+			continue
+		}
+		if info.name == version {
+			// Bottle layout already matches — nothing to do.
+			return
+		}
+		if info.name in existing {
+			// Pre-existing keg (e.g. an older Homebrew install): leave it.
+			continue
+		}
+		dst_path := fmt.tprintf("%s/%s", formula_cellar_dir, version)
+		if rename_err := os.rename(info.fullpath, dst_path); rename_err != nil {
+			fmt.printf("Warning: Failed to rename unpacked directory from %s to %s: %v\n", info.name, version, rename_err)
+		}
+		return
+	}
+}
+
 install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> bool {
 	fmt.printf("==> Installing bottle: %s %s\n", f.name, f.version)
 
@@ -634,25 +670,24 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		_ = os.remove_all(keg_dir)
 
 		fmt.printf("==> Unpacking to: %s\n", cellar_dir)
-		ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
-		if platform.exec_cmd("tar", ex_args) {
-			if fd, fd_err := os.open(formula_cellar_dir); fd_err == nil {
-				defer os.close(fd)
-				if infos, read_err := os.read_directory_by_path(formula_cellar_dir, -1, context.temp_allocator); read_err == nil {
-					for info in infos {
-						if info.type == .Directory {
-							if info.name != f.version {
-								src_path := info.fullpath
-								dst_path := fmt.tprintf("%s/%s", formula_cellar_dir, f.version)
-								if rename_err := os.rename(src_path, dst_path); rename_err != nil {
-									fmt.printf("Warning: Failed to rename unpacked directory from %s to %s: %v\n", info.name, f.version, rename_err)
-								}
-							}
-							break
-						}
-					}
+		// Snapshot the keg directories present before unpacking, so the
+		// post-unpack rename can only ever move the directory this tar
+		// creates — never a pre-existing keg (the Cellar is shared with
+		// Homebrew and holds several versions).
+		existing_kegs := make(map[string]bool)
+		defer delete(existing_kegs)
+		if existing_infos, existing_err := os.read_directory_by_path(formula_cellar_dir, -1, context.allocator); existing_err == nil {
+			defer os.file_info_slice_delete(existing_infos, context.allocator)
+			for info in existing_infos {
+				if info.type == .Directory {
+					existing_kegs[info.name] = true
 				}
 			}
+		}
+
+		ex_args := []string{"tar", "-xzf", dl_path, "-C", cellar_dir}
+		if platform.exec_cmd("tar", ex_args) {
+			normalize_unpacked_keg_dir(formula_cellar_dir, f.version, existing_kegs)
 		} else {
 			if !ensure_dir(keg_dir) {
 				return false
