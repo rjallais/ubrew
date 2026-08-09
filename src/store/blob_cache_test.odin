@@ -4,7 +4,9 @@ package store
 // Run with: odin test src/store
 
 import "core:fmt"
+import "core:os"
 import "core:testing"
+import "../platform"
 
 // ---------------------------------------------------------------------------
 // is_valid_sha256
@@ -63,4 +65,31 @@ test_blob_path_undersized_buffer_returns_empty :: proc(t: ^testing.T) {
     result := blob_path(sha, buf[:])
     testing.expectf(t, result == "",
         "undersized buffer must yield empty path, got %q", result)
+}
+
+// ---------------------------------------------------------------------------
+// init_blob_paths / runtime-root rebinding
+// ---------------------------------------------------------------------------
+
+// A non-default runtime root must re-bind BLOBS_DIR via init_blob_paths()
+// (store.init_paths() calls it), so the blob cache follows UBREW_ROOT
+// overrides instead of staying pinned to the compile-time default.
+@(test)
+test_blob_path_rebound_with_custom_root :: proc(t: ^testing.T) {
+    testing.expect(t, os.set_env("UBREW_ROOT", "/tmp/ubrew-blob-test") == nil,
+        "set UBREW_ROOT")
+    defer os.set_env("UBREW_ROOT", "")
+
+    platform.init_paths()
+    init_blob_paths()
+
+    sha := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    buf: [512]u8
+    result := blob_path(sha, buf[:])
+    expected := fmt.tprintf("%s/cache/blobs/%s", "/tmp/ubrew-blob-test", sha)
+    testing.expectf(t, result == expected,
+        "expected %q, got %q", expected, result)
+
+    // Restore the baseline so sibling tests keep their default-root value.
+    BLOBS_DIR = platform.DEFAULT_UBREW_ROOT + "/cache/blobs"
 }

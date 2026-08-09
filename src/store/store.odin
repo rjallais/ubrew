@@ -21,6 +21,10 @@ init_paths :: proc() {
 	STORE_DIR           = fmt.aprintf("%s/store", root)
 	STORE_RELOCATED_DIR = fmt.aprintf("%s/store-relocated", root)
 	CELLAR_DIR          = strings.clone(platform.get_cellar_dir(), context.allocator)
+	// Blob cache must follow the same runtime root; without this the
+	// package-scope BLOBS_DIR stays pinned to DEFAULT_UBREW_ROOT and blob
+	// cache reads/writes land in the wrong prefix under UBREW_ROOT overrides.
+	init_blob_paths()
 }
 
 // bounded_path renders `format` into `buf` like fmt.bprintf, but returns ""
@@ -57,6 +61,25 @@ store_relocated_entry_path :: proc(sha256, prefix: string, buf: []u8) -> string 
 	}
 	if len(prefix) < 2 || prefix[0] != '/' {
 		return ""
+	}
+	// Reject any "." / ".." / empty segment so a crafted prefix can never
+	// lift the entry path out of STORE_RELOCATED_DIR (e.g. "/../../../tmp").
+	{
+		start: int = 1
+		for start < len(prefix) {
+			end := start
+			for end < len(prefix) && prefix[end] != '/' {
+				end += 1
+			}
+			segment := prefix[start:end]
+			if segment == "" || segment == "." || segment == ".." {
+				return ""
+			}
+			if end == len(prefix) {
+				break
+			}
+			start = end + 1
+		}
 	}
 	return bounded_path(buf, "%s%s/%s", STORE_RELOCATED_DIR, prefix, sha256)
 }
