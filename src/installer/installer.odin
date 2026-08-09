@@ -2382,7 +2382,11 @@ Homebrew_Tab_Bottle_File :: struct {
 // the two receipts always agree. It must be a bare, Homebrew-compatible
 // version value ("0.1.0"): Homebrew receipt readers parse this field as a
 // version number, so a "ubrew"-prefixed "ubrew 0.1.0" would be misread.
-UBREW_HOMEBREW_VERSION :: "0.1.0"
+// UBREW_HOMEBREW_VERSION is the version recorded in Homebrew install receipts.
+// It reads the same build define as the main binary's banner/version command
+// (set by the release pipeline from the calendar-SemVer tag, e.g. 2026.8.1),
+// falling back to the default for local/dev builds.
+UBREW_HOMEBREW_VERSION :: #config(UBREW_VERSION, "0.2.0")
 
 build_tab_receipt :: proc(f: formula.Formula, keg_dir: string, brewed_from_bottle: bool, on_request: bool) -> Homebrew_Tab_Receipt {
 	tab := Homebrew_Tab_Receipt {

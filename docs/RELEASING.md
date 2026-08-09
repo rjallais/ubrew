@@ -1,79 +1,130 @@
 # Releasing ubrew
 
-## Homebrew formula and GitHub Releases
+## Version notation (calendar SemVer)
 
-Installs via Homebrew use `Formula/ubrew.rb`, which downloads prebuilt tarballs from **GitHub Releases**:
+Versions use the calendar-SemVer notation popularised by mise and similar
+to Odin's dev builds: **`vYYYY.M.PATCH`** on the git tag (e.g.
+`v2026.8.1`), where `YYYY` is the year, `M` the month, and `PATCH` a
+monotonic counter within the month. The version embedded in the binary and
+in the Homebrew formula is the bare `YYYY.M.PATCH` (no `v` prefix).
 
-```text
-https://github.com/rjallais/ubrew/releases/download/v<VERSION>/ubrew-<arch>-apple-darwin.tar.gz
-```
+- `ubrew --version` / `ubrew version` print `ubrew YYYY.M.PATCH`.
+- `Formula/ubrew.rb` carries `version "YYYY.M.PATCH"`.
+- The binary's version is compiled in at build time via
+  `-define:UBREW_VERSION=YYYY.M.PATCH` (see `src/main.odin` /
+  `src/installer/installer.odin`). Local, non-release builds fall back to
+  the in-source default and need no define.
+- Prerelease tags append a suffix: `v2026.8.1-rc.1` (SemVer style).
 
-**Rule:** The `version`, `url`, and `sha256` fields in `Formula/ubrew.rb` must match a **published** release whose assets are already uploaded. Bumping the formula to a version that has no release (or missing assets) breaks `brew install ubrew` with HTTP 404 (see issue #157).
+## Release flow (fully automated, Linux)
 
-### Recommended flow (automated)
-
-1. Push an annotated tag: `git tag v0.1.xxx && git push origin v0.1.xxx`
-2. The [Release workflow](../.github/workflows/update-formula.yml) builds macOS/Linux binaries, **creates the GitHub Release**, uploads assets, then opens a PR that updates `Formula/ubrew.rb` with the correct URLs and SHA256s.
-3. Merge that formula PR after CI passes.
-
-The `update-formula` job runs **after** the release is created, so tag-driven releases keep the formula aligned.
-
-## Beta releases
-
-Use prerelease tags for beta builds:
+Push an annotated tag and CI does the rest:
 
 ```bash
-git tag v0.1.193-beta.1
-git push origin v0.1.193-beta.1
+git tag -a v2026.8.1 -m "ubrew v2026.8.1"
+git push origin v2026.8.1
 ```
 
-Publish the GitHub Release as a **pre-release** and do not update `Formula/ubrew.rb` for that tag. `ubrew update` installs from GitHub's latest stable release endpoint, so prereleases are not selected by the self-update install path. The background update banner reads `https://ubrew.trilok.ai/version`; keep that endpoint pointed at the latest stable version only.
+The [Release workflow](../.github/workflows/release.yml) then, in one run
+on `ubuntu-latest`:
 
-If the release workflow is re-enabled, beta tags must not run the formula-update job. Tags containing a prerelease suffix such as `-beta.1`, `-rc.1`, or any other hyphenated SemVer suffix should create a GitHub prerelease and skip Homebrew formula promotion.
+1. **Builds** the release binary with `-define:UBREW_VERSION=<version>`
+   (`-o:speed -no-bounds-check`, no CPU-specific microarch flags), using
+   `scripts/build-release-assets.sh`.
+2. **Relocates** the artifact: rewrites the binary's `DT_NEEDED` for
+   `libsqlite3-fts5.so` to the bare name and sets `RUNPATH $ORIGIN/../lib`,
+   so the tarball is self-contained and the formula no longer needs
+   `patchelf` at install time.
+3. **Smoke-tests** the staged binary from a Homebrew-style `{bin,lib}`
+   layout and asserts the compiled-in version.
+4. **Publishes** the GitHub Release with
+   `ubrew-linux-x86_64.tar.gz` and its `.sha256` sidecar (generated notes).
+5. **Bumps the formula** `Formula/ubrew.rb` via `scripts/update-formula.sh`
+   (version + Linux URL/SHA256), verifies it against the release assets via
+   `scripts/verify-formula-release.sh --local-dir`, and opens
+   `release/formula-<tag>` → `main` PR.
+
+### Prereleases
+
+Tags containing a hyphen (e.g. `v2026.8.1-rc.1`) are published as GitHub
+**prereleases** and the formula bump is skipped. Stable `ubrew update`
+flows and `Formula/ubrew.rb` only ever point at stable releases, so
+prereleases are never auto-promoted.
 
 ## Safe rollout policy
 
-Regular users should only receive stable binaries and stable registry resolutions.
+- Stable binary channel: non-prerelease GitHub Releases only. These are
+  the only releases `ubrew update`, the update banner, and
+  `Formula/ubrew.rb` promote.
+- Beta binary channel: prerelease GitHub Releases only. Installed manually
+  from the release page.
+- The background update banner reads `https://ubrew.trilok.ai/version`;
+  keep that endpoint pointed at the latest stable version only.
 
-- Stable binary channel: non-prerelease GitHub Releases only. These are the only releases that `ubrew update`, the update banner, and `Formula/ubrew.rb` should promote.
-- Beta binary channel: prerelease GitHub Releases only. These are installed manually from the release page or by an explicit beta command in the future.
-- Stable registry channel: `registry/upstream.json` on `main`. Treat this as production data because released `ubrew` binaries may fetch it remotely and cache it for six hours.
-- Beta registry channel: a branch or alternate URL passed through `UBREW_UPSTREAM_REGISTRY_URL`. Use this for new resolver classes, broad top-N expansion, or records that have not passed install benchmarks.
-- Local/offline channel: `UBREW_DISABLE_UPSTREAM_REGISTRY_REMOTE=1` uses only the embedded fallback, and `UBREW_DISABLE_UPSTREAM=1` disables upstream registry resolution entirely.
+## macOS
 
-Promotion rule: a record or resolver class can move from beta to stable only after it has deterministic verification, fallback behavior, runtime `ubrew info` checks, cold install benchmarks, and at least one beta/prerelease soak. If a stable record causes trouble, revert the hosted registry entry first; released clients will fall back after their cache expires or immediately when users set `UBREW_DISABLE_UPSTREAM=1`.
+macOS artifacts are **not** built by CI yet. The formula keeps the macOS
+URL layout but with `PLACEHOLDER` SHAs (macOS installs fail loudly until a
+macOS asset exists). When macOS assets are uploaded to a release, either:
 
-### Manual formula edits
+- re-run the manual [`Update Formula`](../.github/workflows/update-formula.yml)
+  workflow, or
+- run the scripts locally:
+
+```bash
+UBREW_VERSION=2026.8.1 UBREW_LINUX_SHA256=<...> \
+UBREW_MACOS_ARM_SHA256=<...> UBREW_MACOS_X86_SHA256=<...> \
+bash scripts/update-formula.sh
+```
+
+## Manual formula edits
 
 If you edit `Formula/ubrew.rb` by hand:
 
-- Confirm the tag exists and **all** bottle files are on the release page.
-- Copy SHA256 from the `.sha256` sidecar files on the release, or from `shasum -a 256` locally.
+- Confirm the tag exists and the tarball is on the release page.
+- Copy the SHA256 from the `.sha256` sidecar or `sha256sum` locally.
 
-Do **not** bump `version` in the formula to match `src/main.odin` until the release exists.
+Do **not** bump `version` in the formula to a build that has no published
+release (breaks `brew install ubrew` with HTTP 404).
 
 ## Tap repository
 
-There is **no separate** `homebrew-ubrew` repository for the default tap. Users install with:
+There is **no separate** `homebrew-ubrew` repository for the default tap.
+Users install with:
 
 ```bash
 brew tap rjallais/ubrew https://github.com/rjallais/ubrew
 brew install ubrew
 ```
 
-Homebrew reads `Formula/ubrew.rb` **from this repo**. Keeping releases and the formula in sync here is sufficient unless you maintain a custom tap fork elsewhere.
+Homebrew reads `Formula/ubrew.rb` **from this repo**. Keeping releases and
+the formula in sync here is sufficient unless you maintain a custom tap fork
+elsewhere.
 
 ## Version constants
 
-- **`src/main.odin`** — compile-time `VERSION` string (shown in `ubrew help`, self-update checks).
-- **`Formula/ubrew.rb`** — must track the bottled binary users download via Homebrew; tied to GitHub Releases, not necessarily every commit on `main`.
+- **`src/main.odin`** and **`src/installer/installer.odin`** — compile-time
+  `#config(UBREW_VERSION, default)`; release builds pass the define.
+- **`Formula/ubrew.rb`** — tracks the bottled binary users download via
+  Homebrew; tied to GitHub Releases, not necessarily every commit on `main`.
 
 ## Verify locally
 
 After editing the formula, run:
 
 ```bash
-./scripts/verify-formula-release.sh
+# offline: verify against a local directory of release assets
+bash scripts/verify-formula-release.sh --local-dir <dir> Formula/ubrew.rb
+
+# online: download the release URLs and compare
+bash scripts/verify-formula-release.sh Formula/ubrew.rb
 ```
 
-This downloads the two macOS tarballs and checks SHA256s match the formula.
+To do a full local dry-run of the release pipeline:
+
+```bash
+UBREW_VERSION=2026.8.1 mise run build-libsqlite
+UBREW_VERSION=2026.8.1 bash scripts/build-release-assets.sh
+UBREW_VERSION=2026.8.1 bash scripts/update-formula.sh
+bash scripts/verify-formula-release.sh --local-dir build/release
+```

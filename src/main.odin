@@ -20,8 +20,14 @@ import "platform"
 import "store"
 import "tap"
 
+// The release pipeline tags calendar-SemVer releases (mise-style, e.g.
+// v2026.8.1) and bakes the version in at build time with
+// `-define:UBREW_VERSION="YYYY.M.PATCH"`. Local/dev builds (no define) fall
+// back to the default below.
+UBREW_VERSION :: #config(UBREW_VERSION, "0.2.0")
+
 print_usage :: proc() {
-    fmt.println("\x1b[1mubrew\x1b[0m \x1b[90mv0.1.0\x1b[0m — The Odin Package Manager Experiment")
+    fmt.printf("\x1b[1mubrew\x1b[0m \x1b[90mv%s\x1b[0m — The Odin Package Manager Experiment\n", UBREW_VERSION)
     fmt.println("\n  Faster than zerobrew. Faster than homebrew. Written in Odin.")
     fmt.println("  Native compiled binary + perfect JSON parsing + curl driver.")
 	fmt.println("  Works on Linux.")
@@ -9421,7 +9427,7 @@ main :: proc() {
     }
 
     if cmd == "version" || cmd == "--version" || cmd == "-v" {
-        fmt.println("ubrew 0.1.0")
+        fmt.printf("ubrew %s\n", UBREW_VERSION)
         os.exit(0)
     }
 

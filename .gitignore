@@ -35,3 +35,6 @@ ubrew_fts5
 
 # SQLite amalgamation cache (downloaded at build time)
 .cache/sqlite-amalgamation/
+
+# Release staging artifacts (scripts/build-release-assets.sh)
+build/

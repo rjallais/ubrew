@@ -1,24 +1,21 @@
-name: Update Homebrew Formula on Release
+name: Update Formula (manual dispatch)
 
-# Fires after a maintainer publishes a GitHub Release with the locally
-# notarized macOS tarballs uploaded as assets. The release workflow
-# itself stays disabled because Apple notarization runs from a developer
-# machine via scripts/notarize-macos.sh.
+# Manual companion to release.yml. The automated release workflow
+# (release.yml) bumps Formula/ubrew.rb for stable tags automatically, so
+# this exists for the window where the previous auto-bump missed a release
+# or where macOS artifacts were uploaded after the fact:
 #
-# This job downloads the two macOS tarballs from the published release,
-# recomputes their SHA256s, rewrites Formula/ubrew.rb, runs the formula
-# verifier, and opens a PR against main with the bump.
-#
-# Skipped automatically for prereleases (tags containing a hyphen, e.g.
-# v0.1.193-rc1).
+#   1. The release must already exist on GitHub with its assets uploaded
+#      (ubrew-linux-x86_64.tar.gz, and optionally the macOS tarballs).
+#   2. Run this workflow with the release tag; it downloads the assets,
+#      rewrites Formula/ubrew.rb via scripts/update-formula.sh, verifies
+#      the SHA256s, and opens a formula PR.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to bump the formula to (e.g. v0.1.193)"
+        description: "Release tag to bump the formula to (e.g. v2026.8.1)"
         required: true
 
 permissions:
@@ -27,34 +24,33 @@ permissions:
 
 jobs:
   update-formula:
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.release.tag_name, '-') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
+          persist-credentials: false
 
-      - name: Resolve release tag
+      - name: Resolve tag
         id: tag
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            TAG="$INPUT_TAG"
-          else
-            TAG="$RELEASE_TAG"
-          fi
-          if [[ -z "$TAG" ]]; then
-            echo "no release tag resolved" >&2
+          TAG="${INPUT_TAG}"
+          TAG="${TAG#refs/tags/}"
+          VERSION="${TAG#v}"
+          if [[ ! "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: '$TAG' does not match calendar SemVer (vYYYY.M.PATCH[-suffix])" >&2
             exit 1
           fi
-          VERSION="${TAG#v}"
+          if [[ "$TAG" == *-* ]]; then
+            echo "ERROR: prerelease tags ($TAG) never get formula bumps" >&2
+            exit 0
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Download release tarballs
+      - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
@@ -62,54 +58,33 @@ jobs:
           mkdir -p artifacts
           gh release download "$TAG" \
             --repo "${{ github.repository }}" \
+            --pattern 'ubrew-linux-x86_64.tar.gz' \
+            --dir artifacts || { echo "linux asset missing" >&2; exit 1; }
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
             --pattern 'ubrew-arm64-apple-darwin.tar.gz' \
+            --dir artifacts || true
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
             --pattern 'ubrew-x86_64-apple-darwin.tar.gz' \
-            --dir artifacts
+            --dir artifacts || true
           ls -la artifacts/
 
       - name: Rewrite Formula/ubrew.rb
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          UBREW_VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          ARM64_SHA=$(sha256sum artifacts/ubrew-arm64-apple-darwin.tar.gz | cut -d' ' -f1)
-          X86_SHA=$(sha256sum artifacts/ubrew-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          export UBREW_LINUX_SHA256=$(sha256sum artifacts/ubrew-linux-x86_64.tar.gz | cut -d' ' -f1)
+          if [ -f artifacts/ubrew-arm64-apple-darwin.tar.gz ]; then
+            export UBREW_MACOS_ARM_SHA256=$(sha256sum artifacts/ubrew-arm64-apple-darwin.tar.gz | cut -d' ' -f1)
+          fi
+          if [ -f artifacts/ubrew-x86_64-apple-darwin.tar.gz ]; then
+            export UBREW_MACOS_X86_SHA256=$(sha256sum artifacts/ubrew-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          fi
+          bash scripts/update-formula.sh
 
-          cat > Formula/ubrew.rb <<FORMULA
-          class Ubrew < Formula
-            desc "The fastest macOS package manager. Written in Odin."
-            homepage "https://github.com/rjallais/ubrew"
-            license "Apache-2.0"
-            version "${VERSION}"
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/rjallais/ubrew/releases/download/v${VERSION}/ubrew-arm64-apple-darwin.tar.gz"
-                sha256 "${ARM64_SHA}"
-              else
-                url "https://github.com/rjallais/ubrew/releases/download/v${VERSION}/ubrew-x86_64-apple-darwin.tar.gz"
-                sha256 "${X86_SHA}"
-              end
-            end
-
-
-            def install
-              bin.install "ubrew"
-            end
-
-            def post_install
-              ohai "Run 'ubrew init' to create the ubrew directory tree"
-            end
-
-            test do
-              assert_match "ubrew", shell_output("#{bin}/ubrew help")
-            end
-          end
-          FORMULA
-
-          sed -i 's/^          //' Formula/ubrew.rb
-          cat Formula/ubrew.rb
-
-      - name: Verify formula against published release
-        run: bash scripts/verify-formula-release.sh Formula/ubrew.rb
+      - name: Verify formula against release assets
+        run: bash scripts/verify-formula-release.sh --local-dir artifacts Formula/ubrew.rb
 
       - name: Open formula PR
         env:
@@ -140,8 +115,6 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --title "formula: update to ${TAG}" \
-            --body "Automated bump of \`Formula/ubrew.rb\` after the GitHub Release for \`${TAG}\` was published with notarized macOS tarballs.
+            --body "Automated bump of Formula/ubrew.rb for release ${TAG} (manual dispatch; release assets may include macOS tarballs).
 
-          Verified by \`scripts/verify-formula-release.sh\`. Closes the relevant issue once merged.
-
-          Maintainers: do not bump the formula to a version without a matching release (see docs/RELEASING.md)."
+          Verified by scripts/verify-formula-release.sh. See docs/RELEASING.md."
