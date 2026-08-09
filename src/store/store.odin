@@ -122,7 +122,16 @@ store_save_relocated_entry :: proc(sha256: string, name: string, version: string
 		return true
 	}
 
-	os.make_directory_all(STORE_RELOCATED_DIR, os.perm(0o755))
+	// cow_copy (clonefile / FICLONE ioctl / cp -R) requires the destination's
+	// parent directory to already exist. dst_result is
+	// <STORE_RELOCATED_DIR><prefix>/<sha256>, so create the full
+	// <STORE_RELOCATED_DIR><prefix> chain, not just STORE_RELOCATED_DIR.
+	parent_buf: [512]u8
+	parent_result := bounded_path(parent_buf[:], "%s%s", STORE_RELOCATED_DIR, prefix)
+	if len(parent_result) == 0 {
+		return false
+	}
+	os.make_directory_all(parent_result, os.perm(0o755))
 
 	return platform.cow_copy(src_result, dst_result)
 }

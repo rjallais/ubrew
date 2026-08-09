@@ -124,6 +124,10 @@ run_alias :: proc(args: []string) {
 	if arg == "--edit" {
 		editor := os.get_env("EDITOR", context.temp_allocator)
 		if editor == "" do editor = "nano"
+		// Ensure the parent dir ($UBREW_ROOT/db) exists before the editor
+		// writes the alias file; on a fresh install with no aliases yet it
+		// does not exist, and the editor would fail to save.
+		_ = os.make_directory_all(os.dir(alias_file()), os.perm(0o755))
 		platform.exec_cmd(editor, []string{editor, alias_file()})
 		return
 	}
