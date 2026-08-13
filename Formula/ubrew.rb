@@ -5,15 +5,17 @@ class Ubrew < Formula
   version "2026.8.2"
 
   on_macos do
-    # macOS artifacts are not built by CI yet. The URLs below track the
-    # release layout and get real SHAs once a macOS build exists; until
-    # then macOS installs fail loudly at download time.
+    # macOS binaries are built in CI (arm64 on macos-14, x86_64 on macos-13)
+    # and the SHA256 values below are filled automatically from the release
+    # assets. They are unsigned for now (see docs/RELEASING.md). Until the
+    # assets exist for a given version these stay PLACEHOLDER so installs
+    # fail loudly instead of silently downloading an invalid archive.
     if Hardware::CPU.arm?
       url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-arm64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # TODO: real SHA256 once a macOS v2026.8.2 asset ships
+      sha256 "PLACEHOLDER" # set from the macOS arm64 release asset
     else
       url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # TODO: real SHA256 once a macOS v2026.8.2 asset ships
+      sha256 "PLACEHOLDER" # set from the macOS x86_64 release asset
     end
   end
 
@@ -28,6 +30,9 @@ class Ubrew < Formula
     if OS.linux?
       bin.install "ubrew"
       lib.install "libsqlite3-fts5.so"
+    elsif OS.mac?
+      bin.install "ubrew"
+      lib.install "libsqlite3-fts5.dylib"
     else
       bin.install "ubrew"
     end
