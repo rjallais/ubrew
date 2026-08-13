@@ -58,7 +58,7 @@ class Ubrew < Formula
   version "${VERSION}"
 
   on_macos do
-    # macOS binaries are built in CI (arm64 on macos-14, x86_64 on macos-13)
+    # macOS binaries are built in CI (arm64 on macos-14, x86_64 on macos-15-intel)
     # and the SHA256 values below are filled automatically from the release
     # assets. They are unsigned for now (see docs/RELEASING.md). Until the
     # assets exist for a given version these stay PLACEHOLDER so installs

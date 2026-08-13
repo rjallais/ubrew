@@ -7,7 +7,7 @@ name: Release
 # real on_macos SHA256 values) and opens a PR.
 #
 # macOS binaries are built on dedicated macOS runners (macos-14 is arm64,
-# macos-13 is x86_64) and distributed unsigned for now; codesigning +
+# macos-15-intel is x86_64) and distributed unsigned for now; codesigning +
 # notarization is planned but requires Apple Developer ID credentials.
 #
 # Tags containing a hyphen (e.g. v2026.8.1-rc.1) are treated as prereleases:

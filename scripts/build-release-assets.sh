@@ -13,12 +13,12 @@
 #   1. Builds `ubrew` (+ the FTS5 SQLite library) with `-define:UBREW_VERSION`.
 #   2. Makes the artifact self-contained and relocatable:
 #      - Linux: rewrites the binary's DT_NEEDED to the bare `libsqlite3-fts5.so`
-#        and sets RUNPATH `$ORIGIN/../lib` (the formula's install() no longer
-#        needs `patchelf`).
+#        and sets RUNPATH `$ORIGIN:$ORIGIN/../lib` (supports flat release extract
+#        and Homebrew `{bin,lib}` layout).
 #      - macOS: points the dylib's install name at `@rpath/libsqlite3-fts5.dylib`
-#        and adds LC_RPATH `@loader_path/../lib` so the binary finds the dylib
-#        next to it in a Homebrew `{bin,lib}` layout.
-#   3. Smoke-tests the patched binary from a `{bin,lib}` Homebrew-style layout.
+#        and adds LC_RPATH `@loader_path` and `@loader_path/../lib` so the binary
+#        finds the dylib in a flat layout or Homebrew `{bin,lib}` layout.
+#   3. Smoke-tests the patched binary directly from the flat root layout.
 #   4. Writes `build/release/ubrew-<target>.tar.gz` + `.sha256` sidecar.
 #
 # Targets: `linux-x86_64`, `arm64-apple-darwin`, `x86_64-apple-darwin`. macOS
@@ -83,32 +83,30 @@ cp "$LIB" "$STAGING/root/${LIB_BASENAME}"
 
 # 3. Make the artifact self-contained and relocatable.
 if [[ "${PATCH_ELF:-}" == "1" ]]; then
-  # Linux: rewrite DT_NEEDED to the bare .so and add RUNPATH so the binary
-  # finds libsqlite3-fts5.so in a Homebrew {bin,lib} layout.
+  # Linux: rewrite DT_NEEDED to the bare .so and set RUNPATH so the binary
+  # finds libsqlite3-fts5.so in both a flat layout and Homebrew {bin,lib} layout.
   LIB_ABS="$(readlink -f "$LIB")"
-  echo "==> patching: NEEDED ${LIB_ABS} -> libsqlite3-fts5.so, RUNPATH \$ORIGIN/../lib"
+  echo "==> patching: NEEDED ${LIB_ABS} -> libsqlite3-fts5.so, RUNPATH \$ORIGIN:\$ORIGIN/../lib"
   patchelf --replace-needed "$LIB_ABS" libsqlite3-fts5.so "$STAGING/root/ubrew"
-  patchelf --add-rpath '$ORIGIN/../lib' "$STAGING/root/ubrew"
+  patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "$STAGING/root/ubrew"
 elif [[ "$OS" == "Darwin" ]]; then
   # macOS: point the dylib's install name at @rpath and add LC_RPATH
-  # @loader_path/../lib, mirroring the Linux relocation so the binary finds
-  # libsqlite3-fts5.dylib in a Homebrew {bin,lib} layout.
-  echo "==> patching: dylib id @rpath/${LIB_BASENAME}, LC_RPATH @loader_path/../lib"
+  # @loader_path and @loader_path/../lib, mirroring the Linux relocation so the
+  # binary finds libsqlite3-fts5.dylib in both a flat layout and Homebrew {bin,lib} layout.
+  echo "==> patching: dylib id @rpath/${LIB_BASENAME}, LC_RPATH @loader_path, @loader_path/../lib"
   xcrun install_name_tool -id "@rpath/${LIB_BASENAME}" "$STAGING/root/${LIB_BASENAME}"
   DYLIB_LOAD="$(otool -L "$STAGING/root/ubrew" 2>/dev/null | awk '/libsqlite3-fts5/ {print $1; exit}')"
   if [[ -n "$DYLIB_LOAD" ]]; then
     xcrun install_name_tool -change "$DYLIB_LOAD" "@rpath/${LIB_BASENAME}" "$STAGING/root/ubrew"
   fi
+  xcrun install_name_tool -add_rpath '@loader_path' "$STAGING/root/ubrew"
   xcrun install_name_tool -add_rpath '@loader_path/../lib' "$STAGING/root/ubrew"
 fi
 
-# 4. Smoke-test from a Homebrew-style {bin,lib} layout.
-mkdir -p "$STAGING/probe/bin" "$STAGING/probe/lib"
-cp "$STAGING/root/ubrew" "$STAGING/probe/bin/ubrew"
-cp "$STAGING/root/${LIB_BASENAME}" "$STAGING/probe/lib/${LIB_BASENAME}"
-if ! "$STAGING/probe/bin/ubrew" version | grep -q "$UBREW_VERSION"; then
+# 4. Smoke-test directly from the flat root layout.
+if ! "$STAGING/root/ubrew" version | grep -q "$UBREW_VERSION"; then
   echo "ERROR: staged binary reports the wrong version" >&2
-  "$STAGING/probe/bin/ubrew" version >&2 || true
+  "$STAGING/root/ubrew" version >&2 || true
   exit 1
 fi
 echo "==> staged binary OK (ubrew $UBREW_VERSION, loads libsqlite3-fts5.${LIBEXT} via RPATH)"
