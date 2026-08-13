@@ -4,20 +4,18 @@ class Ubrew < Formula
   license "Apache-2.0"
   version "2026.8.2"
 
-  on_macos do
-    # macOS binaries are built in CI (arm64 on macos-14, x86_64 on macos-13)
-    # and the SHA256 values below are filled automatically from the release
-    # assets. They are unsigned for now (see docs/RELEASING.md). Until the
-    # assets exist for a given version these stay PLACEHOLDER so installs
-    # fail loudly instead of silently downloading an invalid archive.
-    if Hardware::CPU.arm?
-      url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-arm64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # set from the macOS arm64 release asset
-    else
-      url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER" # set from the macOS x86_64 release asset
-    end
-  end
+  # macOS binaries are built automatically in CI on release tagging
+  # (see docs/RELEASING.md); scripts/update-formula.sh populates the real
+  # on_macos block and SHA256 checksums once release assets exist.
+  # on_macos do
+  #   if Hardware::CPU.arm?
+  #     url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-arm64-apple-darwin.tar.gz"
+  #     sha256 "PLACEHOLDER"
+  #   else
+  #     url "https://github.com/rjallais/ubrew/releases/download/v2026.8.2/ubrew-x86_64-apple-darwin.tar.gz"
+  #     sha256 "PLACEHOLDER"
+  #   end
+  # end
 
   on_linux do
     # Self-contained prebuilt binary (ubrew + libsqlite3-fts5.so); the

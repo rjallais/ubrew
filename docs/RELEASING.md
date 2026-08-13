@@ -29,7 +29,7 @@ The [Release workflow](../.github/workflows/release.yml) then, in one
 workflow run:
 
 1. A `build-macos` matrix job builds the macOS release assets on dedicated
-   runners (**`macos-14`** → arm64, **`macos-13`** → x86_64) via
+   runners (**`macos-14`** → arm64, **`macos-15-intel`** → x86_64) via
    `scripts/build-release-assets.sh`, packaging
    `ubrew-arm64-apple-darwin.tar.gz` and `ubrew-x86_64-apple-darwin.tar.gz`
    with their `.sha256` sidecars. They are **unsigned** for now (see
@@ -63,7 +63,7 @@ prereleases are never auto-promoted.
 
 macOS binaries are **built by CI** on the [Release workflow](../.github/workflows/release.yml):
 `build-macos` builds `ubrew-arm64-apple-darwin.tar.gz` on `macos-14` (arm64)
-and `ubrew-x86_64-apple-darwin.tar.gz` on `macos-13` (x86_64), which are
+and `ubrew-x86_64-apple-darwin.tar.gz` on `macos-15-intel` (x86_64), which are
 uploaded to the release. The formula's `on_macos` SHA256 values are filled
 from those assets automatically; the formula's `install` also stages
 `libsqlite3-fts5.dylib` alongside the binary (relocated to `@rpath`).
