@@ -25,24 +25,22 @@ git tag -a v2026.8.1 -m "ubrew v2026.8.1"
 git push origin v2026.8.1
 ```
 
-The [Release workflow](../.github/workflows/release.yml) then, in one run
-on `ubuntu-latest`:
+The [Release workflow](../.github/workflows/release.yml) then, in one
+workflow run:
 
-1. **Builds** the release binary with `-define:UBREW_VERSION=<version>`
-   (`-o:speed -no-bounds-check`, no CPU-specific microarch flags), using
-   `scripts/build-release-assets.sh`.
-2. **Relocates** the artifact: rewrites the binary's `DT_NEEDED` for
-   `libsqlite3-fts5.so` to the bare name and sets `RUNPATH $ORIGIN/../lib`,
-   so the tarball is self-contained and the formula no longer needs
-   `patchelf` at install time.
-3. **Smoke-tests** the staged binary from a Homebrew-style `{bin,lib}`
-   layout and asserts the compiled-in version.
-4. **Publishes** the GitHub Release with
-   `ubrew-linux-x86_64.tar.gz` and its `.sha256` sidecar (generated notes).
-5. **Bumps the formula** `Formula/ubrew.rb` via `scripts/update-formula.sh`
-   (version + Linux URL/SHA256), verifies it against the release assets via
-   `scripts/verify-formula-release.sh --local-dir`, and opens
-   `release/formula-<tag>` → `main` PR.
+1. A `build-macos` matrix job builds the macOS release assets on dedicated
+   runners (**`macos-14`** → arm64, **`macos-15-intel`** → x86_64) via
+   `scripts/build-release-assets.sh`, packaging
+   `ubrew-arm64-apple-darwin.tar.gz` and `ubrew-x86_64-apple-darwin.tar.gz`
+   with their `.sha256` sidecars. They are **unsigned** for now (see
+   [macOS](#macos)).
+2. The `release` job on `ubuntu-latest` builds the Linux x86_64 asset, then
+   publishes the GitHub Release with all three tarballs + sidecars.
+3. The `release` job **bumps the formula** `Formula/ubrew.rb` via
+   `scripts/update-formula.sh` (version + Linux URL/SHA256 **and** the real
+   macOS URL/SHA256s now that the assets exist), verifies it against the
+   release assets via `scripts/verify-formula-release.sh --local-dir`, and
+   opens `release/formula-<tag>` → `main` PR.
 
 ### Prereleases
 
@@ -63,9 +61,23 @@ prereleases are never auto-promoted.
 
 ## macOS
 
-macOS artifacts are **not** built by CI yet. The formula keeps the macOS
-URL layout but with `PLACEHOLDER` SHAs (macOS installs fail loudly until a
-macOS asset exists). When macOS assets are uploaded to a release, either:
+macOS binaries are **built by CI** on the [Release workflow](../.github/workflows/release.yml):
+`build-macos` builds `ubrew-arm64-apple-darwin.tar.gz` on `macos-14` (arm64)
+and `ubrew-x86_64-apple-darwin.tar.gz` on `macos-15-intel` (x86_64), which are
+uploaded to the release. The formula's `on_macos` SHA256 values are filled
+from those assets automatically; the formula's `install` also stages
+`libsqlite3-fts5.dylib` alongside the binary (relocated to `@rpath`).
+
+> **Signed distribution is not wired up yet.** Behaves like the Linux flow,
+> shipping an **unsigned** binary. Until Developer ID codesigning +
+> notarization is added, macOS users installing from Homebrew may hit
+> Gatekeeper warnings on the downloaded binary (a right-click → **Open**
+> workaround or `xattr -dr com.apple.quarantine` on the tarball contents).
+> See `scripts/notarize-macos.sh` for the notarization recipe once a
+> codesigning identity and `notarytool` profile are available.
+
+To rebuild the formula manually (e.g. after re-uploading assets to an
+existing release), either:
 
 - re-run the manual [`Update Formula`](../.github/workflows/update-formula.yml)
   workflow, or
@@ -76,6 +88,9 @@ UBREW_VERSION=2026.8.1 UBREW_LINUX_SHA256=<...> \
 UBREW_MACOS_ARM_SHA256=<...> UBREW_MACOS_X86_SHA256=<...> \
 bash scripts/update-formula.sh
 ```
+
+On a Darwin host the same `scripts/build-release-assets.sh` (with
+`UBREW_VERSION`) produces the matching macOS tarball + sidecar directly.
 
 ## Manual formula edits
 
