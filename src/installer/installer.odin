@@ -1378,30 +1378,104 @@ install_cask :: proc(c: cask.Cask) -> bool {
 
 	for art in c.artifacts {
 		if _, ok := art.(cask.Font_Artifact); ok {
-			return install_font_cask(c)
+			if !install_font_cask(c) {
+				return false
+			}
+			return write_cask_metadata(c, "unknown")
 		}
 	}
 	for art in c.artifacts {
 		if _, ok := art.(cask.Wallpaper_Artifact); ok {
-			return install_wallpaper_cask(c)
+			if !install_wallpaper_cask(c) {
+				return false
+			}
+			return write_cask_metadata(c, "latest")
 		}
 	}
 	for art in c.artifacts {
 		if _, ok := art.(cask.AppImage_Artifact); ok {
-			return install_appimage_cask(c)
+			if !install_appimage_cask(c) {
+				return false
+			}
+			return write_cask_metadata(c, "latest")
 		}
 	}
 	for art in c.artifacts {
 		if _, ok := art.(cask.Binary_Artifact); ok {
-			return install_binary_cask(c)
+			if !install_binary_cask(c) {
+				return false
+			}
+			return write_cask_metadata(c, "latest")
 		}
 		if _, ok := art.(cask.Generic_Artifact); ok {
-			return install_binary_cask(c)
+			if !install_binary_cask(c) {
+				return false
+			}
+			return write_cask_metadata(c, "latest")
 		}
 	}
 
 	fmt.println("Error: Only font, wallpaper, AppImage, binary, and generic artifact casks are currently supported by ubrew.")
 	return false
+}
+
+// write_cask_metadata records a successful cask install in the
+// Homebrew-compatible Caskroom metadata layout:
+// `<Caskroom>/<token>/.metadata/<version>/<timestamp>/Casks/<token>.json`
+// plus an INSTALL_RECEIPT.json tab at the .metadata root. Homebrew only
+// treats a cask as installed when the metadata caskfile exists, so this
+// must run on every successful install or the cask stays invisible to
+// brew-driven tooling.
+write_cask_metadata :: proc(c: cask.Cask, version_fallback: string) -> bool {
+	flat := flatten_token(c.token)
+	ver := c.version
+	if ver == "" {
+		ver = version_fallback
+	}
+	ver_flat, _ := strings.replace_all(ver, "/", "-", context.temp_allocator)
+
+	dtime, ok := time.time_to_datetime(time.now())
+	if !ok {
+		fmt.println("Error: failed to compute install timestamp for cask metadata")
+		return false
+	}
+	timestamp := fmt.tprintf(
+		"%04d%02d%02d%02d%02d%02d.%03d",
+		dtime.year, dtime.month, dtime.day,
+		dtime.hour, dtime.minute, dtime.second,
+		dtime.nano / 1_000_000,
+	)
+
+	casks_dir := fmt.tprintf("%s/%s/.metadata/%s/%s/Casks", CASKROOM_DIR, flat, ver_flat, timestamp)
+	if os.make_directory_all(casks_dir, os.perm(0o755)) != nil {
+		fmt.printf("Error: failed to create cask metadata dir %s\n", casks_dir)
+		return false
+	}
+	caskfile := fmt.tprintf("%s/%s.json", casks_dir, flat)
+	if os.write_entire_file_from_string(caskfile, "{}\n") != nil {
+		fmt.printf("Error: failed to write cask metadata file %s\n", caskfile)
+		return false
+	}
+
+	arch := "x86_64"
+	when ODIN_ARCH == .arm64 {
+		arch = "arm64"
+	}
+	receipt_path := fmt.tprintf("%s/%s/.metadata/INSTALL_RECEIPT.json", CASKROOM_DIR, flat)
+	receipt := fmt.tprintf(
+		"{{\n  \"homebrew_version\": %q,\n  \"loaded_from_api\": true,\n  \"loaded_from_internal_api\": false,\n  \"uninstall_flight_blocks\": false,\n  \"installed_as_dependency\": false,\n  \"installed_on_request\": true,\n  \"time\": %d,\n  \"runtime_dependencies\": {{}},\n  \"source\": {{\n    \"tap\": null,\n    \"version\": %q\n  }},\n  \"arch\": %q,\n  \"uninstall_artifacts\": []\n}}\n",
+		UBREW_HOMEBREW_VERSION,
+		time.time_to_unix(time.now()),
+		ver,
+		arch,
+	)
+	if os.write_entire_file_from_string(receipt_path, receipt) != nil {
+		fmt.printf("Error: failed to write cask install receipt %s\n", receipt_path)
+		return false
+	}
+
+	fmt.printf("==> Wrote Caskroom metadata for %s\n", c.token)
+	return true
 }
 
 install_binary_cask :: proc(c: cask.Cask) -> bool {
@@ -2294,21 +2368,11 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
 	}
 
-	// Remove Caskroom staged files (only if it was installed by ubrew)
+	// Remove the whole Caskroom entry (version dirs, .metadata, and any
+	// leftover empty dirs) so uninstall leaves no trace behind.
 	caskroom_cask_dir := fmt.tprintf("%s/%s", CASKROOM_DIR, flat)
 	if os.is_dir(caskroom_cask_dir) {
-		has_versions := false
-		if v_infos, v_err := os.read_directory_by_path(caskroom_cask_dir, -1, context.temp_allocator); v_err == nil {
-			for v_info in v_infos {
-				if v_info.type == .Directory {
-					has_versions = true
-					break
-				}
-			}
-		}
-		if has_versions {
-			_ = os.remove_all(caskroom_cask_dir)
-		}
+		_ = os.remove_all(caskroom_cask_dir)
 	}
 
 	fmt.printf("==> Uninstalled cask: %s\n", c.token)
