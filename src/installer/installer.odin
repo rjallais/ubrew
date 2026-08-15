@@ -748,8 +748,12 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)
 	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
-		fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
-		return false
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
+			return false
+		}
 	}
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
@@ -765,8 +769,12 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	// binaries to resolve their dependencies in a shared-Cellar install.
 	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
 	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
-		fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
-		return false
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
+			return false
+		}
 	}
 	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
 	_ = os.remove(homebrew_opt_link)
@@ -1127,8 +1135,12 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)
 	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
-		fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
-		return false
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
+			return false
+		}
 	}
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
@@ -1144,8 +1156,12 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	// binaries to resolve their dependencies in a shared-Cellar install.
 	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
 	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
-		fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
-		return false
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
+			return false
+		}
 	}
 	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
 	_ = os.remove(homebrew_opt_link)
