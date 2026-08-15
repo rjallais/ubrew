@@ -753,6 +753,16 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
 	_ = os.symlink(opt_target, opt_link)
 
+	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
+	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
+	// libperl.so), so the opt link must also exist there for the keg's
+	// binaries to resolve their dependencies in a shared-Cellar install.
+	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
+	_ = os.make_directory_all(homebrew_opt_dir, os.perm(0o755))
+	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
+	_ = os.remove(homebrew_opt_link)
+	_ = os.symlink(opt_target, homebrew_opt_link)
+
 	// Write install receipt so `autoremove` can distinguish requested
 	// installs from dep-only installs.
 	receipt := Install_Receipt{
@@ -1109,6 +1119,16 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 	_ = os.remove(opt_link)
 	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
 	_ = os.symlink(opt_target, opt_link)
+
+	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
+	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
+	// libperl.so), so the opt link must also exist there for the keg's
+	// binaries to resolve their dependencies in a shared-Cellar install.
+	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
+	_ = os.make_directory_all(homebrew_opt_dir, os.perm(0o755))
+	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
+	_ = os.remove(homebrew_opt_link)
+	_ = os.symlink(opt_target, homebrew_opt_link)
 
 	// Write install receipt so `autoremove` can distinguish requested
 	// installs from dep-only installs.
