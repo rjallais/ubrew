@@ -2551,6 +2551,30 @@ unlink_formula_bins :: proc(name: string) -> int {
     return removed
 }
 
+// unlink_formula_opt_links removes the opt symlinks for name from both
+// ${PREFIX}/opt and ${HOMEBREW_PREFIX}/opt, but only when they point at the
+// formula's own Cellar keg (i.e. they were created by ubrew, not Homebrew).
+// Homebrew-created opt links pointing elsewhere are left untouched so the
+// shared Cellar keeps working.
+unlink_formula_opt_links :: proc(name: string) {
+	formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
+	opt_dirs := [2]string{
+		fmt.tprintf("%s/opt", installer.PREFIX),
+		fmt.tprintf("%s/opt", installer.HOMEBREW_PREFIX),
+	}
+	for opt_dir in opt_dirs {
+		link_path := fmt.tprintf("%s/%s", opt_dir, name)
+		target, link_err := os.read_link(link_path, context.temp_allocator)
+		if link_err != nil {
+			continue // not a link, or missing — nothing to clean
+		}
+		if strings.has_prefix(target, formula_dir) {
+			os.remove(link_path)
+		}
+		delete(target, context.temp_allocator)
+	}
+}
+
 run_remove :: proc(args: []string) {
 	force := false
 	zap := false
@@ -2778,6 +2802,7 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
         fmt.printf("ubrew: failed to remove %s: %v\n", name, err)
         return false
     }
+    unlink_formula_opt_links(name)
 
     if ubrew_owns {
         h_names, h_entries := history.load(context.allocator)

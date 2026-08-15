@@ -34,10 +34,10 @@ import "installer"
 // ── DAG node ─────────────────────────────────────────────────────────────
 
 Formula_DAG_Node :: struct {
-	dep_remaining:   i32,  // atomic; dep count that must reach 0 before this can run
-	skipped:         bool, // set if a dependency failed; prevents install, still drains
-	dependents_start: int, // first index in dependents_flat
-	dependents_count: int, // number of dependent entries
+	dep_remaining:    i32,  // atomic; dep count that must reach 0 before this can run
+	skipped:          i32,  // atomic; 1 = a dependency failed, do not install
+	dependents_start: int,  // first index in dependents_flat
+	dependents_count: int,  // number of dependent entries
 }
 
 // Per-run state threaded into every task.
@@ -70,7 +70,7 @@ dag_formula_task :: proc(t: thread.Task) {
 	node := &ctx.nodes[idx]
 
 	// If a dependency failed, skip this formula entirely.
-	if node.skipped {
+	if intrinsics.atomic_load(&node.skipped) != 0 {
 		dag_notify_dependents(ctx, idx)
 		return
 	}
@@ -108,7 +108,7 @@ dag_formula_task :: proc(t: thread.Task) {
 	case .Failed:
 		sync.guard(&ctx.error_mutex)
 		ctx.error_flag = true
-		node.skipped = true  // dependents will skip themselves
+		intrinsics.atomic_store(&node.skipped, i32(1))  // dependents will skip themselves
 	case .NoOp:
 		// Already installed — skip history.
 	case .Success:
@@ -140,6 +140,12 @@ dag_notify_dependents :: proc(ctx: ^DAG_State, idx: int) {
 	node := &ctx.nodes[idx]
 	for i in 0 ..< node.dependents_count {
 		dep_idx := ctx.dependents_flat[node.dependents_start + i]
+		if intrinsics.atomic_load(&node.skipped) != 0 {
+			// A failed dependency: this dependent must not install either.
+			// The flag is set before the counter decrement so it is visible
+			// when the dependent is submitted (atomic ordering guarantees it).
+			intrinsics.atomic_store(&ctx.nodes[dep_idx].skipped, i32(1))
+		}
 		old := intrinsics.atomic_sub(&ctx.nodes[dep_idx].dep_remaining, i32(1))
 		if old == 1 {
 			// All dependencies satisfied — submit to pool.
