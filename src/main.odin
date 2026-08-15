@@ -3462,6 +3462,11 @@ run_install :: proc(args: []string) {
 				force_flags[i] = job.force
 				on_request_flags[i] = job.on_request
 				name_to_idx[job.f.name] = i
+				for alias in job.f.aliases {
+					if _, exists := name_to_idx[alias]; !exists {
+						name_to_idx[alias] = i
+					}
+				}
 			}
 
 			dep_indices := make([][]int, n_f, context.temp_allocator)

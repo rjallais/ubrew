@@ -2,8 +2,8 @@
 //
 // Uses core:thread.Pool with dynamic task submission.  Each formula node
 // starts with dep_remaining = number of dependencies (in this batch).  When a
-// task finishes, it decrements dependents' counters; any that reach 0 are
-// submitted to the pool.  Casks (no cross-deps) run in a second wave.
+// task finishes, it decrements its DEPENDENTS' remaining-dep counts; any that
+// reach 0 are submitted to the pool.
 //
 // Thread-safety:
 //   - install_bottle / install_source use filesystem paths unique per
@@ -12,7 +12,9 @@
 //   - Symlinks under PREFIX/bin are per binary name — no two packages
 //     share a binary name, so there is no race on the link target.
 //   - history.load + history.save are serialised under dag_history_mutex
-//     because the file is a single JSON blob.
+//     because the file is a single JSON blob.  remove_formula (called on
+//     forced reinstalls) serialises its own history writes under the same
+//     mutex.
 //   - The error flag is set under a mutex and checked once after the pool
 //     finishes.
 
@@ -20,7 +22,6 @@ package main
 
 import "core:fmt"
 import "base:intrinsics"
-import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -33,9 +34,10 @@ import "installer"
 // ── DAG node ─────────────────────────────────────────────────────────────
 
 Formula_DAG_Node :: struct {
-	dep_remaining: i32,   // atomic; dep count that must reach 0 before this can run
-	deps_start:    int,   // first index in deps_flat
-	deps_count:    int,   // number of dep entries
+	dep_remaining:   i32,  // atomic; dep count that must reach 0 before this can run
+	skipped:         bool, // set if a dependency failed; prevents install, still drains
+	dependents_start: int, // first index in dependents_flat
+	dependents_count: int, // number of dependent entries
 }
 
 // Per-run state threaded into every task.
@@ -44,7 +46,7 @@ DAG_State :: struct {
 	force_flags:       []bool,
 	on_request_flags:  []bool,
 	nodes:             []Formula_DAG_Node,
-	deps_flat:         []int,
+	dependents_flat:   []int,
 	pool:              ^thread.Pool,
 	error_flag:        bool,
 	error_mutex:       sync.Mutex,
@@ -65,26 +67,82 @@ dag_formula_task :: proc(t: thread.Task) {
 	force := ctx.force_flags[idx]
 	on_request := ctx.on_request_flags[idx]
 
-	// Install the formula (download already done).
+	node := &ctx.nodes[idx]
+
+	// If a dependency failed, skip this formula entirely.
+	if node.skipped {
+		dag_notify_dependents(ctx, idx)
+		return
+	}
+
+	// Snapshot the old version BEFORE installing, so we can distinguish
+	// install from upgrade correctly in history.
+	old_version := ""
+	if os.is_dir(fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)) {
+		if keg_path, ok := exec_formula_latest_keg(f.name); ok {
+			if idx := strings.last_index(keg_path, "/"); idx >= 0 {
+				old_version = strings.clone(keg_path[idx+1:], context.temp_allocator)
+			}
+		}
+	}
+
+	// Handle force reinstall: remove the existing keg + record uninstall
+	// history under dag_history_mutex.
+	if force {
+		_ = unlink_formula_bins(f.name)
+		formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)
+		os.remove_all(formula_dir)
+
+		sync.guard(&dag_history_mutex)
+		h_names, h_entries := history.load(context.allocator)
+		defer history.destroy(&h_names, &h_entries)
+		history.record_uninstall(&h_names, &h_entries, f.name, f.version)
+		history.save(h_names, h_entries)
+	}
+
+	// Install the formula.
 	result := install_formula_kernel(f^, ctx.build_from_source, force, on_request)
 
+	did_install := false
 	switch result {
 	case .Failed:
 		sync.guard(&ctx.error_mutex)
 		ctx.error_flag = true
+		node.skipped = true  // dependents will skip themselves
 	case .NoOp:
-		// Already installed — skip history, but still drain dependents.
+		// Already installed — skip history.
 	case .Success:
-		// Record history under mutex.
-		record_formula_history(f.name, f.version)
+		did_install = true
 	}
 
-	// Decrement dependents; schedule newly-ready nodes.
+	// Record install/upgrade history under dag_history_mutex.
+	if did_install {
+		sync.guard(&dag_history_mutex)
+
+		h_names, h_entries := history.load(context.allocator)
+		defer history.destroy(&h_names, &h_entries)
+
+		if old_version != "" && old_version != f.version {
+			history.record_upgrade(&h_names, &h_entries, f.name, f.version, old_version)
+		} else {
+			history.record_install(&h_names, &h_entries, f.name, f.version)
+		}
+		history.save(h_names, h_entries)
+	}
+
+	// Notify dependents: decrement dep_remaining; submit if zero.
+	dag_notify_dependents(ctx, idx)
+}
+
+// dag_notify_dependents decrements dep_remaining on every node that depends
+// on idx and submits any that reach 0.
+dag_notify_dependents :: proc(ctx: ^DAG_State, idx: int) {
 	node := &ctx.nodes[idx]
-	for i in 0 ..< node.deps_count {
-		dep_idx := ctx.deps_flat[node.deps_start + i]
+	for i in 0 ..< node.dependents_count {
+		dep_idx := ctx.dependents_flat[node.dependents_start + i]
 		old := intrinsics.atomic_sub(&ctx.nodes[dep_idx].dep_remaining, i32(1))
 		if old == 1 {
+			// All dependencies satisfied — submit to pool.
 			thread.pool_add_task(ctx.pool, context.allocator, dag_formula_task, ctx, dep_idx)
 		}
 	}
@@ -103,26 +161,48 @@ run_parallel_formula_install :: proc(
 	if n == 0 do return true
 
 	// Size the worker pool.
-	logical_cores := 4
-	if physical, logical, ok := info.cpu_core_count(); ok {
-		logical_cores = logical
+	cores := 4
+	if _, logical, ok := info.cpu_core_count(); ok {
+		cores = logical
 	}
-	num_workers := max(1, min(logical_cores, n))
+	num_workers := max(1, min(cores, n))
 
-	// Flatten dep lists & init nodes.
+	// ── Build inverted adjacency: dependents lists ──
+	//
+	// dep_indices[i] = [d_0, d_1, ...] means "i depends on d_0, d_1".
+	// We invert so that each node d knows which nodes depend on it.
+
 	total_deps := 0
 	for i in 0 ..< n do total_deps += len(dep_indices[i])
 
 	nodes := make([]Formula_DAG_Node, n, context.allocator)
-	deps_flat := make([]int, total_deps, context.allocator)
-	cursor := 0
+	dependents_flat := make([]int, total_deps, context.allocator)
+
+	// Pass 1: count deps per node (for dep_remaining) and dependent count.
 	for i in 0 ..< n {
 		nodes[i].dep_remaining = i32(len(dep_indices[i]))
-		nodes[i].deps_start = cursor
-		nodes[i].deps_count = len(dep_indices[i])
+	}
+	for i in 0 ..< n {
 		for d in dep_indices[i] {
-			deps_flat[cursor] = d
-			cursor += 1
+			nodes[d].dependents_count += 1
+		}
+	}
+
+	// Pass 2: assign start offsets using the counts from pass 1.
+	cursor := 0
+	for i in 0 ..< n {
+		nodes[i].dependents_start = cursor
+		cursor += nodes[i].dependents_count
+		nodes[i].dependents_count = 0  // reset to use as fill cursor below
+	}
+
+	// Pass 3: fill the dependent lists.  dependents_count doubles as fill
+	// cursor during this pass.
+	for i in 0 ..< n {
+		for d in dep_indices[i] {
+			pos := nodes[d].dependents_start + nodes[d].dependents_count
+			dependents_flat[pos] = i
+			nodes[d].dependents_count += 1
 		}
 	}
 
@@ -133,7 +213,7 @@ run_parallel_formula_install :: proc(
 		force_flags       = force_flags,
 		on_request_flags  = on_request_flags,
 		nodes             = nodes,
-		deps_flat         = deps_flat,
+		dependents_flat   = dependents_flat,
 		pool              = &pool,
 		build_from_source = build_from_source,
 	}
@@ -152,35 +232,7 @@ run_parallel_formula_install :: proc(
 	thread.pool_destroy(&pool)
 
 	delete(nodes)
-	delete(deps_flat)
+	delete(dependents_flat)
 
 	return !ctx.error_flag
-}
-
-// ── History helper (called under dag_history_mutex) ──────────────────────
-
-record_formula_history :: proc(name, version: string) {
-	sync.guard(&dag_history_mutex)
-
-	h_names, h_entries := history.load(context.allocator)
-	defer history.destroy(&h_names, &h_entries)
-
-	is_upgrade := false
-	old_version := ""
-	cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
-	if os.is_dir(cellar_dir) {
-		is_upgrade = true
-		if keg_path, ok := exec_formula_latest_keg(name); ok {
-			if idx := strings.last_index(keg_path, "/"); idx >= 0 {
-				old_version = strings.clone(keg_path[idx+1:], context.temp_allocator)
-			}
-		}
-	}
-
-	if is_upgrade && old_version != "" {
-		history.record_upgrade(&h_names, &h_entries, name, version, old_version)
-	} else {
-		history.record_install(&h_names, &h_entries, name, version)
-	}
-	history.save(h_names, h_entries)
 }
