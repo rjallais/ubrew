@@ -196,7 +196,8 @@ get_all_versions_cask :: proc(name: string, caskroom: string) -> []string {
 	dir := fmt.tprintf("%s/%s", caskroom, name)
 	if infos, err := os.read_directory_by_path(dir, -1, context.temp_allocator); err == nil {
 		for info in infos {
-			if os.is_dir(info.fullpath) {
+			// Skip the .metadata dir Homebrew keeps alongside version dirs.
+			if os.is_dir(info.fullpath) && !strings.has_prefix(info.name, ".") {
 				append(&list, strings.clone(info.name, context.allocator))
 			}
 		}
@@ -2706,6 +2707,10 @@ run_remove :: proc(args: []string) {
 }
 
 remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
+	if !installer.cask_token_safe(cask_token) {
+		fmt.printf("ubrew: refusing to uninstall cask with unsafe token: %s\n", cask_token)
+		return false
+	}
 	flat := installer.flatten_token(cask_token)
 	caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 	if !os.is_dir(caskroom_cask_dir) {
@@ -2875,8 +2880,7 @@ install_cask_by_token :: proc(cask_token: string, force: bool = false) -> bool {
     defer api.destroy_cask(c)
 
     flat := installer.flatten_token(c.token)
-    caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
-    if os.is_dir(caskroom_cask_dir) {
+    if cask_is_installed(flat) {
         if force {
             remove_cask_by_token(cask_token, true)
         } else {
@@ -2886,6 +2890,57 @@ install_cask_by_token :: proc(cask_token: string, force: bool = false) -> bool {
     }
 
     return installer.install_cask(c)
+}
+
+// cask_is_installed reports whether a cask has a real install in the shared
+// Caskroom: Homebrew metadata holding a caskfile, or a version directory.
+// Empty leftover dirs and stray .metadata shells from failed installs do not
+// count as installed.
+cask_is_installed :: proc(flat: string) -> bool {
+	dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
+	if !os.is_dir(dir) {
+		return false
+	}
+	infos, err := os.read_directory_by_path(dir, -1, context.allocator)
+	if err != nil {
+		return false
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+	has_metadata := false
+	has_version := false
+	for info in infos {
+		if info.type != .Directory {
+			continue
+		}
+		if info.name == ".metadata" {
+			has_metadata = true
+		} else if is_version_dir(info.name) {
+			has_version = true
+		}
+	}
+	if has_metadata {
+		return cask_metadata_has_caskfile(dir, flat)
+	}
+	return has_version
+}
+
+// cask_metadata_has_caskfile reports whether Homebrew metadata for a cask
+// contains a caskfile (`.metadata/<version>/<timestamp>/Casks/<flat>.json`),
+// which is what brew uses to consider a cask installed.
+cask_metadata_has_caskfile :: proc(cask_dir, flat: string) -> bool {
+	meta_dir := fmt.tprintf("%s/.metadata", cask_dir)
+	if !os.is_dir(meta_dir) {
+		return false
+	}
+	w := os.walker_create(meta_dir)
+	defer os.walker_destroy(&w)
+	target := fmt.tprintf("Casks/%s.json", flat)
+	for info in os.walker_walk(&w) {
+		if info.type == .Regular && strings.has_suffix(info.fullpath, target) {
+			return true
+		}
+	}
+	return false
 }
 
 Target_Type :: enum {
@@ -3280,8 +3335,7 @@ run_install :: proc(args: []string) {
 		}
 
 		flat := installer.flatten_token(c.token)
-		caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
-		is_installed := os.is_dir(caskroom_cask_dir)
+		is_installed := cask_is_installed(flat)
 
 		job := Install_Cask_Job {
 			c = c,
