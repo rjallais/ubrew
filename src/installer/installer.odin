@@ -747,11 +747,41 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)
-	_ = os.make_directory_all(opt_dir, os.perm(0o755))
+	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
+			return false
+		}
+	}
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
 	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
-	_ = os.symlink(opt_target, opt_link)
+	if err := os.symlink(opt_target, opt_link); err != nil {
+		fmt.printf("Error: failed to create opt link %s: %v\n", opt_link, err)
+		return false
+	}
+
+	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
+	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
+	// libperl.so), so the opt link must also exist there for the keg's
+	// binaries to resolve their dependencies in a shared-Cellar install.
+	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
+	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
+			return false
+		}
+	}
+	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
+	_ = os.remove(homebrew_opt_link)
+	if err := os.symlink(opt_target, homebrew_opt_link); err != nil {
+		fmt.printf("Error: failed to create opt link %s: %v\n", homebrew_opt_link, err)
+		return false
+	}
 
 	// Write install receipt so `autoremove` can distinguish requested
 	// installs from dep-only installs.
@@ -1104,11 +1134,41 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	// Create opt symlink
 	opt_dir := fmt.tprintf("%s/opt", prefix)
-	_ = os.make_directory_all(opt_dir, os.perm(0o755))
+	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
+			return false
+		}
+	}
 	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
 	_ = os.remove(opt_link)
 	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
-	_ = os.symlink(opt_target, opt_link)
+	if err := os.symlink(opt_target, opt_link); err != nil {
+		fmt.printf("Error: failed to create opt link %s: %v\n", opt_link, err)
+		return false
+	}
+
+	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
+	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
+	// libperl.so), so the opt link must also exist there for the keg's
+	// binaries to resolve their dependencies in a shared-Cellar install.
+	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
+	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err != .Exist {
+			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
+			return false
+		}
+	}
+	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
+	_ = os.remove(homebrew_opt_link)
+	if err := os.symlink(opt_target, homebrew_opt_link); err != nil {
+		fmt.printf("Error: failed to create opt link %s: %v\n", homebrew_opt_link, err)
+		return false
+	}
 
 	// Write install receipt so `autoremove` can distinguish requested
 	// installs from dep-only installs.

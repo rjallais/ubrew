@@ -2552,6 +2552,30 @@ unlink_formula_bins :: proc(name: string) -> int {
     return removed
 }
 
+// unlink_formula_opt_links removes the opt symlinks for name from both
+// ${PREFIX}/opt and ${HOMEBREW_PREFIX}/opt, but only when they point at the
+// formula's own Cellar keg (i.e. they were created by ubrew, not Homebrew).
+// Homebrew-created opt links pointing elsewhere are left untouched so the
+// shared Cellar keeps working.
+unlink_formula_opt_links :: proc(name: string) {
+	formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
+	opt_dirs := [2]string{
+		fmt.tprintf("%s/opt", installer.PREFIX),
+		fmt.tprintf("%s/opt", installer.HOMEBREW_PREFIX),
+	}
+	for opt_dir in opt_dirs {
+		link_path := fmt.tprintf("%s/%s", opt_dir, name)
+		target, link_err := os.read_link(link_path, context.temp_allocator)
+		if link_err != nil {
+			continue // not a link, or missing — nothing to clean
+		}
+		if strings.has_prefix(target, formula_dir) {
+			os.remove(link_path)
+		}
+		delete(target, context.temp_allocator)
+	}
+}
+
 run_remove :: proc(args: []string) {
 	force := false
 	zap := false
@@ -2783,6 +2807,7 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
         fmt.printf("ubrew: failed to remove %s: %v\n", name, err)
         return false
     }
+    unlink_formula_opt_links(name)
 
     if ubrew_owns {
         h_names, h_entries := history.load(context.allocator)
@@ -2797,6 +2822,53 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
     }
     fmt.println()
     return true
+}
+
+Install_Kernel_Result :: enum {
+	Success,
+	NoOp,
+	Failed,
+}
+
+// Install a formula without re-fetching metadata or recording history.
+// Returns Success on actual install, NoOp if already installed (no --force),
+// Failed on error.  Callers should only record history on Success.
+install_formula_kernel :: proc(f: formula.Formula, build_from_source: bool, force: bool, on_request: bool) -> Install_Kernel_Result {
+    if f.version != "" && !strings.contains(f.name, "/") {
+        keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
+        if os.is_dir(keg_dir) {
+            if force {
+                if !remove_formula(f.name, true) {
+                    fmt.eprintf("Error: failed to remove existing %s before reinstall\n", f.name)
+                    return .Failed
+                }
+            } else {
+                fmt.printf("==> %s %s is already installed\n", f.name, f.version)
+                return .NoOp
+            }
+        }
+    }
+
+    install_ok := false
+    if !build_from_source && len(f.bottle_url) > 0 {
+        install_ok = installer.install_bottle(f, installer.PREFIX, on_request)
+    } else if len(f.source_url) > 0 {
+        install_ok = installer.install_source(f, installer.PREFIX, on_request)
+    } else {
+        fmt.println("Error: No bottle or source URL available for this formula.")
+        return .Failed
+    }
+
+    if !install_ok {
+        return .Failed
+    }
+
+    binary_path := fmt.tprintf("%s/bin/%s", installer.PREFIX, f.name)
+    if os.is_file(binary_path) {
+        fmt.printf("==> Verification: Staged binary found at %s\n", binary_path)
+    }
+
+    return .Success
 }
 
 install_formula_by_name :: proc(formula_name: string, build_from_source: bool, force: bool = false, on_request: bool = true) -> bool {
@@ -2815,18 +2887,6 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
     defer api.destroy_formula(f)
     print_formula(f)
 
-    if f.version != "" && !strings.contains(f.name, "/") {
-        keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
-        if os.is_dir(keg_dir) {
-            if force {
-                remove_formula(f.name, true)
-            } else {
-                fmt.printf("==> %s %s is already installed\n", f.name, f.version)
-                return true
-            }
-        }
-    }
-
     is_upgrade := false
     old_version := ""
     cellar_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)
@@ -2839,18 +2899,13 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
         }
     }
 
-    install_ok := false
-    if !build_from_source && len(f.bottle_url) > 0 {
-        install_ok = installer.install_bottle(f, installer.PREFIX, on_request)
-    } else if len(f.source_url) > 0 {
-        install_ok = installer.install_source(f, installer.PREFIX, on_request)
-    } else {
-        fmt.println("Error: No bottle or source URL available for this formula.")
+    switch install_formula_kernel(f, build_from_source, force, on_request) {
+    case .Failed:
         return false
-    }
-
-    if !install_ok {
-        return false
+    case .NoOp:
+        return true
+    case .Success:
+        // fall through to history recording
     }
 
     h_names, h_entries := history.load(context.allocator)
@@ -2861,11 +2916,6 @@ install_formula_by_name :: proc(formula_name: string, build_from_source: bool, f
         history.record_install(&h_names, &h_entries, f.name, f.version)
     }
     history.save(h_names, h_entries)
-
-    binary_path := fmt.tprintf("%s/bin/%s", installer.PREFIX, f.name)
-    if os.is_file(binary_path) {
-        fmt.printf("==> Verification: Staged binary found at %s\n", binary_path)
-    }
 
     return true
 }
@@ -3471,9 +3521,64 @@ run_install :: proc(args: []string) {
 	}
 
 	// 10. Perform installations
-	for job in formula_jobs {
-		if !install_formula_by_name(job.f.name, build_from_source, job.force, job.on_request) {
-			failed = true
+	//
+	// Use the DAG-aware parallel worker pool for formulae (respecting
+	// the topological dependency order from the resolver).  Casks have
+	// no cross-dependencies and run serially afterwards.
+	{
+		if len(formula_jobs) > 0 {
+			// Build flat slices for the DAG: formulas, force, on_request.
+			n_f := len(formula_jobs)
+			formulas := make([]formula.Formula, n_f, context.temp_allocator)
+			force_flags := make([]bool, n_f, context.temp_allocator)
+			on_request_flags := make([]bool, n_f, context.temp_allocator)
+
+			// Name → index map so we can resolve dep strings to indices.
+			name_to_idx := make(map[string]int, n_f, context.temp_allocator)
+			for i in 0 ..< n_f {
+				job := &formula_jobs[i]
+				formulas[i] = job.f
+				force_flags[i] = job.force
+				on_request_flags[i] = job.on_request
+				name_to_idx[job.f.name] = i
+				for alias in job.f.aliases {
+					if _, exists := name_to_idx[alias]; !exists {
+						name_to_idx[alias] = i
+					}
+				}
+			}
+
+			dep_indices := make([][]int, n_f, context.temp_allocator)
+			for i in 0 ..< n_f {
+				f := &formulas[i]
+				// Collect only the deps that are *also in this batch*
+				// (deps already installed are absent from formula_jobs).
+				deps := make([dynamic]int, context.temp_allocator)
+				for dep_name in f.dependencies {
+					if idx, ok := name_to_idx[dep_name]; ok {
+						append(&deps, idx)
+					}
+				}
+				when ODIN_OS == .Linux {
+					for dep_name in f.uses_from_macos {
+						if idx, ok := name_to_idx[dep_name]; ok {
+							append(&deps, idx)
+						}
+					}
+				}
+				dep_indices[i] = deps[:]
+			}
+
+			ok := run_parallel_formula_install(
+				formulas[:],
+				force_flags[:],
+				on_request_flags[:],
+				dep_indices[:],
+				build_from_source,
+			)
+			if !ok {
+				failed = true
+			}
 		}
 	}
 
