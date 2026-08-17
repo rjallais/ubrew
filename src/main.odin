@@ -2928,7 +2928,11 @@ cask_is_installed :: proc(flat: string) -> bool {
 // contains a caskfile (`.metadata/<version>/<timestamp>/Casks/<flat>.json`),
 // which is what brew uses to consider a cask installed.
 cask_metadata_has_caskfile :: proc(cask_dir, flat: string) -> bool {
-	w := os.walker_create(cask_dir)
+	meta_dir := fmt.tprintf("%s/.metadata", cask_dir)
+	if !os.is_dir(meta_dir) {
+		return false
+	}
+	w := os.walker_create(meta_dir)
 	defer os.walker_destroy(&w)
 	target := fmt.tprintf("Casks/%s.json", flat)
 	for info in os.walker_walk(&w) {

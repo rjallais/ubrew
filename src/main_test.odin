@@ -57,4 +57,10 @@ test_cask_is_installed :: proc(t: ^testing.T) {
 	mkdir(fmt.tprintf("%s/partial/2.0.0", root))
 	mkdir(fmt.tprintf("%s/partial/.metadata", root))
 	testing.expect(t, !cask_is_installed("partial"), "partial install without caskfile must not count as installed")
+
+	// 7. .metadata shell + spoofed staged-version Casks/<flat>.json -> not installed
+	mkdir(fmt.tprintf("%s/spoof/.metadata", root))
+	mkdir(fmt.tprintf("%s/spoof/3.5.0/Casks", root))
+	write_file(fmt.tprintf("%s/spoof/3.5.0/Casks/spoof.json", root), "{}\n")
+	testing.expect(t, !cask_is_installed("spoof"), "metadata-less cask with spoofed version-dir caskfile must not be installed")
 }
