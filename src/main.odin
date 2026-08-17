@@ -2707,6 +2707,10 @@ run_remove :: proc(args: []string) {
 }
 
 remove_cask_by_token :: proc(cask_token: string, force: bool) -> bool {
+	if !installer.cask_token_safe(cask_token) {
+		fmt.printf("ubrew: refusing to uninstall cask with unsafe token: %s\n", cask_token)
+		return false
+	}
 	flat := installer.flatten_token(cask_token)
 	caskroom_cask_dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 	if !os.is_dir(caskroom_cask_dir) {
@@ -2889,18 +2893,47 @@ install_cask_by_token :: proc(cask_token: string, force: bool = false) -> bool {
 }
 
 // cask_is_installed reports whether a cask has a real install in the shared
-// Caskroom (version dirs or Homebrew metadata), ignoring leftover empty
-// directories that a previous uninstall failed to remove.
+// Caskroom: Homebrew metadata holding a caskfile, or a version directory.
+// Empty leftover dirs and stray .metadata shells from failed installs do not
+// count as installed.
 cask_is_installed :: proc(flat: string) -> bool {
 	dir := fmt.tprintf("%s/%s", installer.CASKROOM_DIR, flat)
 	if !os.is_dir(dir) {
 		return false
 	}
-	if infos, err := os.read_directory_by_path(dir, -1, context.temp_allocator); err == nil {
-		for info in infos {
-			if info.type == .Directory {
-				return true
-			}
+	infos, err := os.read_directory_by_path(dir, -1, context.allocator)
+	if err != nil {
+		return false
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+	has_metadata := false
+	has_version := false
+	for info in infos {
+		if info.type != .Directory {
+			continue
+		}
+		if info.name == ".metadata" {
+			has_metadata = true
+		} else if is_version_dir(info.name) {
+			has_version = true
+		}
+	}
+	if has_metadata {
+		return cask_metadata_has_caskfile(dir, flat)
+	}
+	return has_version
+}
+
+// cask_metadata_has_caskfile reports whether Homebrew metadata for a cask
+// contains a caskfile (`.metadata/<version>/<timestamp>/Casks/<flat>.json`),
+// which is what brew uses to consider a cask installed.
+cask_metadata_has_caskfile :: proc(cask_dir, flat: string) -> bool {
+	w := os.walker_create(cask_dir)
+	defer os.walker_destroy(&w)
+	target := fmt.tprintf("Casks/%s.json", flat)
+	for info in os.walker_walk(&w) {
+		if info.type == .Regular && strings.has_suffix(info.fullpath, target) {
+			return true
 		}
 	}
 	return false

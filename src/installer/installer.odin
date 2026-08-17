@@ -1140,6 +1140,22 @@ flatten_token :: proc(token: string) -> string {
     return out
 }
 
+// cask_token_safe rejects tokens that would escape the Caskroom when
+// flattened into a directory path ("", ".", "..", or anything containing
+// ".."), matching the guard used for formula names.
+cask_token_safe :: proc(token: string) -> bool {
+	if len(token) == 0 {
+		return false
+	}
+	if token == "." || token == ".." {
+		return false
+	}
+	if strings.contains(token, "..") {
+		return false
+	}
+	return true
+}
+
 resolve_arch_placeholders :: proc(s: string, allocator := context.temp_allocator) -> string {
 	arch_str := "x64"
 	when ODIN_ARCH == .arm64 {
@@ -1462,14 +1478,47 @@ write_cask_metadata :: proc(c: cask.Cask, version_fallback: string) -> bool {
 		arch = "arm64"
 	}
 	receipt_path := fmt.tprintf("%s/%s/.metadata/INSTALL_RECEIPT.json", CASKROOM_DIR, flat)
-	receipt := fmt.tprintf(
-		"{{\n  \"homebrew_version\": %q,\n  \"loaded_from_api\": true,\n  \"loaded_from_internal_api\": false,\n  \"uninstall_flight_blocks\": false,\n  \"installed_as_dependency\": false,\n  \"installed_on_request\": true,\n  \"time\": %d,\n  \"runtime_dependencies\": {{}},\n  \"source\": {{\n    \"tap\": null,\n    \"version\": %q\n  }},\n  \"arch\": %q,\n  \"uninstall_artifacts\": []\n}}\n",
-		UBREW_HOMEBREW_VERSION,
-		time.time_to_unix(time.now()),
-		ver,
-		arch,
-	)
-	if os.write_entire_file_from_string(receipt_path, receipt) != nil {
+
+	// Use json.marshal, not fmt.tprintf with %q, so externally sourced
+	// version strings receive RFC 8259 JSON escaping.
+	Cask_Receipt_Empty :: struct {}
+	Cask_Receipt_Source :: struct {
+		tap:     string `json:"tap,omitempty"`,
+		version: string `json:"version"`,
+	}
+	Cask_Receipt :: struct {
+		homebrew_version:         string              `json:"homebrew_version"`,
+		loaded_from_api:          bool                `json:"loaded_from_api"`,
+		loaded_from_internal_api: bool                `json:"loaded_from_internal_api"`,
+		uninstall_flight_blocks:  bool                `json:"uninstall_flight_blocks"`,
+		installed_as_dependency:  bool                `json:"installed_as_dependency"`,
+		installed_on_request:     bool                `json:"installed_on_request"`,
+		time:                     i64                 `json:"time"`,
+		runtime_dependencies:     Cask_Receipt_Empty  `json:"runtime_dependencies"`,
+		source:                   Cask_Receipt_Source `json:"source"`,
+		arch:                     string              `json:"arch"`,
+		uninstall_artifacts:      []string            `json:"uninstall_artifacts"`,
+	}
+	receipt := Cask_Receipt{
+		homebrew_version         = UBREW_HOMEBREW_VERSION,
+		loaded_from_api          = true,
+		loaded_from_internal_api = false,
+		uninstall_flight_blocks  = false,
+		installed_as_dependency  = false,
+		installed_on_request     = true,
+		time                     = time.time_to_unix(time.now()),
+		runtime_dependencies     = Cask_Receipt_Empty{},
+		source                   = Cask_Receipt_Source{tap = "", version = ver},
+		arch                     = arch,
+		uninstall_artifacts      = []string{},
+	}
+	payload, merr := json.marshal(receipt)
+	if merr != nil {
+		fmt.printf("Warning: failed to marshal cask install receipt for %s: %v\n", c.token, merr)
+		return false
+	}
+	defer delete(payload)
+	if os.write_entire_file(receipt_path, payload) != nil {
 		fmt.printf("Error: failed to write cask install receipt %s\n", receipt_path)
 		return false
 	}
@@ -2239,6 +2288,10 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	flat := flatten_token(c.token)
+	if !cask_token_safe(c.token) {
+		fmt.printf("ubrew: refusing to uninstall cask with unsafe token: %s\n", c.token)
+		return false
+	}
 	ver := c.version
 	if ver == "" {
 		ver = "latest"
