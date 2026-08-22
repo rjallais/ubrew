@@ -4,7 +4,9 @@ import "core:fmt"
 import "core:os"
 import "core:io"
 import "core:c/libc"
+import "core:path/filepath"
 import "core:strings"
+import "core:sys/posix"
 import "core:crypto/hash"
 import "core:encoding/hex"
 import "core:encoding/json"
@@ -338,7 +340,8 @@ elf_has_interp :: proc(path: string) -> bool {
 relocate_keg_binaries :: proc(dir: string, relocated_count: ^int) {
 	if fd, fd_err := os.open(dir); fd_err == nil {
 		defer os.close(fd)
-		if infos, read_err := os.read_directory_by_path(dir, -1, context.temp_allocator); read_err == nil {
+		if infos, read_err := os.read_directory_by_path(dir, -1, context.allocator); read_err == nil {
+			defer os.file_info_slice_delete(infos, context.allocator)
 			for info in infos {
 				if info.type == .Directory {
 					relocate_keg_binaries(info.fullpath, relocated_count)
@@ -495,7 +498,7 @@ relocate_macho_file :: proc(path: string) -> bool {
 						new_path, _ := strings.replace_all(old_path, "@@HOMEBREW_CELLAR@@", CELLAR_DIR, context.temp_allocator)
 						new_path, _ = strings.replace_all(new_path, "@@HOMEBREW_PREFIX@@", HOMEBREW_PREFIX, context.temp_allocator)
 						
-						tool_args := make([dynamic]string, context.temp_allocator)
+						tool_args := make([dynamic]string, context.allocator)
 						defer delete(tool_args)
 						
 						if current_cmd == "LC_RPATH" {
@@ -595,6 +598,400 @@ normalize_unpacked_keg_dir :: proc(formula_cellar_dir: string, version: string, 
 	}
 }
 
+// ── brew-parity formula linking ─────────────────────────────────────────
+// ubrew shares Homebrew's Cellar, so after a keg lands there Homebrew's
+// own symlink state must point at it — otherwise `brew upgrade`,
+// `brew uninstall`, `brew list` etc. trip over stale links referencing
+// superseded kegs. This mirrors what `brew link` does for a keg:
+//   1. symlink every keg file into the Homebrew prefix (bin, lib, ...)
+//   2. write $HOMEBREW_PREFIX/var/homebrew/linked/<name> -> ../../../Cellar/<name>/<version>
+//   3. write $HOMEBREW_PREFIX/opt/<name> -> ../Cellar/<name>/<version>
+// plus ubrew's own staging links (PREFIX/bin, PREFIX/opt) for isolated
+// installs.
+
+// resolve_link_absolute resolves a symlink target against the link's own
+// directory. brew writes relative targets (e.g. ../Cellar/libgit2/1.9.7/
+// ...) while ubrew writes absolute ones; resolving both makes "does this
+// link belong to our keg" checks version-independent.
+resolve_link_absolute :: proc(link_path, raw_target: string) -> string {
+	if strings.has_prefix(raw_target, "/") {
+		return raw_target
+	}
+	joined := fmt.tprintf("%s/%s", dir_name(link_path), raw_target)
+	cleaned, _ := filepath.clean(joined, context.temp_allocator)
+	return cleaned
+}
+
+// canonical_realpath resolves path through every symlink component
+// (realpath(3)). os.read_directory_by_path derives its fullpaths from
+// /proc/self/fd, which is already canonical, so a formula_dir built from
+// the configured CELLAR_DIR can differ in spelling when a prefix
+// component is a symlink (e.g. /home -> var/home). The caller must free
+// the returned pointer with posix.free; nil means resolution failed.
+canonical_realpath :: proc(path: string) -> cstring {
+	when ODIN_OS == .Windows {
+		return nil
+	} else {
+		cpath := strings.clone_to_cstring(path, context.temp_allocator)
+		return posix.realpath(cpath, nil)
+	}
+}
+
+// link_targets_formula reports whether an absolute, cleaned symlink
+// target belongs to formula_dir, matching either the configured spelling
+// or the canonical one (canon_formula_dir must end with '/').
+link_targets_formula :: proc(abs_target, formula_dir, canon_formula_dir: string) -> bool {
+	if strings.has_prefix(abs_target, formula_dir) {
+		return true
+	}
+	return len(canon_formula_dir) > 0 && strings.has_prefix(abs_target, canon_formula_dir)
+}
+
+// link_belongs_to_formula reports whether the symlink at link_path
+// resolves into formula_dir, spellings of either the configured or the
+// canonical path.
+link_belongs_to_formula :: proc(link_path, formula_dir: string) -> bool {
+	target, lerr := os.read_link(link_path, context.temp_allocator)
+	if lerr != nil {
+		return false
+	}
+	abs := resolve_link_absolute(link_path, target)
+	dir := formula_dir
+	if !strings.has_suffix(dir, "/") {
+		dir = fmt.tprintf("%s/", dir)
+	}
+	if strings.has_prefix(abs, dir) {
+		return true
+	}
+	canon_c := canonical_realpath(formula_dir)
+	if canon_c == nil {
+		return false
+	}
+	defer posix.free(canon_c)
+	canon_dir := fmt.tprintf("%s/", string(canon_c))
+	return strings.has_prefix(abs, canon_dir)
+}
+
+// should_skip_top_level reports whether a top-level keg entry should be
+// excluded from link/unlink passes. Brew never links keg-root metadata
+// (INSTALL_RECEIPT.json, TAB_FORMULA.json, sbom.spdx.json, CHANGES.md…)
+// nor the .brew/metadata directories. Centralizing the predicate keeps
+// link_keg_files and unlink_keg_files in sync.
+should_skip_top_level :: proc(name: string, type: os.File_Type) -> bool {
+	if type == .Directory && (name == ".brew" || name == "metadata") {
+		return true
+	}
+	if type != .Directory {
+		return true // all top-level non-directories are metadata
+	}
+	return false
+}
+
+// link_keg_files symlinks every regular file and symlink under keg_root
+// into prefix, mirroring `brew link`'s file pass. Directories are created
+// in the prefix; only files are linked. Links that already point at one of
+// this formula's own kegs (formula_dir) are replaced — that is the
+// upgrade/reinstall path. Foreign conflicts are replaced only when
+// overwrite is set, otherwise they are reported via failed.
+// Must be called after relocate_keg_placeholders; canon_formula_dir
+// invariant (trailing "/") is handled internally.
+link_keg_files :: proc(keg_root, prefix, formula_dir: string, overwrite, dry_run: bool, linked, deleted, failed: ^int) {
+	canon := ""
+	canon_owned := false
+	if canon_c := canonical_realpath(formula_dir); canon_c != nil {
+		defer posix.free(canon_c)
+		// Clone out of temp allocator: walk() recurses and reuses temp
+		// arena via fmt.tprintf/filepath.clean, which would otherwise
+		// overwrite the canon buffer mid-traversal.
+		canon = strings.clone(fmt.tprintf("%s/", string(canon_c)), context.allocator)
+		canon_owned = true
+	}
+	defer if canon_owned { delete(canon) }
+
+	link_one :: proc(src_path, dst_path, formula_dir, canon: string, overwrite, dry_run: bool, linked, deleted, failed: ^int) {
+		if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+			abs := resolve_link_absolute(dst_path, target)
+			if abs == src_path {
+				return // already linked to the exact keg file
+			}
+			if link_targets_formula(abs, formula_dir, canon) || overwrite {
+				if dry_run {
+					fmt.printf("Would delete: %s\n", dst_path)
+					deleted^ += 1
+				} else if err := os.remove(dst_path); err != nil {
+					fmt.printf("ubrew: failed to remove %s: %v\n", dst_path, err)
+					failed^ += 1
+					return
+				} else {
+					deleted^ += 1
+				}
+			} else {
+				fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
+				failed^ += 1
+				return
+			}
+		} else if os.exists(dst_path) {
+			if !overwrite {
+				fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
+				failed^ += 1
+				return
+			}
+			if dry_run {
+				fmt.printf("Would delete: %s\n", dst_path)
+				deleted^ += 1
+			} else if err := os.remove(dst_path); err != nil {
+				fmt.printf("ubrew: failed to remove %s: %v\n", dst_path, err)
+				failed^ += 1
+				return
+			} else {
+				deleted^ += 1
+			}
+		}
+
+		if dry_run {
+			fmt.printf("Would link: %s -> %s\n", dst_path, src_path)
+			linked^ += 1
+			return
+		}
+		if serr := os.symlink(src_path, dst_path); serr != nil {
+			fmt.printf("ubrew: failed to symlink %s -> %s: %v\n", dst_path, src_path, serr)
+			failed^ += 1
+			return
+		}
+		linked^ += 1
+	}
+
+	walk :: proc(src_dir, dst_dir, formula_dir, canon: string, top_level: bool, overwrite, dry_run: bool, linked, deleted, failed: ^int) {
+		infos, err := os.read_directory_by_path(src_dir, -1, context.allocator)
+		if err != nil {
+			return
+		}
+		defer os.file_info_slice_delete(infos, context.allocator)
+
+		for info in infos {
+			if top_level && should_skip_top_level(info.name, info.type) {
+				continue
+			}
+
+			src_path := info.fullpath
+			dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
+
+			if info.type == .Directory {
+				if !dry_run {
+					_ = os.make_directory_all(dst_path, os.perm(0o755))
+				}
+				walk(src_path, dst_path, formula_dir, canon, false, overwrite, dry_run, linked, deleted, failed)
+			} else if info.type == .Regular || info.type == .Symlink {
+				link_one(src_path, dst_path, formula_dir, canon, overwrite, dry_run, linked, deleted, failed)
+			}
+		}
+	}
+
+	walk(keg_root, prefix, formula_dir, canon, true, overwrite, dry_run, linked, deleted, failed)
+}
+
+// unlink_keg_files removes prefix symlinks that point at one of name's
+// kegs, using the keg's own file list as the source of truth (the same
+// relative paths `brew unlink` would remove).
+unlink_keg_files :: proc(keg_root, prefix, formula_dir: string, dry_run: bool, unlinked, failed: ^int) {
+	canon := ""
+	canon_owned := false
+	if canon_c := canonical_realpath(formula_dir); canon_c != nil {
+		defer posix.free(canon_c)
+		canon = strings.clone(fmt.tprintf("%s/", string(canon_c)), context.allocator)
+		canon_owned = true
+	}
+	defer if canon_owned { delete(canon) }
+
+	walk :: proc(src_dir, dst_dir, formula_dir, canon: string, top_level: bool, dry_run: bool, unlinked, failed: ^int) {
+		infos, err := os.read_directory_by_path(src_dir, -1, context.allocator)
+		if err != nil {
+			return
+		}
+		defer os.file_info_slice_delete(infos, context.allocator)
+
+		for info in infos {
+			if top_level && should_skip_top_level(info.name, info.type) {
+				continue
+			}
+
+			src_path := info.fullpath
+			dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
+
+			if info.type == .Directory {
+				walk(src_path, dst_path, formula_dir, canon, false, dry_run, unlinked, failed)
+			} else if info.type == .Regular || info.type == .Symlink {
+				target, lerr := os.read_link(dst_path, context.temp_allocator)
+				if lerr != nil {
+					continue
+				}
+				abs := resolve_link_absolute(dst_path, target)
+				if !link_targets_formula(abs, formula_dir, canon) {
+					continue
+				}
+				if dry_run {
+					fmt.printf("Would unlink: %s\n", dst_path)
+					unlinked^ += 1
+				} else if err := os.remove(dst_path); err != nil {
+					fmt.printf("ubrew: failed to remove link %s: %v\n", dst_path, err)
+					failed^ += 1
+				} else {
+					unlinked^ += 1
+				}
+			}
+		}
+	}
+
+	walk(keg_root, prefix, formula_dir, canon, true, dry_run, unlinked, failed)
+}
+
+// link_keg_bin stages a keg's bin/ binaries into ubrew's own prefix bin.
+link_keg_bin :: proc(keg_dir, bin_dir: string) -> bool {
+	keg_bin := fmt.tprintf("%s/bin", keg_dir)
+	if !os.is_dir(keg_bin) {
+		return true
+	}
+	infos, err := os.read_directory_by_path(keg_bin, -1, context.allocator)
+	if err != nil {
+		fmt.println("Error reading binary directory.")
+		return false
+	}
+	defer os.file_info_slice_delete(infos, context.allocator)
+
+	for info in infos {
+		if info.type == .Regular || info.type == .Symlink {
+			src_file := info.fullpath
+			dst_file := fmt.tprintf("%s/%s", bin_dir, info.name)
+			os.remove(dst_file)
+			sym_err := os.symlink(src_file, dst_file)
+			if sym_err != nil {
+				fmt.printf("Error linking binary %s: %v\n", info.name, sym_err)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// write_linked_keg_record writes brew's "linked keg" record at
+// $HOMEBREW_PREFIX/var/homebrew/linked/<name>, using brew's own relative
+// target so both tools resolve it the same way. This is the record brew's
+// upgrade / list / uninstall commands rely on.
+write_linked_keg_record :: proc(name, version: string) -> bool {
+	linked_dir := fmt.tprintf("%s/var/homebrew/linked", HOMEBREW_PREFIX)
+	if !ensure_dir(linked_dir) {
+		return false
+	}
+	link_path := fmt.tprintf("%s/%s", linked_dir, name)
+	_ = os.remove(link_path)
+	target := fmt.tprintf("../../../Cellar/%s/%s", name, version)
+	expected_cellar := fmt.tprintf("%s/Cellar", HOMEBREW_PREFIX)
+	if CELLAR_DIR != expected_cellar {
+		if rel, err := filepath.rel(linked_dir, fmt.tprintf("%s/%s/%s", CELLAR_DIR, name, version), context.temp_allocator); err == nil {
+			target = rel
+		} else {
+			target = fmt.tprintf("%s/%s/%s", CELLAR_DIR, name, version)
+		}
+	}
+	if err := os.symlink(target, link_path); err != nil {
+		fmt.printf("Error: failed to create linked-keg record %s: %v\n", link_path, err)
+		return false
+	}
+	return true
+}
+
+// remove_linked_keg_record drops brew's linked-keg record for name.
+remove_linked_keg_record :: proc(name: string) {
+	link_path := fmt.tprintf("%s/var/homebrew/linked/%s", HOMEBREW_PREFIX, name)
+	os.remove(link_path)
+}
+
+// linked_keg_record_version returns the version component of the keg
+// brew's linked-keg record for name points at, or "" when there is no
+// record. It works even when the record is dangling — which is exactly
+// when callers need to know which keg it used to reference.
+linked_keg_record_version :: proc(name: string) -> string {
+	link_path := fmt.tprintf("%s/var/homebrew/linked/%s", HOMEBREW_PREFIX, name)
+	target, err := os.read_link(link_path, context.temp_allocator)
+	if err != nil {
+		return ""
+	}
+	idx := strings.last_index(target, "/")
+	return idx < 0 ? target : target[idx+1:]
+}
+
+// write_opt_links points opt/<name> at the keg in both ubrew's own prefix
+// and the Homebrew prefix (Homebrew bottles bake RUNPATHs for
+// $HOMEBREW_PREFIX/opt/<name>/..., so the link must exist there for the
+// keg's binaries to resolve their dependencies in a shared-Cellar install).
+write_opt_links :: proc(name, version: string) -> bool {
+	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, name, version)
+	opt_dirs := [2]string{
+		fmt.tprintf("%s/opt", PREFIX),
+		fmt.tprintf("%s/opt", HOMEBREW_PREFIX),
+	}
+	for opt_dir in opt_dirs {
+		// Linux make_directory_all returns .Exist when the dir already
+		// exists (the common case on reinstall); treat that as success.
+		if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
+			if err != .Exist {
+				fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
+				return false
+			}
+		}
+		link_path := fmt.tprintf("%s/%s", opt_dir, name)
+		_ = os.remove(link_path)
+		if err := os.symlink(opt_target, link_path); err != nil {
+			fmt.printf("Error: failed to create opt link %s: %v\n", link_path, err)
+			return false
+		}
+	}
+	return true
+}
+
+// link_formula_keg is the single post-install link step for a formula keg:
+// ubrew's own staging bin, then brew-parity file linking into the shared
+// prefix plus the linked-keg record and opt links. Called by every install
+// path (bottle, source, COW materialization, reinstall).
+// For keg_only formulae, the shared HOMEBREW_PREFIX pass and linked-keg
+// record are skipped (matching `brew install` for keg-only), while staging
+// links and opt links are still created.
+link_formula_keg :: proc(name, version: string, keg_only: bool = false) -> bool {
+	keg_root := fmt.tprintf("%s/%s/%s", CELLAR_DIR, name, version)
+	formula_dir := fmt.tprintf("%s/%s/", CELLAR_DIR, name)
+
+	// ubrew's own staging bin
+	if !ensure_dir(fmt.tprintf("%s/bin", PREFIX)) {
+		return false
+	}
+	if !link_keg_bin(keg_root, fmt.tprintf("%s/bin", PREFIX)) {
+		return false
+	}
+
+	if keg_only {
+		return write_opt_links(name, version)
+	}
+
+	// brew-parity file pass into the shared prefix; conflicts are
+	// warnings, not failures — the install itself succeeded.
+	linked, deleted, failed := 0, 0, 0
+	link_keg_files(keg_root, HOMEBREW_PREFIX, formula_dir, false, false, &linked, &deleted, &failed)
+	if failed > 0 {
+		fmt.printf("==> Warning: %d file(s) could not be linked into %s\n", failed, HOMEBREW_PREFIX)
+	}
+	if deleted > 0 {
+		fmt.printf("==> Removed %d stale link(s) from %s\n", deleted, HOMEBREW_PREFIX)
+	}
+	if linked > 0 {
+		fmt.printf("==> Linked %s %s into %s (%d file(s))\n", name, version, HOMEBREW_PREFIX, linked)
+	}
+
+	if !write_linked_keg_record(name, version) {
+		return false
+	}
+	return write_opt_links(name, version)
+}
+
 install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> bool {
 	fmt.printf("==> Installing bottle: %s %s\n", f.name, f.version)
 
@@ -674,9 +1071,12 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		// post-unpack rename can only ever move the directory this tar
 		// creates — never a pre-existing keg (the Cellar is shared with
 		// Homebrew and holds several versions).
-		existing_kegs := make(map[string]bool)
+		existing_kegs := make(map[string]bool, context.allocator)
 		defer delete(existing_kegs)
-		if existing_infos, existing_err := os.read_directory_by_path(formula_cellar_dir, -1, context.allocator); existing_err == nil {
+		existing_infos, existing_err := os.read_directory_by_path(formula_cellar_dir, -1, context.allocator)
+		if existing_err != nil {
+			fmt.printf("Warning: could not list %s: %v\n", formula_cellar_dir, existing_err)
+		} else {
 			defer os.file_info_slice_delete(existing_infos, context.allocator)
 			for info in existing_infos {
 				if info.type == .Directory {
@@ -716,70 +1116,8 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	bin_dir := fmt.tprintf("%s/bin", keg_dir)
-	if os.is_dir(bin_dir) {
-		fd, fd_err := os.open(bin_dir)
-		if fd_err == nil {
-			defer os.close(fd)
-			infos, read_err := os.read_directory_by_path(bin_dir, -1, context.temp_allocator)
-			if read_err == nil {
-				for info in infos {
-					if info.type == .Regular || info.type == .Symlink {
-						src_file := info.fullpath
-						dst_file := fmt.tprintf("%s/bin/%s", prefix, info.name)
-						os.remove(dst_file)
-						sym_err := os.symlink(src_file, dst_file)
-						if sym_err != nil {
-							fmt.printf("Error linking binary %s: %v\n", info.name, sym_err)
-							return false
-						}
-					}
-				}
-			} else {
-				fmt.println("Error reading binary directory.")
-				return false
-			}
-		} else {
-			fmt.println("Error: Linking binaries failed.")
-			return false
-		}
-	}
-
-	// Create opt symlink
-	opt_dir := fmt.tprintf("%s/opt", prefix)
-	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
-		// Linux make_directory_all returns .Exist when the dir already
-		// exists (the common case on reinstall); treat that as success.
-		if err != .Exist {
-			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
-			return false
-		}
-	}
-	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
-	_ = os.remove(opt_link)
-	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
-	if err := os.symlink(opt_target, opt_link); err != nil {
-		fmt.printf("Error: failed to create opt link %s: %v\n", opt_link, err)
-		return false
-	}
-
-	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
-	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
-	// libperl.so), so the opt link must also exist there for the keg's
-	// binaries to resolve their dependencies in a shared-Cellar install.
-	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
-	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
-		// Linux make_directory_all returns .Exist when the dir already
-		// exists (the common case on reinstall); treat that as success.
-		if err != .Exist {
-			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
-			return false
-		}
-	}
-	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
-	_ = os.remove(homebrew_opt_link)
-	if err := os.symlink(opt_target, homebrew_opt_link); err != nil {
-		fmt.printf("Error: failed to create opt link %s: %v\n", homebrew_opt_link, err)
+	if !link_formula_keg(f.name, f.version, f.keg_only) {
+		_ = os.remove_all(keg_dir)
 		return false
 	}
 
@@ -934,40 +1272,28 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 			return false
 		}
 	} else if ext == ".zip" {
-		cmd_ex := fmt.tprintf("unzip -q \"%s\" -d \"%s\"", dl_path, build_dir)
-		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-		if libc.system(cmd_ex_cstr) != 0 {
+		if !platform.exec_cmd("unzip", []string{"unzip", "-q", dl_path, "-d", build_dir}) {
 			fmt.println("Error: unzip failed.")
 			return false
 		}
 	} else if ext == ".tar.gz" {
-		cmd_ex := fmt.tprintf("tar -xzf \"%s\" -C \"%s\"", dl_path, build_dir)
-		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-		if libc.system(cmd_ex_cstr) != 0 {
+		if !platform.exec_cmd("tar", []string{"tar", "-xzf", dl_path, "-C", build_dir}) {
 			fmt.println("Error: tar extraction failed.")
 			return false
 		}
 	} else if ext == ".tar.bz2" {
-		cmd_ex := fmt.tprintf("tar -xjf \"%s\" -C \"%s\"", dl_path, build_dir)
-		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-		if libc.system(cmd_ex_cstr) != 0 {
+		if !platform.exec_cmd("tar", []string{"tar", "-xjf", dl_path, "-C", build_dir}) {
 			fmt.println("Error: tar extraction failed.")
 			return false
 		}
 	} else if ext == ".tar.xz" {
-		cmd_ex := fmt.tprintf("tar -xJf \"%s\" -C \"%s\"", dl_path, build_dir)
-		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-		if libc.system(cmd_ex_cstr) != 0 {
+		if !platform.exec_cmd("tar", []string{"tar", "-xJf", dl_path, "-C", build_dir}) {
 			fmt.println("Error: tar extraction failed.")
 			return false
 		}
 	} else if ext == ".tar.zst" {
-		cmd_ex := fmt.tprintf("tar --use-compress-program=unzstd -xf \"%s\" -C \"%s\" 2>/dev/null", dl_path, build_dir)
-		cmd_ex_cstr := strings.clone_to_cstring(cmd_ex, context.temp_allocator)
-		if libc.system(cmd_ex_cstr) != 0 {
-			cmd_ex_plain := fmt.tprintf("tar -xf \"%s\" -C \"%s\"", dl_path, build_dir)
-			cmd_ex_plain_cstr := strings.clone_to_cstring(cmd_ex_plain, context.temp_allocator)
-			if libc.system(cmd_ex_plain_cstr) != 0 {
+		if !platform.exec_cmd("tar", []string{"tar", "--use-compress-program=unzstd", "-xf", dl_path, "-C", build_dir}) {
+			if !platform.exec_cmd("tar", []string{"tar", "-xf", dl_path, "-C", build_dir}) {
 				fmt.println("Error: zstd tar extraction failed.")
 				return false
 			}
@@ -987,70 +1313,38 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	#partial switch build_sys {
 	case .CMake:
-		cmd_config := fmt.tprintf("cd \"%s\" && cmake -B build -DCMAKE_INSTALL_PREFIX=\"%s\"", src_root, keg_dir)
-		cmd_config_cstr := strings.clone_to_cstring(cmd_config, context.temp_allocator)
-		cmd_build := fmt.tprintf("cd \"%s\" && cmake --build build -j 4", src_root)
-		cmd_build_cstr := strings.clone_to_cstring(cmd_build, context.temp_allocator)
-		cmd_install := fmt.tprintf("cd \"%s\" && cmake --install build", src_root)
-		cmd_install_cstr := strings.clone_to_cstring(cmd_install, context.temp_allocator)
-
-		if libc.system(cmd_config_cstr) == 0 && libc.system(cmd_build_cstr) == 0 && libc.system(cmd_install_cstr) == 0 {
+		if platform.exec_cmd_in_dir(src_root, "cmake", []string{"cmake", "-B", "build", fmt.tprintf("-DCMAKE_INSTALL_PREFIX=%s", keg_dir)}) &&
+		   platform.exec_cmd_in_dir(src_root, "cmake", []string{"cmake", "--build", "build", "-j", "4"}) &&
+		   platform.exec_cmd_in_dir(src_root, "cmake", []string{"cmake", "--install", "build"}) {
 			build_ok = true
 		}
 
 	case .Autotools:
-		cmd_config := fmt.tprintf("cd \"%s\" && ./configure --prefix=\"%s\"", src_root, keg_dir)
-		cmd_config_cstr := strings.clone_to_cstring(cmd_config, context.temp_allocator)
-		cmd_build := fmt.tprintf("cd \"%s\" && make -j 4", src_root)
-		cmd_build_cstr := strings.clone_to_cstring(cmd_build, context.temp_allocator)
-		cmd_install := fmt.tprintf("cd \"%s\" && make install", src_root)
-		cmd_install_cstr := strings.clone_to_cstring(cmd_install, context.temp_allocator)
-
-		if libc.system(cmd_config_cstr) == 0 && libc.system(cmd_build_cstr) == 0 && libc.system(cmd_install_cstr) == 0 {
+		if platform.exec_cmd_in_dir(src_root, "./configure", []string{"./configure", fmt.tprintf("--prefix=%s", keg_dir)}) &&
+		   platform.exec_cmd_in_dir(src_root, "make", []string{"make", "-j", "4"}) &&
+		   platform.exec_cmd_in_dir(src_root, "make", []string{"make", "install"}) {
 			build_ok = true
 		}
 
 	case .Meson:
-		cmd_config := fmt.tprintf("cd \"%s\" && meson setup build --prefix=\"%s\"", src_root, keg_dir)
-		cmd_config_cstr := strings.clone_to_cstring(cmd_config, context.temp_allocator)
-		cmd_build := fmt.tprintf("cd \"%s\" && meson compile -C build", src_root)
-		cmd_build_cstr := strings.clone_to_cstring(cmd_build, context.temp_allocator)
-		cmd_install := fmt.tprintf("cd \"%s\" && meson install -C build", src_root)
-		cmd_install_cstr := strings.clone_to_cstring(cmd_install, context.temp_allocator)
-
-		if libc.system(cmd_config_cstr) == 0 && libc.system(cmd_build_cstr) == 0 && libc.system(cmd_install_cstr) == 0 {
+		if platform.exec_cmd_in_dir(src_root, "meson", []string{"meson", "setup", "build", fmt.tprintf("--prefix=%s", keg_dir)}) &&
+		   platform.exec_cmd_in_dir(src_root, "meson", []string{"meson", "compile", "-C", "build"}) &&
+		   platform.exec_cmd_in_dir(src_root, "meson", []string{"meson", "install", "-C", "build"}) {
 			build_ok = true
 		}
 
 	case .Make:
-		cmd_build := fmt.tprintf("cd \"%s\" && make PREFIX=\"%s\" -j 4", src_root, keg_dir)
-		cmd_build_cstr := strings.clone_to_cstring(cmd_build, context.temp_allocator)
-		cmd_install := fmt.tprintf("cd \"%s\" && make PREFIX=\"%s\" install", src_root, keg_dir)
-		cmd_install_cstr := strings.clone_to_cstring(cmd_install, context.temp_allocator)
-
-		if libc.system(cmd_build_cstr) == 0 && libc.system(cmd_install_cstr) == 0 {
+		if platform.exec_cmd_in_dir(src_root, "make", []string{"make", fmt.tprintf("PREFIX=%s", keg_dir), "-j", "4"}) &&
+		   platform.exec_cmd_in_dir(src_root, "make", []string{"make", fmt.tprintf("PREFIX=%s", keg_dir), "install"}) {
 			build_ok = true
 		}
 
 	case .Unknown:
-		// Standalone files copy (similar to Nanobrew fallback). We copy
-		// everything from the source root into the keg, then if the
-		// formula declared any `bin.install "..."` directives we honour
-		// them by:
-		//   1. Creating a `bin/` subdir in the keg
-		//   2. Moving the named files into it
-		cmd_cp := fmt.tprintf("cp -R \"%s\"/* \"%s\"/", src_root, keg_dir)
-		cmd_cp_cstr := strings.clone_to_cstring(cmd_cp, context.temp_allocator)
-		if libc.system(cmd_cp_cstr) == 0 {
+		if platform.exec_cmd("cp", []string{"cp", "-R", src_root, keg_dir}) {
 			build_ok = true
 		}
-		// Materialise the bin/ directory requested by bin.install. Each
-		// name in f.binaries is the basename of a file that should end up
-		// at <keg>/bin/<name>. We use a single shell pipeline that walks
-		// the keg (excluding the bin/ subdir itself), finds the named
-		// file, and moves it into bin/. This is simpler than per-name
-		// popen plumbing in Odin and handles the common case where the
-		// file lives at <keg>/<name> directly.
+		// Materialise the bin/ directory requested by bin.install without
+		// shell interpolation: walk keg natively and move the first match.
 		if build_ok && len(f.binaries) > 0 {
 			keg_bin := fmt.tprintf("%s/bin", keg_dir)
 			_ = os.make_directory_all(keg_bin, os.perm(0o755))
@@ -1059,21 +1353,12 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 					fmt.eprintf("Warning: skipping binary %q (unsafe name)\n", b)
 					continue
 				}
-				// Pipeline: find the file (excluding bin/ itself) and mv it.
-				// `2>/dev/null` suppresses find errors; `|| true` keeps the
-				// pipeline non-fatal if the file isn't found.
-				mv_cmd := fmt.tprintf(
-					"FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"%s\" -not -path \"%s/*\" 2>/dev/null | head -1); " +
-					"if [ -z \"$FOUND\" ]; then FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"%s*\" -not -path \"%s/*\" 2>/dev/null | head -1); fi; " +
-					"if [ -z \"$FOUND\" ]; then FOUND=$(find \"%s\" -maxdepth 3 -type f -name \"*%s*\" -not -path \"%s/*\" 2>/dev/null | head -1); fi; " +
-					"if [ -n \"$FOUND\" ]; then mv \"$FOUND\" \"%s/%s\" && chmod +x \"%s/%s\"; fi",
-					keg_dir, b, keg_bin,
-					keg_dir, b, keg_bin,
-					keg_dir, b, keg_bin,
-					keg_bin, b, keg_bin, b,
-				)
-				mv_cstr := strings.clone_to_cstring(mv_cmd, context.temp_allocator)
-				_ = libc.system(mv_cstr)
+				if found := find_first_matching_file(keg_dir, keg_bin, b, context.temp_allocator); found != "" {
+					dst := fmt.tprintf("%s/%s", keg_bin, b)
+					if os.rename(found, dst) == nil {
+						_ = os.chmod(dst, os.perm(0o755))
+					}
+				}
 			}
 		}
 	}
@@ -1102,71 +1387,8 @@ install_source :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 		return false
 	}
 
-	// Link binaries
-	bin_dir := fmt.tprintf("%s/bin", keg_dir)
-	if os.is_dir(bin_dir) {
-		fd, fd_err := os.open(bin_dir)
-		if fd_err == nil {
-			defer os.close(fd)
-			infos, read_err := os.read_directory_by_path(bin_dir, -1, context.temp_allocator)
-			if read_err == nil {
-				for info in infos {
-					if info.type == .Regular || info.type == .Symlink {
-						src_file := info.fullpath
-						dst_file := fmt.tprintf("%s/bin/%s", prefix, info.name)
-						os.remove(dst_file)
-						sym_err := os.symlink(src_file, dst_file)
-						if sym_err != nil {
-							fmt.printf("Error linking binary %s: %v\n", info.name, sym_err)
-							return false
-						}
-					}
-				}
-			} else {
-				fmt.println("Error reading binary directory.")
-				return false
-			}
-		} else {
-			fmt.println("Error: Linking binaries failed.")
-			return false
-		}
-	}
-
-	// Create opt symlink
-	opt_dir := fmt.tprintf("%s/opt", prefix)
-	if err := os.make_directory_all(opt_dir, os.perm(0o755)); err != nil {
-		// Linux make_directory_all returns .Exist when the dir already
-		// exists (the common case on reinstall); treat that as success.
-		if err != .Exist {
-			fmt.printf("Error: failed to create opt dir %s: %v\n", opt_dir, err)
-			return false
-		}
-	}
-	opt_link := fmt.tprintf("%s/%s", opt_dir, f.name)
-	_ = os.remove(opt_link)
-	opt_target := fmt.tprintf("%s/%s/%s", CELLAR_DIR, f.name, f.version)
-	if err := os.symlink(opt_target, opt_link); err != nil {
-		fmt.printf("Error: failed to create opt link %s: %v\n", opt_link, err)
-		return false
-	}
-
-	// Homebrew bottles bake RUNPATHs for <HOMEBREW_PREFIX>/opt/<name>/...
-	// (e.g. perl's RUNPATH references .../opt/perl/lib/.../CORE to find
-	// libperl.so), so the opt link must also exist there for the keg's
-	// binaries to resolve their dependencies in a shared-Cellar install.
-	homebrew_opt_dir := fmt.tprintf("%s/opt", HOMEBREW_PREFIX)
-	if err := os.make_directory_all(homebrew_opt_dir, os.perm(0o755)); err != nil {
-		// Linux make_directory_all returns .Exist when the dir already
-		// exists (the common case on reinstall); treat that as success.
-		if err != .Exist {
-			fmt.printf("Error: failed to create opt dir %s: %v\n", homebrew_opt_dir, err)
-			return false
-		}
-	}
-	homebrew_opt_link := fmt.tprintf("%s/%s", homebrew_opt_dir, f.name)
-	_ = os.remove(homebrew_opt_link)
-	if err := os.symlink(opt_target, homebrew_opt_link); err != nil {
-		fmt.printf("Error: failed to create opt link %s: %v\n", homebrew_opt_link, err)
+	if !link_formula_keg(f.name, f.version, f.keg_only) {
+		_ = os.remove_all(keg_dir)
 		return false
 	}
 
@@ -1214,6 +1436,35 @@ cask_token_safe :: proc(token: string) -> bool {
 		return false
 	}
 	return true
+}
+
+find_first_matching_file :: proc(keg_dir, keg_bin, name: string, allocator := context.allocator) -> string {
+	best: string = ""
+	best_score := 10
+	walk :: proc(dir, keg_bin, name: string, depth: int, best: ^string, best_score: ^int) {
+		if depth > 3 { return }
+		alloc := context.allocator
+		infos, err := os.read_directory_by_path(dir, -1, alloc)
+		if err != nil { return }
+		defer os.file_info_slice_delete(infos, alloc)
+		for info in infos {
+			if info.fullpath == keg_bin { continue }
+			if strings.has_prefix(info.fullpath, fmt.tprintf("%s/", keg_bin)) { continue }
+			if info.type == .Directory {
+				walk(info.fullpath, keg_bin, name, depth+1, best, best_score)
+			} else if info.type == .Regular {
+				score := 10
+				if info.name == name { score = 0 } else if strings.has_prefix(info.name, name) { score = 1 } else if strings.contains(info.name, name) { score = 2 } else { continue }
+				if score < best_score^ {
+					best^ = strings.clone(info.fullpath, context.temp_allocator)
+					best_score^ = score
+				}
+			}
+		}
+	}
+	walk(keg_dir, keg_bin, name, 0, &best, &best_score)
+	if best == "" { return "" }
+	return strings.clone(best, allocator)
 }
 
 resolve_arch_placeholders :: proc(s: string, allocator := context.temp_allocator) -> string {

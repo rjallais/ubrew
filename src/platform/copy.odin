@@ -209,6 +209,37 @@ exec_cmd_capture :: proc(bin: string, args: []string, buf: []u8, suppress_stderr
 	return "", false
 }
 
+exec_cmd_in_dir :: proc(dir, bin: string, args: []string) -> bool {
+	if GLOBAL_DEBUG {
+		fmt.printf("+ (in %s) ", dir)
+		for arg, idx in args {
+			if idx > 0 do fmt.print(" ")
+			fmt.print(arg)
+		}
+		fmt.println()
+	}
+	argv := make([]cstring, len(args)+1, context.temp_allocator)
+	for i in 0..<len(args) {
+		argv[i] = strings.clone_to_cstring(args[i], context.temp_allocator)
+	}
+	argv[len(args)] = nil
+	bin_cstr := strings.clone_to_cstring(bin, context.temp_allocator)
+	dir_cstr := strings.clone_to_cstring(dir, context.temp_allocator)
+	pid := posix.fork()
+	if pid == 0 {
+		if posix.chdir(dir_cstr) != .OK {
+			posix.exit(127)
+		}
+		posix.execvp(bin_cstr, &argv[0])
+		posix.exit(1)
+	} else if pid > 0 {
+		status: c.int
+		posix.waitpid(pid, &status, nil)
+		return status == 0
+	}
+	return false
+}
+
 cp_fallback :: proc(src: string, dst: string) -> bool {
 	when ODIN_OS == .Linux {
 		args := []string{"cp", "--reflink=auto", "-R", src, dst}

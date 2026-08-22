@@ -11,6 +11,11 @@
 //     don't clobber each other.
 //   - Symlinks under PREFIX/bin are per binary name — no two packages
 //     share a binary name, so there is no race on the link target.
+//     HOMEBREW_PREFIX file links (link_keg_files) are per-package file
+//     sets; two formulae rarely ship the same top-level file name, but
+//     if they do the `overwrite=false` conflict path in link_one
+//     serialises via filesystem atomicity (os.remove+symlink) — a lost
+//     race would be retried on next `ubrew link`.
 //   - history.load + history.save are serialised under dag_history_mutex
 //     because the file is a single JSON blob.  remove_formula (called on
 //     forced reinstalls) serialises its own history writes under the same
@@ -91,7 +96,26 @@ dag_formula_task :: proc(t: thread.Task) {
 	if force {
 		_ = unlink_formula_bins(f.name)
 		formula_dir := fmt.tprintf("%s/%s", installer.CELLAR_DIR, f.name)
+		// brew-parity: drop the shared prefix's links and the linked-keg
+		// record before the keg goes away, so a failed reinstall never
+		// leaves dangling links behind.
+		formula_marker := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, f.name)
+		listing_alloc := context.allocator
+		if v_infos, v_err := os.read_directory_by_path(formula_dir, -1, listing_alloc); v_err == nil {
+			defer os.file_info_slice_delete(v_infos, listing_alloc)
+			for v_info in v_infos {
+				if v_info.type == .Directory && is_version_dir(v_info.name) {
+					unlinked, unlink_failed := 0, 0
+					installer.unlink_keg_files(v_info.fullpath, installer.HOMEBREW_PREFIX, formula_marker, false, &unlinked, &unlink_failed)
+					if unlink_failed > 0 {
+						fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s\n", unlink_failed, f.name, v_info.name)
+					}
+				}
+			}
+		}
+		installer.remove_linked_keg_record(f.name)
 		os.remove_all(formula_dir)
+		unlink_formula_opt_links(f.name)
 
 		sync.guard(&dag_history_mutex)
 		h_names, h_entries := history.load(context.allocator)
