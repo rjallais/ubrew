@@ -108,7 +108,14 @@ dag_formula_task :: proc(t: thread.Task) {
 					unlinked, unlink_failed := 0, 0
 					installer.unlink_keg_files(v_info.fullpath, installer.HOMEBREW_PREFIX, formula_marker, false, &unlinked, &unlink_failed)
 					if unlink_failed > 0 {
-						fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s\n", unlink_failed, f.name, v_info.name)
+						fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in shared prefix\n", unlink_failed, f.name, v_info.name)
+					}
+					if installer.PREFIX != installer.HOMEBREW_PREFIX {
+						unlinked, unlink_failed = 0, 0
+						installer.unlink_keg_files(v_info.fullpath, installer.PREFIX, formula_marker, false, &unlinked, &unlink_failed)
+						if unlink_failed > 0 {
+							fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in ubrew prefix\n", unlink_failed, f.name, v_info.name)
+						}
 					}
 				}
 			}

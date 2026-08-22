@@ -969,6 +969,7 @@ link_formula_keg :: proc(name, version: string, keg_only: bool = false) -> bool 
 	}
 
 	if keg_only {
+		remove_linked_keg_record(name)
 		return write_opt_links(name, version)
 	}
 

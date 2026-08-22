@@ -2810,7 +2810,16 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
                 unlinked, unlink_failed := 0, 0
                 installer.unlink_keg_files(v_info.fullpath, installer.HOMEBREW_PREFIX, formula_marker, false, &unlinked, &unlink_failed)
                 removed_links += unlinked
-                _ = unlink_failed
+                if unlink_failed > 0 {
+                    fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in shared prefix\n", unlink_failed, name, v_info.name)
+                }
+                if installer.PREFIX != installer.HOMEBREW_PREFIX {
+                    unlinked, unlink_failed = 0, 0
+                    installer.unlink_keg_files(v_info.fullpath, installer.PREFIX, formula_marker, false, &unlinked, &unlink_failed)
+                    if unlink_failed > 0 {
+                        fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in ubrew prefix\n", unlink_failed, name, v_info.name)
+                    }
+                }
             }
         }
     }
@@ -6899,6 +6908,17 @@ run_upgrade :: proc(args: []string) {
 					continue
 				}
 				old_keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, pkg.name, pkg.old_version)
+				// Clean up old-only prefix links before deleting the keg,
+				// scoped to the exact old keg so new-version links survive.
+				{
+					old_root := fmt.tprintf("%s/", old_keg_dir)
+					_, _ = old_root, pkg
+					unlinked, _unlinked_failed := 0, 0
+					installer.unlink_keg_files(old_keg_dir, installer.HOMEBREW_PREFIX, old_root, false, &unlinked, &_unlinked_failed)
+					if installer.PREFIX != installer.HOMEBREW_PREFIX {
+						installer.unlink_keg_files(old_keg_dir, installer.PREFIX, old_root, false, &unlinked, &_unlinked_failed)
+					}
+				}
 				_ = os.remove_all(old_keg_dir)
 			}
 		}
