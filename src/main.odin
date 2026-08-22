@@ -6895,7 +6895,6 @@ run_upgrade :: proc(args: []string) {
 				continue
 			}
 			if pkg.old_version != "" && pkg.old_version != pkg.new_version {
-				unlink_formula_bins(pkg.name)
 				// Repoint brew's shared records at the new keg BEFORE the
 				// old one disappears: if any install path skipped relinking,
 				// they still reference old_version, and deleting its keg
