@@ -117,9 +117,9 @@ run_init :: proc() {
 
     sudo_user := os.get_env("SUDO_USER", context.temp_allocator)
     if sudo_user != "" && package_name_safe(sudo_user) && !strings.contains(sudo_user, "/") {
-        cmd := fmt.tprintf("chown -R %s '%s'", sudo_user, installer.UBREW_ROOT)
-        cmd_cstr := strings.clone_to_cstring(cmd, context.temp_allocator)
-        _ = libc.system(cmd_cstr)
+        // Use arg-array exec to avoid shell quoting/injection; UBREW_ROOT
+        // is a trusted constant but sudo_user is env-controlled.
+        _ = platform.exec_cmd("chown", []string{"chown", "-R", sudo_user, installer.UBREW_ROOT})
     }
 
     fmt.printf("ubrew initialized at %s\n", installer.UBREW_ROOT)
@@ -158,8 +158,9 @@ package_name_safe :: proc(name: string) -> bool {
 
 print_keg_paths :: proc(path: string) {
 	walk :: proc(dir: string) {
-		infos, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
+		infos, err := os.read_directory_by_path(dir, -1, context.allocator)
 		if err != nil do return
+		defer os.file_info_slice_delete(infos, context.allocator)
 		for info in infos {
 			if os.is_dir(info.fullpath) {
 				walk(info.fullpath)
@@ -2537,17 +2538,14 @@ unlink_formula_bins :: proc(name: string) -> int {
     removed := 0
     for info in infos {
         path := fmt.tprintf("%s/%s", bin_dir, info.name)
-        target, link_err := os.read_link(path, context.allocator)
-        if link_err != nil {
-            continue
-        }
-        formula_prefix := fmt.tprintf("%s/", formula_dir)
-        if strings.has_prefix(target, formula_prefix) {
+        // The check is spelling-agnostic: read_directory_by_path resolves
+        // fullpaths through /proc/self/fd, which may spell a symlinked
+        // prefix (e.g. /home -> var/home) differently from CELLAR_DIR.
+        if installer.link_belongs_to_formula(path, formula_dir) {
             if os.remove(path) == nil {
                 removed += 1
             }
         }
-        delete(target)
     }
     return removed
 }
@@ -2565,14 +2563,11 @@ unlink_formula_opt_links :: proc(name: string) {
 	}
 	for opt_dir in opt_dirs {
 		link_path := fmt.tprintf("%s/%s", opt_dir, name)
-		target, link_err := os.read_link(link_path, context.temp_allocator)
-		if link_err != nil {
-			continue // not a link, or missing — nothing to clean
-		}
-		if strings.has_prefix(target, formula_dir) {
+		// Spelling-agnostic check (see link_belongs_to_formula): removes
+		// the link only when it points at the formula's own Cellar keg.
+		if installer.link_belongs_to_formula(link_path, formula_dir) {
 			os.remove(link_path)
 		}
-		delete(target, context.temp_allocator)
 	}
 }
 
@@ -2803,6 +2798,32 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
     fmt.printf("Uninstalling %s\n", name)
 
     removed_links := unlink_formula_bins(name)
+    // brew-parity: drop the shared prefix's links and the linked-keg
+    // record so brew's state stays consistent with the removed keg.
+    // Iterate every version dir — not just the latest — so no stale
+    // links leak if the rack has multiple versions.
+    formula_marker := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
+    if v_infos, v_err := os.read_directory_by_path(formula_dir, -1, context.allocator); v_err == nil {
+        defer os.file_info_slice_delete(v_infos, context.allocator)
+        for v_info in v_infos {
+            if v_info.type == .Directory && is_version_dir(v_info.name) {
+                unlinked, unlink_failed := 0, 0
+                installer.unlink_keg_files(v_info.fullpath, installer.HOMEBREW_PREFIX, formula_marker, false, &unlinked, &unlink_failed)
+                removed_links += unlinked
+                if unlink_failed > 0 {
+                    fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in shared prefix\n", unlink_failed, name, v_info.name)
+                }
+                if installer.PREFIX != installer.HOMEBREW_PREFIX {
+                    unlinked, unlink_failed = 0, 0
+                    installer.unlink_keg_files(v_info.fullpath, installer.PREFIX, formula_marker, false, &unlinked, &unlink_failed)
+                    if unlink_failed > 0 {
+                        fmt.printf("ubrew: warning: %d file(s) failed to unlink for %s/%s in ubrew prefix\n", unlink_failed, name, v_info.name)
+                    }
+                }
+            }
+        }
+    }
+    installer.remove_linked_keg_record(name)
     if err := os.remove_all(formula_dir); err != nil {
         fmt.printf("ubrew: failed to remove %s: %v\n", name, err)
         return false
@@ -2818,7 +2839,7 @@ remove_formula :: proc(name: string, missing_ok: bool) -> bool {
 
     fmt.printf("==> Removed %s", name)
     if removed_links > 0 {
-        fmt.printf(" (%d bin link(s))", removed_links)
+        fmt.printf(" (%d link(s))", removed_links)
     }
     fmt.println()
     return true
@@ -4337,9 +4358,20 @@ run_cleanup :: proc(args: []string) {
                             }
                         }
 
-                        for ver in versions {
-                            if ver == latest_version do continue
-                            if ver == pinned_ver do continue
+						// brew parity: `brew cleanup` never removes the
+						// currently linked keg. The Cellar is shared, so
+						// Homebrew's linked-keg record may point at any keg
+						// here; deleting it would leave a dangling record
+						// that aborts every later `brew upgrade`.
+						linked_ver := installer.linked_keg_record_version(formula_name)
+
+						for ver in versions {
+							if ver == latest_version do continue
+							if ver == pinned_ver do continue
+							if ver == linked_ver {
+								fmt.printf("Skipping %s/%s (currently linked keg)\n", formula_name, ver)
+								continue
+							}
 
                             old_ver_dir := fmt.tprintf("%s/%s", formula_dir, ver)
                             if dry_run {
@@ -6863,8 +6895,29 @@ run_upgrade :: proc(args: []string) {
 				continue
 			}
 			if pkg.old_version != "" && pkg.old_version != pkg.new_version {
-				unlink_formula_bins(pkg.name)
+				// Repoint brew's shared records at the new keg BEFORE the
+				// old one disappears: if any install path skipped relinking,
+				// they still reference old_version, and deleting its keg
+				// would leave them dangling — making every later `brew
+				// upgrade` abort with "Cellar/<name>/<old> is not a
+				// directory".
+				if !installer.write_linked_keg_record(pkg.name, pkg.new_version) || !installer.write_opt_links(pkg.name, pkg.new_version) {
+					fmt.printf("Error: failed to repoint %s link records at %s\n", pkg.name, pkg.new_version)
+					failed = true
+					continue
+				}
 				old_keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, pkg.name, pkg.old_version)
+				// Clean up old-only prefix links before deleting the keg,
+				// scoped to the exact old keg so new-version links survive.
+				{
+					old_root := fmt.tprintf("%s/", old_keg_dir)
+					_, _ = old_root, pkg
+					unlinked, _unlinked_failed := 0, 0
+					installer.unlink_keg_files(old_keg_dir, installer.HOMEBREW_PREFIX, old_root, false, &unlinked, &_unlinked_failed)
+					if installer.PREFIX != installer.HOMEBREW_PREFIX {
+						installer.unlink_keg_files(old_keg_dir, installer.PREFIX, old_root, false, &unlinked, &_unlinked_failed)
+					}
+				}
 				_ = os.remove_all(old_keg_dir)
 			}
 		}
@@ -7688,79 +7741,6 @@ run_link :: proc(args: []string) {
         os.exit(1)
     }
 
-    link_dir_contents :: proc(src_dir, dst_dir: string, flags: Link_Flags, linked, deleted, failed: ^int) {
-        if !os.is_dir(src_dir) {
-            return
-        }
-        infos, err := os.read_directory_by_path(src_dir, -1, context.temp_allocator)
-        if err != nil {
-            return
-        }
-
-        for info in infos {
-            src_path := info.fullpath
-            dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
-
-            if info.type == .Directory {
-                if !flags.dry_run {
-                    _ = os.make_directory_all(dst_path, os.perm(0o755))
-                }
-                link_dir_contents(src_path, dst_path, flags, linked, deleted, failed)
-            } else {
-                exists := false
-                is_symlink_to_correct_place := false
-                if os.exists(dst_path) {
-                    exists = true
-                    if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
-                        if target == src_path {
-                            is_symlink_to_correct_place = true
-                        }
-                    }
-                } else {
-                    if _, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
-                        exists = true
-                    }
-                }
-
-                if exists {
-                    if is_symlink_to_correct_place {
-                        continue
-                    }
-
-                    if flags.overwrite {
-                        if flags.dry_run {
-                            fmt.printf("Would delete: %s\n", dst_path)
-                            deleted^ += 1
-                        } else {
-                            if err := os.remove(dst_path); err != nil {
-                                fmt.printf("ubrew: failed to remove existing file %s: %v\n", dst_path, err)
-                                failed^ += 1
-                                continue
-                            }
-                            deleted^ += 1
-                        }
-                    } else {
-                        fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
-                        failed^ += 1
-                        continue
-                    }
-                }
-
-                if flags.dry_run {
-                    fmt.printf("Would link: %s -> %s\n", dst_path, src_path)
-                    linked^ += 1
-                } else {
-                    if serr := os.symlink(src_path, dst_path); serr != nil {
-                        fmt.printf("ubrew: failed to symlink %s -> %s: %v\n", dst_path, src_path, serr)
-                        failed^ += 1
-                    } else {
-                        linked^ += 1
-                    }
-                }
-            }
-        }
-    }
-
     failed := false
     for name in pkg_names {
         if !package_name_safe(name) {
@@ -7841,32 +7821,18 @@ run_link :: proc(args: []string) {
         }
 
         keg_root := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, name, version_to_link)
-        keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator)
-        if keg_err != nil {
-            fmt.printf("ubrew: cannot read %s: %v\n", keg_root, keg_err)
-            failed = true
-            continue
-        }
 
         linked := 0
         deleted := 0
         local_failed := 0
 
-        // Subdirectories to link recursively (skip metadata like INSTALL_RECEIPT.json or .brew)
-        for ki in keg_infos {
-            if ki.type == .Directory {
-                if ki.name == ".brew" || ki.name == "metadata" {
-                    continue
-                }
-                src_dir := ki.fullpath
-                dst_dir := fmt.tprintf("%s/%s", installer.PREFIX, ki.name)
-                
-                if !flags.dry_run {
-                    _ = os.make_directory_all(dst_dir, os.perm(0o755))
-                }
-                
-                link_dir_contents(src_dir, dst_dir, flags, &linked, &deleted, &local_failed)
-            }
+        // Link the keg into ubrew's own prefix...
+        formula_marker := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
+        installer.link_keg_files(keg_root, installer.PREFIX, formula_marker, flags.overwrite, flags.dry_run, &linked, &deleted, &local_failed)
+        // ...and into the shared Homebrew prefix when it differs, so both
+        // tools see the same linked files.
+        if installer.HOMEBREW_PREFIX != installer.PREFIX {
+            installer.link_keg_files(keg_root, installer.HOMEBREW_PREFIX, formula_marker, flags.overwrite, flags.dry_run, &linked, &deleted, &local_failed)
         }
 
         if local_failed > 0 {
@@ -7877,14 +7843,14 @@ run_link :: proc(args: []string) {
         if flags.dry_run {
             fmt.printf("==> Dry run: Would link %s %s (%d file(s) linked, %d file(s) deleted)\n", name, version_to_link, linked, deleted)
         } else {
-            fmt.printf("==> Linked %s %s (%d file(s) linked)\n", name, version_to_link, linked)
+            fmt.printf("==> Linked %s %s (%d file(s) linked, %d file(s) deleted)\n", name, version_to_link, linked, deleted)
 
-            // Recreate the opt/<name> symlink to point at the latest/linked keg
-            opt_dst := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
-            opt_src := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, name, version_to_link)
-            _ = os.remove(opt_dst)
-            if serr := os.symlink(opt_src, opt_dst); serr != nil {
-                fmt.printf("ubrew: failed linking %s -> %s: %v\n", opt_dst, opt_src, serr)
+            // brew-parity: record the linked keg and point opt/<name> at it
+            // in both prefixes so brew's state stays consistent.
+            if !installer.write_linked_keg_record(name, version_to_link) {
+                failed = true
+            }
+            if !installer.write_opt_links(name, version_to_link) {
                 failed = true
             }
         }
@@ -7923,41 +7889,6 @@ run_unlink :: proc(args: []string) {
         }
     }
 
-    unlink_dir_contents :: proc(dst_dir, name: string, dry_run: bool, unlinked, failed: ^int) {
-        if !os.is_dir(dst_dir) {
-            return
-        }
-        infos, err := os.read_directory_by_path(dst_dir, -1, context.temp_allocator)
-        if err != nil {
-            return
-        }
-
-        for info in infos {
-            dst_path := info.fullpath
-
-            if info.type == .Directory {
-                unlink_dir_contents(dst_path, name, dry_run, unlinked, failed)
-            } else {
-                if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
-                    prefix := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
-                    if strings.has_prefix(target, prefix) {
-                        if dry_run {
-                            fmt.printf("Would unlink: %s\n", dst_path)
-                            unlinked^ += 1
-                        } else {
-                            if err := os.remove(dst_path); err != nil {
-                                fmt.printf("ubrew: failed to remove link %s: %v\n", dst_path, err)
-                                failed^ += 1
-                            } else {
-                                unlinked^ += 1
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     failed := false
     for name in names {
         if !package_name_safe(name) {
@@ -7976,20 +7907,16 @@ run_unlink :: proc(args: []string) {
             continue
         }
 
+        // Unlink the keg's files from ubrew's own prefix and from the
+        // shared Homebrew prefix, then drop the linked-keg record.
+        formula_marker := fmt.tprintf("%s/%s/", installer.CELLAR_DIR, name)
         if v_infos, v_err := os.read_directory_by_path(rack, -1, context.temp_allocator); v_err == nil {
             for v_info in v_infos {
                 if v_info.type == .Directory && is_version_dir(v_info.name) {
                     keg_root := v_info.fullpath
-                    if keg_infos, keg_err := os.read_directory_by_path(keg_root, -1, context.temp_allocator); keg_err == nil {
-                        for ki in keg_infos {
-                            if ki.type == .Directory {
-                                if ki.name == ".brew" || ki.name == "metadata" {
-                                    continue
-                                }
-                                dst_dir := fmt.tprintf("%s/%s", installer.PREFIX, ki.name)
-                                unlink_dir_contents(dst_dir, name, dry_run, &unlinked_count, &local_failed)
-                            }
-                        }
+                    installer.unlink_keg_files(keg_root, installer.PREFIX, formula_marker, dry_run, &unlinked_count, &local_failed)
+                    if installer.HOMEBREW_PREFIX != installer.PREFIX {
+                        installer.unlink_keg_files(keg_root, installer.HOMEBREW_PREFIX, formula_marker, dry_run, &unlinked_count, &local_failed)
                     }
                 }
             }
@@ -8003,8 +7930,8 @@ run_unlink :: proc(args: []string) {
         if dry_run {
             fmt.printf("==> Dry run: Would unlink %s (%d link(s))\n", name, unlinked_count)
         } else {
-            opt_link := fmt.tprintf("%s/opt/%s", installer.PREFIX, name)
-            _ = os.remove(opt_link)
+            installer.remove_linked_keg_record(name)
+            unlink_formula_opt_links(name)
             fmt.printf("==> Unlinked %s (%d link(s))\n", name, unlinked_count)
         }
     }
