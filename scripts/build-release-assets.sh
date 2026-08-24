@@ -99,8 +99,11 @@ elif [[ "$OS" == "Darwin" ]]; then
   if [[ -n "$DYLIB_LOAD" ]]; then
     xcrun install_name_tool -change "$DYLIB_LOAD" "@rpath/${LIB_BASENAME}" "$STAGING/root/ubrew"
   fi
-  xcrun install_name_tool -add_rpath '@loader_path' "$STAGING/root/ubrew"
-  xcrun install_name_tool -add_rpath '@loader_path/../lib' "$STAGING/root/ubrew"
+  for rp in '@loader_path' '@loader_path/../lib'; do
+    if ! otool -l "$STAGING/root/ubrew" 2>/dev/null | grep -qF "path $rp "; then
+      xcrun install_name_tool -add_rpath "$rp" "$STAGING/root/ubrew"
+    fi
+  done
 fi
 
 # 4. Smoke-test directly from the flat root layout.
