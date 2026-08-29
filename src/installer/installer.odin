@@ -869,6 +869,7 @@ unlink_keg_files :: proc(keg_root, prefix, formula_dir: string, dry_run: bool, u
 						}
 						continue
 					}
+					continue
 				}
 				walk(src_path, dst_path, formula_dir, canon, false, dry_run, unlinked, failed)
 				if !top_level && !dry_run && os.is_dir(dst_path) {

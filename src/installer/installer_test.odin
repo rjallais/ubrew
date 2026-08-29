@@ -184,6 +184,7 @@ test_unlink_keg_files_removes_directory_symlink_and_cleans_empty_dir :: proc(t: 
 
 	// 3. Foreign directory symlink and non-directory file preservation case
 	mkdir_p(t, fmt.tprintf("%s/other_keg/include/appstream", cellar))
+	write_test_file(t, fmt.tprintf("%s/other_keg/include/appstream/foreign.h", cellar), "/* foreign */")
 	os.symlink(fmt.tprintf("%s/other_keg/include/appstream", cellar), fmt.tprintf("%s/include/appstream", prefix))
 	write_test_file(t, fmt.tprintf("%s/include/appstream_foreign_file", prefix), "foreign")
 
@@ -193,6 +194,7 @@ test_unlink_keg_files_removes_directory_symlink_and_cleans_empty_dir :: proc(t: 
 	testing.expect_value(t, failed, 0)
 	testing.expect_value(t, unlinked, 0)
 	testing.expect(t, os.exists(fmt.tprintf("%s/include/appstream", prefix)), "foreign directory symlink must not be deleted")
+	testing.expect(t, os.exists(fmt.tprintf("%s/other_keg/include/appstream/foreign.h", cellar)), "file in foreign directory must not be deleted")
 	testing.expect(t, os.exists(fmt.tprintf("%s/include/appstream_foreign_file", prefix)), "foreign file must not be deleted")
 }
 
