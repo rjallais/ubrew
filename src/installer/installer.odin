@@ -777,6 +777,42 @@ link_keg_files :: proc(keg_root, prefix, formula_dir: string, overwrite, dry_run
 			dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
 
 			if info.type == .Directory {
+				if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+					abs := resolve_link_absolute(dst_path, target)
+					if link_targets_formula(abs, formula_dir, canon) || overwrite {
+						if dry_run {
+							fmt.printf("Would delete: %s\n", dst_path)
+							deleted^ += 1
+						} else if err := os.remove(dst_path); err != nil {
+							fmt.printf("ubrew: failed to remove %s: %v\n", dst_path, err)
+							failed^ += 1
+							continue
+						} else {
+							deleted^ += 1
+						}
+					} else {
+						fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
+						failed^ += 1
+						continue
+					}
+				} else if os.exists(dst_path) && !os.is_dir(dst_path) {
+					if !overwrite {
+						fmt.printf("ubrew: conflict! File already exists in prefix: %s\n", dst_path)
+						failed^ += 1
+						continue
+					}
+					if dry_run {
+						fmt.printf("Would delete: %s\n", dst_path)
+						deleted^ += 1
+					} else if err := os.remove(dst_path); err != nil {
+						fmt.printf("ubrew: failed to remove %s: %v\n", dst_path, err)
+						failed^ += 1
+						continue
+					} else {
+						deleted^ += 1
+					}
+				}
+
 				if !dry_run {
 					_ = os.make_directory_all(dst_path, os.perm(0o755))
 				}
@@ -819,7 +855,28 @@ unlink_keg_files :: proc(keg_root, prefix, formula_dir: string, dry_run: bool, u
 			dst_path := fmt.tprintf("%s/%s", dst_dir, info.name)
 
 			if info.type == .Directory {
+				if target, lerr := os.read_link(dst_path, context.temp_allocator); lerr == nil {
+					abs := resolve_link_absolute(dst_path, target)
+					if link_targets_formula(abs, formula_dir, canon) {
+						if dry_run {
+							fmt.printf("Would unlink: %s\n", dst_path)
+							unlinked^ += 1
+						} else if err := os.remove(dst_path); err != nil {
+							fmt.printf("ubrew: failed to remove link %s: %v\n", dst_path, err)
+							failed^ += 1
+						} else {
+							unlinked^ += 1
+						}
+						continue
+					}
+					continue
+				}
 				walk(src_path, dst_path, formula_dir, canon, false, dry_run, unlinked, failed)
+				if !top_level && !dry_run && os.is_dir(dst_path) {
+					if _, lerr := os.read_link(dst_path, context.temp_allocator); lerr != nil {
+						_ = os.remove(dst_path)
+					}
+				}
 			} else if info.type == .Regular || info.type == .Symlink {
 				target, lerr := os.read_link(dst_path, context.temp_allocator)
 				if lerr != nil {
