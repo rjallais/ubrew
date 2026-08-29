@@ -3386,6 +3386,8 @@ run_install :: proc(args: []string) {
 			keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
 			if os.is_dir(keg_dir) {
 				is_installed = true
+			} else if is_compatible_version_installed(f.name, f.version) {
+				is_installed = true
 			}
 		}
 
@@ -3813,12 +3815,8 @@ check_tools :: proc(warnings: ^[dynamic]string) {
 }
 
 check_symlinks :: proc(warnings: ^[dynamic]string) {
-	bin_dirs := [2]string{
-		fmt.tprintf("%s/bin", installer.PREFIX),
-		fmt.tprintf("%s/bin", installer.HOMEBREW_PREFIX),
-	}
-	for bin_dir in bin_dirs {
-		if !os.is_dir(bin_dir) do continue
+	check_bin_dir :: proc(bin_dir: string, warnings: ^[dynamic]string) {
+		if !os.is_dir(bin_dir) do return
 		if infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator); err == nil {
 			defer os.file_info_slice_delete(infos, context.allocator)
 			for info in infos {
@@ -3834,6 +3832,11 @@ check_symlinks :: proc(warnings: ^[dynamic]string) {
 				}
 			}
 		}
+	}
+
+	check_bin_dir(fmt.tprintf("%s/bin", installer.PREFIX), warnings)
+	if installer.HOMEBREW_PREFIX != installer.PREFIX {
+		check_bin_dir(fmt.tprintf("%s/bin", installer.HOMEBREW_PREFIX), warnings)
 	}
 }
 

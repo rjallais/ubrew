@@ -871,8 +871,10 @@ unlink_keg_files :: proc(keg_root, prefix, formula_dir: string, dry_run: bool, u
 					}
 				}
 				walk(src_path, dst_path, formula_dir, canon, false, dry_run, unlinked, failed)
-				if !top_level && !dry_run {
-					_ = os.remove(dst_path)
+				if !top_level && !dry_run && os.is_dir(dst_path) {
+					if _, lerr := os.read_link(dst_path, context.temp_allocator); lerr != nil {
+						_ = os.remove(dst_path)
+					}
 				}
 			} else if info.type == .Regular || info.type == .Symlink {
 				target, lerr := os.read_link(dst_path, context.temp_allocator)

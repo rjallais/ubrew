@@ -181,6 +181,19 @@ test_unlink_keg_files_removes_directory_symlink_and_cleans_empty_dir :: proc(t: 
 	testing.expect_value(t, unlinked, 1)
 	testing.expect(t, !os.exists(fmt.tprintf("%s/include/appstream", prefix)), "empty subdirectory should be pruned")
 	testing.expect(t, os.is_dir(fmt.tprintf("%s/include", prefix)), "top-level include directory must be kept")
+
+	// 3. Foreign directory symlink and non-directory file preservation case
+	mkdir_p(t, fmt.tprintf("%s/other_keg/include/appstream", cellar))
+	os.symlink(fmt.tprintf("%s/other_keg/include/appstream", cellar), fmt.tprintf("%s/include/appstream", prefix))
+	write_test_file(t, fmt.tprintf("%s/include/appstream_foreign_file", prefix), "foreign")
+
+	unlinked, failed = 0, 0
+	unlink_keg_files(old_keg, prefix, formula_dir, false, &unlinked, &failed)
+
+	testing.expect_value(t, failed, 0)
+	testing.expect_value(t, unlinked, 0)
+	testing.expect(t, os.exists(fmt.tprintf("%s/include/appstream", prefix)), "foreign directory symlink must not be deleted")
+	testing.expect(t, os.exists(fmt.tprintf("%s/include/appstream_foreign_file", prefix)), "foreign file must not be deleted")
 }
 
 // ---------------------------------------------------------------------------
