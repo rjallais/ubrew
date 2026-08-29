@@ -2854,8 +2854,36 @@ Install_Kernel_Result :: enum {
 // Install a formula without re-fetching metadata or recording history.
 // Returns Success on actual install, NoOp if already installed (no --force),
 // Failed on error.  Callers should only record history on Success.
+strip_revision :: proc(v: string) -> string {
+    if idx := strings.last_index(v, "_"); idx >= 0 {
+        suffix := v[idx+1:]
+        is_num := len(suffix) > 0
+        for c in suffix { if c < '0' || c > '9' { is_num = false; break } }
+        if is_num { return v[:idx] }
+    }
+    return v
+}
+
+is_compatible_version_installed :: proc(name, version: string) -> bool {
+    // If a specific revision is requested (e.g. 1.11.1_4), require an exact match.
+    // Only unrevisioned requests (e.g. 1.11.1) accept installed revision kegs (e.g. 1.11.1_4).
+    if strip_revision(version) != version {
+        return false
+    }
+    cellar := fmt.tprintf("%s/%s", installer.CELLAR_DIR, name)
+    infos, err := os.read_directory_by_path(cellar, -1, context.allocator)
+    if err != nil { return false }
+    defer os.file_info_slice_delete(infos, context.allocator)
+    for info in infos {
+        if info.type != .Directory || !is_version_dir(info.name) { continue }
+        if strip_revision(info.name) == version { return true }
+    }
+    return false
+}
+
 install_formula_kernel :: proc(f: formula.Formula, build_from_source: bool, force: bool, on_request: bool) -> Install_Kernel_Result {
     if f.version != "" && !strings.contains(f.name, "/") {
+        // Exact match fast path
         keg_dir := fmt.tprintf("%s/%s/%s", installer.CELLAR_DIR, f.name, f.version)
         if os.is_dir(keg_dir) {
             if force {
@@ -2867,6 +2895,11 @@ install_formula_kernel :: proc(f: formula.Formula, build_from_source: bool, forc
                 fmt.printf("==> %s %s is already installed\n", f.name, f.version)
                 return .NoOp
             }
+        }
+        // Revision-compatible check: 1.11.1_4 satisfies 1.11.1 dep
+        if !force && is_compatible_version_installed(f.name, f.version) {
+            fmt.printf("==> %s %s is already installed (compatible revision present)\n", f.name, f.version)
+            return .NoOp
         }
     }
 
@@ -3780,18 +3813,25 @@ check_tools :: proc(warnings: ^[dynamic]string) {
 }
 
 check_symlinks :: proc(warnings: ^[dynamic]string) {
-	bin_dir := fmt.tprintf("%s/bin", installer.PREFIX)
-	if infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator); err == nil {
-		defer os.file_info_slice_delete(infos, context.allocator)
-		for info in infos {
-			path := fmt.tprintf("%s/%s", bin_dir, info.name)
-			target, link_err := os.read_link(path, context.allocator)
-			if link_err != nil {
-				continue
-			}
-			defer delete(target)
-			if !os.is_file(target) {
-				append(warnings, fmt.aprintf("Broken symlink: %s -> %s", path, target))
+	bin_dirs := [2]string{
+		fmt.tprintf("%s/bin", installer.PREFIX),
+		fmt.tprintf("%s/bin", installer.HOMEBREW_PREFIX),
+	}
+	for bin_dir in bin_dirs {
+		if !os.is_dir(bin_dir) do continue
+		if infos, err := os.read_directory_by_path(bin_dir, -1, context.allocator); err == nil {
+			defer os.file_info_slice_delete(infos, context.allocator)
+			for info in infos {
+				path := fmt.tprintf("%s/%s", bin_dir, info.name)
+				target, link_err := os.read_link(path, context.allocator)
+				if link_err != nil {
+					continue
+				}
+				defer delete(target)
+				abs := installer.resolve_link_absolute(path, target)
+				if !os.exists(abs) {
+					append(warnings, fmt.aprintf("Broken symlink: %s -> %s", path, target))
+				}
 			}
 		}
 	}
@@ -3959,7 +3999,8 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
                 cleanup_broken_links_in_dir(info.fullpath, dry_run, removed, failed)
                 
                 // If directory is now empty, remove it (unless it is a root directory)
-                if info.fullpath != fmt.tprintf("%s/bin", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/lib", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/include", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/share", installer.PREFIX) {
+                if info.fullpath != fmt.tprintf("%s/bin", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/lib", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/include", installer.PREFIX) && info.fullpath != fmt.tprintf("%s/share", installer.PREFIX) &&
+                   info.fullpath != fmt.tprintf("%s/bin", installer.HOMEBREW_PREFIX) && info.fullpath != fmt.tprintf("%s/lib", installer.HOMEBREW_PREFIX) && info.fullpath != fmt.tprintf("%s/include", installer.HOMEBREW_PREFIX) && info.fullpath != fmt.tprintf("%s/share", installer.HOMEBREW_PREFIX) {
                     dir_infos, dir_err := os.read_directory_by_path(info.fullpath, -1, context.allocator)
                     if dir_err == nil {
                         defer os.file_info_slice_delete(dir_infos, context.allocator)
@@ -3983,7 +4024,8 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
                 target, link_err := os.read_link(info.fullpath, context.allocator)
                 if link_err == nil {
                     defer delete(target)
-                    if !os.exists(target) {
+                    abs := installer.resolve_link_absolute(info.fullpath, target)
+                    if !os.exists(abs) {
                         if dry_run {
                             fmt.printf("Would remove %s\n", info.fullpath)
                             removed^ += 1
@@ -4006,6 +4048,13 @@ cleanup_broken_bin_links_and_dirs :: proc(dry_run: bool, removed, failed: ^int) 
     cleanup_broken_links_in_dir(fmt.tprintf("%s/lib", installer.PREFIX), dry_run, removed, failed)
     cleanup_broken_links_in_dir(fmt.tprintf("%s/include", installer.PREFIX), dry_run, removed, failed)
     cleanup_broken_links_in_dir(fmt.tprintf("%s/share", installer.PREFIX), dry_run, removed, failed)
+
+    if installer.HOMEBREW_PREFIX != installer.PREFIX {
+        cleanup_broken_links_in_dir(fmt.tprintf("%s/bin", installer.HOMEBREW_PREFIX), dry_run, removed, failed)
+        cleanup_broken_links_in_dir(fmt.tprintf("%s/lib", installer.HOMEBREW_PREFIX), dry_run, removed, failed)
+        cleanup_broken_links_in_dir(fmt.tprintf("%s/include", installer.HOMEBREW_PREFIX), dry_run, removed, failed)
+        cleanup_broken_links_in_dir(fmt.tprintf("%s/share", installer.HOMEBREW_PREFIX), dry_run, removed, failed)
+    }
 }
 
 run_cleanup :: proc(args: []string) {
