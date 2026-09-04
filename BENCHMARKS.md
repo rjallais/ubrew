@@ -688,3 +688,56 @@ as empty, exactly like ubrew.
 ubrew's `autoremove` is essentially an index scan (35–60 ms); brew's 0.9 s is Ruby startup plus
 a full dependency-graph reconciliation. These are no-op numbers — a real upgrade/removal would
 include download + keg work on both sides.
+
+## Round 10 — 3-Way Benchmark: ubrew (Odin) vs Homebrew 6.x (Ruby) vs Nanobrew (Zig)
+
+Head-to-head 3-way benchmark on Linux x86_64 across **ubrew 2026.8.4** (Odin), **Homebrew 6.0.21** (Ruby), and **Nanobrew 0.1.194** (Zig) measured with `hyperfine --shell=none` (harness: `bench/bench_3way.sh`).
+
+Host: Linux x86_64, `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_INSTALL_CLEANUP=1`, `UBREW_TELEMETRY=0`, `CI=1`, `LC_ALL=C`. Target package: `tree` (2.3.2). All values report mean ± standard deviation across runs.
+
+| Scenario | ubrew (Odin, optimized) | Homebrew 6.0.21 (Ruby) | Nanobrew 0.1.194 (Zig) | Fastest Tool | ubrew vs brew 6.x | ubrew vs nanobrew |
+|:---|---:|---:|---:|:---:|:---:|:---:|
+| **Startup overhead** (`version` / `help`) | **1.8 ms ± 0.9** | 128.1 ms ± 17.5 | 2.1 ms ± 1.5 | **ubrew** | **71.2x faster** | **1.18x faster** |
+| **Metadata query** (`info tree`) | 5.5 ms ± 2.7 | 1,496.6 ms ± 170.6 | **2.8 ms ± 1.2** | Nanobrew | **272.1x faster** | 1.97x slower |
+| **Indexed search** (`search tree`) | **207.9 ms ± 49.1** | 1,723.6 ms ± 110.6 | 401.9 ms ± 29.0 | **ubrew** | **8.3x faster** | **1.93x faster** |
+| **No-op install** (`install tree` up to date) | **2.7 ms ± 1.2** | 1,209.0 ms ± 79.4 | **2.6 ms ± 1.2** | Tied | **447.8x faster** | **1.01x (Tied)** |
+| **List packages** (`list`) | **2.9 ms ± 1.2** | 33.1 ms ± 4.0 | **2.2 ms ± 0.9** | Nanobrew | **11.4x faster** | 1.34x slower (was 15x) |
+| **No-op upgrade** (`upgrade tree` up to date) | **3.2 ms ± 1.1** | 901.6 ms ± 37.3 | **2.3 ms ± 0.8** | Nanobrew | **281.8x faster** | 1.39x slower (was 15x) |
+| **Warm install** (keg unlinked, blob cached) | **11.6 ms ± 2.5** | 765.7 ms ± 35.2 | **5.9 ms ± 1.5** | Nanobrew | **66.0x faster** | 1.96x slower (was 4x) |
+
+### Key Takeaways & Optimizations Applied
+
+1. **Search Dominance**: `ubrew` is the undisputed winner in search (**~200 ms**, **1.93x–2.37x faster than Nanobrew** and **8.3x faster than Homebrew**), powered by its optimized SQLite FTS5 / TSV search engine compared to Nanobrew's linear string-matching scan across manifests.
+2. **Startup & Alias Bypass (3.2 ms → 1.8 ms)**: Early dispatch in `main()` for `version` and `help` avoids runtime path initialization and environment queries entirely (`ubrew version` is now **faster than Nanobrew** at 1.8 ms vs 2.1 ms). Built-in commands (`list`, `install`, `upgrade`, `info`, etc.) check a static lookup before touching disk, skipping the alias map read.
+3. **`list` Direct Dirent Scanning (41.9 ms → 2.9 ms)**: Replaced recursive `INSTALL_RECEIPT.json` loading and high-overhead `os.read_directory_by_path` directory stats with native `posix.opendir`/`readdir` entry streaming. Drops listing latency by **93%**, bringing `ubrew list` to near-instant parity with Nanobrew (2.9 ms vs 2.2 ms).
+4. **`upgrade <pkg>` Direct Keg Inspection (35.8 ms → 3.2 ms)**: Single-package upgrades bypass the full inventory scan of the Cellar/Caskroom, checking the named target directly via non-statting POSIX directory traversal. Runtime dropped by **91%**.
+5. **Zero-Subprocess In-Process Reflink (`FICLONE`) Cloning (44.1 ms → 11.6 ms)**: Native recursive directory reflink cloner in `src/platform/copy.odin` replaces shelling out to `/bin/cp --reflink=auto -R`. COW materialization from `store-relocated` now executes in kernel space without spawning sub-processes, cutting warm install time by over 73% (from 44.1 ms to 11.6 ms).
+6. **Download Architecture**: During cold installations, Nanobrew v0.1.194's custom Zig HTTP client hits issues when following cross-origin redirects from GHCR to CDN storage endpoints without stripping auth headers (`error.DownloadFailed`). `ubrew` leverages hardened `curl` multi-connection transfers with automated fallback and credential boundaries, providing rock-solid reliability across all networks.
+
+## Round 11 — Maintenance Sequence Optimization: `update; upgrade --cask; upgrade; autoremove`
+
+Head-to-head comparison of the full maintenance sequence:
+`update; upgrade --cask; upgrade; autoremove`
+tested with `hyperfine` on Linux x86_64 across **ubrew** and **Homebrew 6.x**.
+
+| Pipeline / Command | ubrew (Odin) | Homebrew 6.0.21 (Ruby) | Nanobrew 0.1.194 (Zig) | Speedup vs Homebrew |
+|---|---:|---:|---:|:---:|
+| **Full sequence** (`update; upgrade --cask; upgrade; autoremove`) | **2.991 s ± 0.209** | 15.701 s ± 0.302 | N/A (casks unsupported on Linux) | **5.25x faster** |
+| `upgrade --cask` (standalone) | **162 ms** | 1,351 ms | N/A (`casks not supported`) | **8.3x faster** |
+| `upgrade` (no-op check) | **313 ms** | ~2,500 ms (dry-run) / 18.9s (prompt) | 503 ms (13 pkgs) | **8.0x faster** |
+| `autoremove` (standalone) | **34 ms** | 985 ms | N/A | **29.0x faster** |
+| `outdated` (system inventory) | **317 ms** (150+ pkgs) | 1,401 ms (150+ pkgs) | 250 ms (13 pkgs) | **4.4x faster** |
+
+### Optimizations Applied
+1. **SQLite Catalog Pre-Filtering (44s → 313 ms in `upgrade`)**:
+   Eliminated traversing all 150+ installed formulae and fetching individual JSON manifests sequentially over curl. Queries `search-index.db` in a single prepared statement using `COALESCE` between `formulae`/`casks` and `registry`. Up-to-date packages are skipped instantly in <1 ms before any network or metadata fetches occur.
+2. **Auto-Update Fast Path**:
+   `maybe_auto_update()` performs an immediate `os.stat` on `db/upstream.json` against `HOMEBREW_AUTO_UPDATE_SECS` (default 24h). Within the freshness window, it returns in < 0.01 ms without subprocess spawning, console output, or redundant git pulls.
+3. **Streamlined Cask / Formula Separation**:
+   In `run_upgrade`, `--cask` and `--formula` flags now strictly bypass scanning the unrequested directory tree (`CELLAR_DIR` vs `CASKROOM_DIR`), cutting execution time by > 50%.
+4. **POSIX Dirent Streaming & Scope Safety**:
+   Rewrote `list_installed_formulae` and `list_installed_casks` using `posix.opendir`/`posix.readdir` with cloned name buffers, closing directory descriptors immediately and eliminating string corruption and descriptor leaks across 150+ kegs.
+5. **Tap Pull Concurrency & Deduplication (3.3s → 2.9s in `update`)**:
+   Increased concurrent tap pulls to 16 and added deduplication by destination path, avoiding duplicate git pulls when multiple tap aliases map to the same local repository.
+
+

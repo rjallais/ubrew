@@ -4,6 +4,7 @@ import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sys/posix"
 
 when ODIN_OS == .Darwin {
 	foreign import libsystem "system:System"
@@ -23,6 +24,8 @@ when ODIN_OS == .Linux {
 	foreign libc_ioctl {
 		@(link_name="ioctl")
 		ioctl :: proc "c" (fd: c.int, request: c.int, arg: c.int) -> c.int ---
+		@(link_name="sendfile")
+		sendfile :: proc "c" (out_fd: c.int, in_fd: c.int, offset: rawptr, count: c.size_t) -> c.ssize_t ---
 	}
 
 	FICLONE :: c.int(0x40049409)
@@ -34,7 +37,14 @@ clone_tree :: proc(src: string, dst: string) -> bool {
 		dst_cstr := strings.clone_to_cstring(dst, context.temp_allocator)
 		return clonefile(src_cstr, dst_cstr, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY) == 0
 	} else when ODIN_OS == .Linux {
-		return clone_tree_ioctl(src, dst)
+		fi, err := os.lstat(src, context.temp_allocator)
+		if err != nil do return false
+		if fi.type == .Directory {
+			return clone_dir_reflink(src, dst)
+		} else if fi.type == .Regular {
+			return clone_tree_ioctl(src, dst)
+		}
+		return false
 	} else {
 		return false
 	}
@@ -67,12 +77,96 @@ when ODIN_OS == .Linux {
 			return true
 		}
 
+		// Fallback to in-process sendfile if FICLONE fails
+		if fi.size > 0 {
+			posix.lseek(posix.FD(src_fd), 0, .SET)
+			posix.lseek(posix.FD(dst_fd), 0, .SET)
+			remaining := fi.size
+			for remaining > 0 {
+				chunk := c.size_t(min(remaining, i64(0x7ffff000)))
+				copied := sendfile(dst_fd, src_fd, nil, chunk)
+				if copied <= 0 {
+					os.remove(dst)
+					return false
+				}
+				remaining -= i64(copied)
+			}
+			posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
+			return true
+		} else {
+			posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
+			return true
+		}
+
 		os.remove(dst)
 		return false
 	}
-}
 
-import "core:sys/posix"
+	clone_dir_reflink :: proc(src: string, dst: string) -> bool {
+		src_stat, stat_err := os.stat(src, context.temp_allocator)
+		if stat_err != nil do return false
+
+		if err := os.make_directory(dst, transmute(os.Permissions)transmute(u32)src_stat.mode); err != nil {
+			if !os.is_dir(dst) do return false
+		}
+
+		csrc := strings.clone_to_cstring(src, context.temp_allocator)
+		dirp := posix.opendir(csrc)
+		if dirp == nil do return false
+		defer posix.closedir(dirp)
+
+		for {
+			ent := posix.readdir(dirp)
+			if ent == nil do break
+			cname := cstring(&ent.d_name[0])
+			name := string(cname)
+			if name == "." || name == ".." do continue
+
+			sub_src := fmt.tprintf("%s/%s", src, name)
+			sub_dst := fmt.tprintf("%s/%s", dst, name)
+
+			d_type := ent.d_type
+			if d_type == .UNKNOWN {
+				if fi, err := os.lstat(sub_src, context.temp_allocator); err == nil {
+					#partial switch fi.type {
+					case .Directory: d_type = .DIR
+					case .Regular:   d_type = .REG
+					case .Symlink:   d_type = .LNK
+					}
+				}
+			}
+
+			if d_type == .DIR {
+				if !clone_dir_reflink(sub_src, sub_dst) {
+					return false
+				}
+			} else if d_type == .LNK {
+				csub_src := strings.clone_to_cstring(sub_src, context.temp_allocator)
+				buf: [posix.PATH_MAX]byte
+				len_read := posix.readlink(csub_src, ([^]byte)(&buf[0]), posix.PATH_MAX - 1)
+				if len_read > 0 {
+					buf[len_read] = 0
+					csub_dst := strings.clone_to_cstring(sub_dst, context.temp_allocator)
+					ctarget := cstring(&buf[0])
+					if posix.symlink(ctarget, csub_dst) != .OK {
+						return false
+					}
+				} else {
+					return false
+				}
+			} else if d_type == .REG {
+				if !clone_tree_ioctl(sub_src, sub_dst) {
+					return false
+				}
+			} else {
+				if !clone_tree_ioctl(sub_src, sub_dst) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+}
 
 GLOBAL_DEBUG: bool = false
 
@@ -253,6 +347,9 @@ cp_fallback :: proc(src: string, dst: string) -> bool {
 cow_copy :: proc(src: string, dst: string) -> bool {
 	if clone_tree(src, dst) {
 		return true
+	}
+	if os.exists(dst) {
+		_ = os.remove_all(dst)
 	}
 	return cp_fallback(src, dst)
 }

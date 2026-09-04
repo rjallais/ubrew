@@ -197,6 +197,26 @@ run_parallel_formula_install :: proc(
 	n := len(formulas)
 	if n == 0 do return true
 
+	// Fast path for single package: avoid thread pool initialization and thread spawning overhead
+	if n == 1 {
+		dummy_nodes := [1]Formula_DAG_Node{}
+		ctx := DAG_State {
+			formulas          = formulas,
+			force_flags       = force_flags,
+			on_request_flags  = on_request_flags,
+			nodes             = dummy_nodes[:],
+			dependents_flat   = nil,
+			pool              = nil,
+			build_from_source = build_from_source,
+		}
+		t := thread.Task {
+			data = &ctx,
+			user_index = 0,
+		}
+		dag_formula_task(t)
+		return !ctx.error_flag
+	}
+
 	// Size the worker pool.
 	cores := 4
 	if _, logical, ok := info.cpu_core_count(); ok {
