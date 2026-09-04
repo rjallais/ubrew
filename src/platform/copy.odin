@@ -81,11 +81,18 @@ when ODIN_OS == .Linux {
 		if fi.size > 0 {
 			posix.lseek(posix.FD(src_fd), 0, .SET)
 			posix.lseek(posix.FD(dst_fd), 0, .SET)
-			copied := sendfile(dst_fd, src_fd, nil, c.size_t(fi.size))
-			if copied >= 0 {
-				posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
-				return true
+			remaining := fi.size
+			for remaining > 0 {
+				chunk := c.size_t(min(remaining, i64(0x7ffff000)))
+				copied := sendfile(dst_fd, src_fd, nil, chunk)
+				if copied <= 0 {
+					os.remove(dst)
+					return false
+				}
+				remaining -= i64(copied)
 			}
+			posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
+			return true
 		} else {
 			posix.fchmod(posix.FD(dst_fd), transmute(posix.mode_t)transmute(u32)fi.mode)
 			return true

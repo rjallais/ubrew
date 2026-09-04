@@ -414,7 +414,8 @@ run_list :: proc(args: []string) {
 
 	if is_simple_list {
 		names := make([dynamic]string, context.temp_allocator)
-		seen := make(map[string]bool, context.temp_allocator)
+		formula_seen := make(map[string]bool, context.temp_allocator)
+		cask_seen := make(map[string]bool, context.temp_allocator)
 
 		read_simple_dir_names :: proc(dir: string, names: ^[dynamic]string, seen: ^map[string]bool) {
 			cdir := strings.clone_to_cstring(dir, context.temp_allocator)
@@ -444,10 +445,10 @@ run_list :: proc(args: []string) {
 		}
 
 		if is_formula_mode && os.is_dir(installer.CELLAR_DIR) {
-			read_simple_dir_names(installer.CELLAR_DIR, &names, &seen)
+			read_simple_dir_names(installer.CELLAR_DIR, &names, &formula_seen)
 		}
 		if is_cask_mode && os.is_dir(installer.CASKROOM_DIR) {
-			read_simple_dir_names(installer.CASKROOM_DIR, &names, &seen)
+			read_simple_dir_names(installer.CASKROOM_DIR, &names, &cask_seen)
 		}
 
 		if len(names) == 0 {
@@ -5386,6 +5387,10 @@ Upgrade_Item :: struct {
 				continue
 			}
 			if (v_ent.d_type == .DIR || v_ent.d_type == .UNKNOWN) && is_version_dir(ver_name) {
+				if v_ent.d_type == .UNKNOWN {
+					ver_path := fmt.tprintf("%s/%s", v_dir, ver_name)
+					if !os.is_dir(ver_path) do continue
+				}
 				if latest_ver == "" || is_newer(ver_name, latest_ver) {
 					latest_ver = strings.clone(ver_name, context.temp_allocator)
 				}
@@ -5449,6 +5454,10 @@ list_installed_casks :: proc() -> [dynamic]Installed_Pkg {
 				continue
 			}
 			if (v_ent.d_type == .DIR || v_ent.d_type == .UNKNOWN) && is_version_dir(ver_name) {
+				if v_ent.d_type == .UNKNOWN {
+					ver_path := fmt.tprintf("%s/%s", v_dir, ver_name)
+					if !os.is_dir(ver_path) do continue
+				}
 				if latest_ver == "" || is_newer(ver_name, latest_ver) {
 					latest_ver = strings.clone(ver_name, context.temp_allocator)
 				}
@@ -5665,9 +5674,12 @@ run_outdated :: proc(args: []string) {
 			if min_version != "" {
 				latest_ver = strings.clone(min_version, context.temp_allocator)
 				is_outdated = is_update_available(pkg.version, min_version)
-			} else if in_cat && cat_ver != "latest" && !greedy_auto_updates && !greedy_latest {
+			} else if in_cat && cat_ver != "latest" && !greedy_auto_updates && !greedy_latest &&
+			          !is_update_available(pkg.version, cat_ver) {
+				// Catalog confirms the installed version is current; safe
+				// to skip the network fetch regardless of auto_updates.
 				latest_ver = cat_ver
-				is_outdated = is_update_available(pkg.version, cat_ver)
+				is_outdated = false
 			} else {
 				c, err := api.fetch_cask(pkg.name)
 				if err == nil {
