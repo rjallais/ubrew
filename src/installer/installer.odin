@@ -1159,19 +1159,22 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	}
 
-	// Relocation must run for every install path — including COW
-	// materialization — because store entries can predate the ELF
-	// relocation pipeline (or come from a failed run) and ship
-	// unreplaced @@HOMEBREW_*@@ placeholders in PT_INTERP / rpath.
-	// Both passes are idempotent: already-relocated kegs are skipped.
-	relocated_bin_count := 0
-	relocate_keg_binaries(keg_dir, &relocated_bin_count)
-	if relocated_bin_count > 0 {
-		fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
-	}
-	if !relocate_keg_placeholders(keg_dir) {
-		fmt.println("Error: Keg relocation failed.")
-		return false
+	marker_path := fmt.tprintf("%s/.ubrew_relocated", keg_dir)
+	already_relocated := os.is_file(marker_path)
+
+	if !already_relocated {
+		relocated_bin_count := 0
+		relocate_keg_binaries(keg_dir, &relocated_bin_count)
+		if relocated_bin_count > 0 {
+			fmt.printf("==> Relocated %d binary interpreter(s)!\n", relocated_bin_count)
+		}
+		if !relocate_keg_placeholders(keg_dir) {
+			fmt.println("Error: Keg relocation failed.")
+			return false
+		}
+		if h, err := os.open(marker_path, os.O_CREATE | os.O_WRONLY, os.Permissions_Default_File); err == nil {
+			os.close(h)
+		}
 	}
 
 	if !link_formula_keg(f.name, f.version, f.keg_only) {
@@ -1202,6 +1205,11 @@ install_bottle :: proc(f: formula.Formula, prefix: string, on_request: bool) -> 
 
 	if !materialized && store.is_valid_sha256(sha) {
 		_ = store.store_ensure_dir()
+		if !os.is_file(marker_path) {
+			if h, err := os.open(marker_path, os.O_CREATE | os.O_WRONLY, os.Permissions_Default_File); err == nil {
+				os.close(h)
+			}
+		}
 		if store.store_save_relocated_entry(sha, f.name, f.version, HOMEBREW_PREFIX) {
 			fmt.printf("==> Saved store entry %s via COW\n", sha[:12])
 		}

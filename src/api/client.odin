@@ -4309,6 +4309,60 @@ search_db_all_casks :: proc(allocator := context.allocator) -> []Cask_Search_Res
 	return out[:]
 }
 
+search_db_lookup_formula_versions :: proc(names: []string, allocator := context.temp_allocator) -> map[string]string {
+	result := make(map[string]string, allocator)
+	if len(names) == 0 do return result
+	db, ok := _open_search_db()
+	if !ok do return result
+	defer fts.close(db)
+
+	csql : cstring = "SELECT COALESCE((SELECT version FROM formulae WHERE name = ?), (SELECT version FROM registry WHERE token = ? AND kind = 'formula'))"
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok do return result
+	defer fts.finalize(stmt)
+
+	for name in names {
+		fts.reset(stmt)
+		_db_bind_text(stmt, 1, name)
+		_db_bind_text(stmt, 2, name)
+		if fts.step(stmt) == .Row {
+			ver := _db_col_text(stmt, 0)
+			if len(ver) > 0 {
+				result[name] = strings.clone(ver, allocator)
+			}
+		}
+	}
+	return result
+}
+
+search_db_lookup_cask_versions :: proc(tokens: []string, allocator := context.temp_allocator) -> map[string]string {
+	result := make(map[string]string, allocator)
+	if len(tokens) == 0 do return result
+	db, ok := _open_search_db()
+	if !ok do return result
+	defer fts.close(db)
+
+	csql : cstring = "SELECT COALESCE((SELECT version FROM casks WHERE token = ?), (SELECT version FROM registry WHERE token = ? AND kind = 'cask'))"
+	stmt: ^Statement
+	rc := fts.prepare_v2(db, csql, -1, &stmt, nil)
+	if rc != .Ok do return result
+	defer fts.finalize(stmt)
+
+	for token in tokens {
+		fts.reset(stmt)
+		_db_bind_text(stmt, 1, token)
+		_db_bind_text(stmt, 2, token)
+		if fts.step(stmt) == .Row {
+			ver := _db_col_text(stmt, 0)
+			if len(ver) > 0 {
+				result[token] = strings.clone(ver, allocator)
+			}
+		}
+	}
+	return result
+}
+
 warm_mixed_cache_parallel :: proc(formula_names, cask_tokens: []string) -> int {
 	if len(formula_names) == 0 && len(cask_tokens) == 0 {
 		return 0

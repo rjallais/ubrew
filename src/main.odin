@@ -408,6 +408,64 @@ run_list :: proc(args: []string) {
 	is_formula_mode := opt_formula || (!opt_formula && !opt_cask)
 	is_cask_mode := opt_cask || (!opt_formula && !opt_cask)
 
+	is_simple_list := !opt_full_name && !opt_versions && !opt_json && !opt_multiple && !opt_pinned &&
+	                  !opt_installed_on_request && !opt_poured_from_bottle && !opt_built_from_source &&
+	                  !opt_t
+
+	if is_simple_list {
+		names := make([dynamic]string, context.temp_allocator)
+		seen := make(map[string]bool, context.temp_allocator)
+
+		read_simple_dir_names :: proc(dir: string, names: ^[dynamic]string, seen: ^map[string]bool) {
+			cdir := strings.clone_to_cstring(dir, context.temp_allocator)
+			dirp := posix.opendir(cdir)
+			if dirp == nil do return
+			defer posix.closedir(dirp)
+
+			for {
+				ent := posix.readdir(dirp)
+				if ent == nil do break
+				cname := cstring(&ent.d_name[0])
+				name := string(cname)
+				if name == "." || name == ".." || strings.has_prefix(name, ".") {
+					continue
+				}
+				if ent.d_type == .DIR || ent.d_type == .UNKNOWN {
+					if ent.d_type == .UNKNOWN {
+						subpath := fmt.tprintf("%s/%s", dir, name)
+						if !os.is_dir(subpath) do continue
+					}
+					if !seen[name] {
+						seen[name] = true
+						append(names, strings.clone(name, context.temp_allocator))
+					}
+				}
+			}
+		}
+
+		if is_formula_mode && os.is_dir(installer.CELLAR_DIR) {
+			read_simple_dir_names(installer.CELLAR_DIR, &names, &seen)
+		}
+		if is_cask_mode && os.is_dir(installer.CASKROOM_DIR) {
+			read_simple_dir_names(installer.CASKROOM_DIR, &names, &seen)
+		}
+
+		if len(names) == 0 {
+			fmt.println("No packages installed.")
+			return
+		}
+
+		slice.sort(names[:])
+		if opt_r {
+			slice.reverse(names[:])
+		}
+
+		for name in names {
+			fmt.println(name)
+		}
+		return
+	}
+
 	pins := read_pins()
 	defer destroy_pins(pins)
 
@@ -3154,8 +3212,14 @@ run_install :: proc(args: []string) {
 		} else if t.type == Target_Type.Cask {
 			append(&casks_to_warm, t.name)
 		} else {
-			// Auto-detect targets: try TSV index/slash check first
-			if api.is_core_formula(t.name) {
+			// Auto-detect targets: check local cache files first before SQLite lookup
+			f_cache := fmt.tprintf("%s/formula-%s.json", api.API_CACHE_DIR, t.name)
+			c_cache := fmt.tprintf("%s/cask-%s.json", api.API_CACHE_DIR, t.name)
+			if os.is_file(f_cache) {
+				append(&formulae_to_warm, t.name)
+			} else if os.is_file(c_cache) {
+				append(&casks_to_warm, t.name)
+			} else if api.is_core_formula(t.name) {
 				append(&formulae_to_warm, t.name)
 			} else if api.is_core_cask(t.name) {
 				append(&casks_to_warm, t.name)
@@ -5285,83 +5349,123 @@ Upgrade_Item :: struct {
  }
  
  list_installed_formulae :: proc() -> [dynamic]Installed_Pkg {
- 	pkgs := make([dynamic]Installed_Pkg, context.allocator)
- 	cellar := installer.CELLAR_DIR
- 	if fd, err := os.open(cellar); err == nil {
- 		defer os.close(fd)
- 		if infos, rerr := os.read_directory_by_path(cellar, -1, context.temp_allocator); rerr == nil {
- 			for info in infos {
- 				if info.type == .Directory {
- 					v_dir := fmt.tprintf("%s/%s", cellar, info.name)
- 					if v_fd, v_err := os.open(v_dir); v_err == nil {
- 						defer os.close(v_fd)
- 						if v_infos, v_rerr := os.read_directory_by_path(v_dir, -1, context.temp_allocator); v_rerr == nil {
- 							latest_ver := ""
- 							for v_info in v_infos {
- 								if v_info.type == .Directory && is_version_dir(v_info.name) {
- 									if latest_ver == "" || is_newer(v_info.name, latest_ver) {
- 										latest_ver = v_info.name
- 									}
- 								}
- 							}
- 							if latest_ver != "" {
- 								keg_dir := fmt.tprintf("%s/%s", v_dir, latest_ver)
- 								pkg_name := info.name
- 								if receipt, ok := installer.read_install_receipt(keg_dir, context.temp_allocator); ok {
- 									if len(receipt.tap) > 0 && receipt.tap != "homebrew/core" {
- 										pkg_name = fmt.tprintf("%s/%s", receipt.tap, info.name)
- 									}
- 								}
- 								append(&pkgs, Installed_Pkg{
- 									name = strings.clone(pkg_name, context.allocator),
- 									version = strings.clone(latest_ver, context.allocator),
- 									is_cask = false,
- 								})
- 							}
- 						}
- 					}
- 				}
- 			}
- 		}
- 	}
- 	return pkgs
- }
- 
- list_installed_casks :: proc() -> [dynamic]Installed_Pkg {
- 	pkgs := make([dynamic]Installed_Pkg, context.allocator)
- 	caskroom := installer.CASKROOM_DIR
- 	if fd, err := os.open(caskroom); err == nil {
- 		defer os.close(fd)
- 		if infos, rerr := os.read_directory_by_path(caskroom, -1, context.temp_allocator); rerr == nil {
- 			for info in infos {
- 				if info.type == .Directory {
- 					v_dir := fmt.tprintf("%s/%s", caskroom, info.name)
- 					if v_fd, v_err := os.open(v_dir); v_err == nil {
- 						defer os.close(v_fd)
- 						if v_infos, v_rerr := os.read_directory_by_path(v_dir, -1, context.temp_allocator); v_rerr == nil {
- 							latest_ver := ""
- 							for v_info in v_infos {
- 								if v_info.type == .Directory && is_version_dir(v_info.name) {
- 									if latest_ver == "" || is_newer(v_info.name, latest_ver) {
- 										latest_ver = v_info.name
- 									}
- 								}
- 							}
- 							if latest_ver != "" {
- 								append(&pkgs, Installed_Pkg{
- 									name = strings.clone(info.name, context.allocator),
- 									version = strings.clone(latest_ver, context.allocator),
- 									is_cask = true,
- 								})
- 							}
- 						}
- 					}
- 				}
- 			}
- 		}
- 	}
- 	return pkgs
- }
+	pkgs := make([dynamic]Installed_Pkg, context.allocator)
+	cellar := installer.CELLAR_DIR
+	ccellar := strings.clone_to_cstring(cellar, context.temp_allocator)
+	dirp := posix.opendir(ccellar)
+	if dirp == nil do return pkgs
+	defer posix.closedir(dirp)
+
+	for {
+		ent := posix.readdir(dirp)
+		if ent == nil do break
+		cname := cstring(&ent.d_name[0])
+		pkg_name_base := strings.clone(string(cname), context.temp_allocator)
+		if pkg_name_base == "." || pkg_name_base == ".." || strings.has_prefix(pkg_name_base, ".") {
+			continue
+		}
+		if ent.d_type != .DIR && ent.d_type != .UNKNOWN {
+			continue
+		}
+		v_dir := fmt.tprintf("%s/%s", cellar, pkg_name_base)
+		if ent.d_type == .UNKNOWN && !os.is_dir(v_dir) {
+			continue
+		}
+
+		cv_dir := strings.clone_to_cstring(v_dir, context.temp_allocator)
+		v_dirp := posix.opendir(cv_dir)
+		if v_dirp == nil do continue
+
+		latest_ver := ""
+		for {
+			v_ent := posix.readdir(v_dirp)
+			if v_ent == nil do break
+			vcname := cstring(&v_ent.d_name[0])
+			ver_name := string(vcname)
+			if ver_name == "." || ver_name == ".." || strings.has_prefix(ver_name, ".") {
+				continue
+			}
+			if (v_ent.d_type == .DIR || v_ent.d_type == .UNKNOWN) && is_version_dir(ver_name) {
+				if latest_ver == "" || is_newer(ver_name, latest_ver) {
+					latest_ver = strings.clone(ver_name, context.temp_allocator)
+				}
+			}
+		}
+		posix.closedir(v_dirp)
+
+		if latest_ver != "" {
+			keg_dir := fmt.tprintf("%s/%s", v_dir, latest_ver)
+			pkg_name := pkg_name_base
+			if receipt, ok := installer.read_install_receipt(keg_dir, context.temp_allocator); ok {
+				if len(receipt.tap) > 0 && receipt.tap != "homebrew/core" {
+					pkg_name = fmt.tprintf("%s/%s", receipt.tap, pkg_name_base)
+				}
+			}
+			append(&pkgs, Installed_Pkg{
+				name = strings.clone(pkg_name, context.allocator),
+				version = strings.clone(latest_ver, context.allocator),
+				is_cask = false,
+			})
+		}
+	}
+	return pkgs
+}
+
+list_installed_casks :: proc() -> [dynamic]Installed_Pkg {
+	pkgs := make([dynamic]Installed_Pkg, context.allocator)
+	caskroom := installer.CASKROOM_DIR
+	ccaskroom := strings.clone_to_cstring(caskroom, context.temp_allocator)
+	dirp := posix.opendir(ccaskroom)
+	if dirp == nil do return pkgs
+	defer posix.closedir(dirp)
+
+	for {
+		ent := posix.readdir(dirp)
+		if ent == nil do break
+		cname := cstring(&ent.d_name[0])
+		pkg_name_base := strings.clone(string(cname), context.temp_allocator)
+		if pkg_name_base == "." || pkg_name_base == ".." || strings.has_prefix(pkg_name_base, ".") {
+			continue
+		}
+		if ent.d_type != .DIR && ent.d_type != .UNKNOWN {
+			continue
+		}
+		v_dir := fmt.tprintf("%s/%s", caskroom, pkg_name_base)
+		if ent.d_type == .UNKNOWN && !os.is_dir(v_dir) {
+			continue
+		}
+
+		cv_dir := strings.clone_to_cstring(v_dir, context.temp_allocator)
+		v_dirp := posix.opendir(cv_dir)
+		if v_dirp == nil do continue
+
+		latest_ver := ""
+		for {
+			v_ent := posix.readdir(v_dirp)
+			if v_ent == nil do break
+			vcname := cstring(&v_ent.d_name[0])
+			ver_name := string(vcname)
+			if ver_name == "." || ver_name == ".." || strings.has_prefix(ver_name, ".") {
+				continue
+			}
+			if (v_ent.d_type == .DIR || v_ent.d_type == .UNKNOWN) && is_version_dir(ver_name) {
+				if latest_ver == "" || is_newer(ver_name, latest_ver) {
+					latest_ver = strings.clone(ver_name, context.temp_allocator)
+				}
+			}
+		}
+		posix.closedir(v_dirp)
+
+		if latest_ver != "" {
+			append(&pkgs, Installed_Pkg{
+				name = strings.clone(pkg_name_base, context.allocator),
+				version = strings.clone(latest_ver, context.allocator),
+				is_cask = true,
+			})
+		}
+	}
+	return pkgs
+}
  
  
 
@@ -5486,29 +5590,26 @@ run_outdated :: proc(args: []string) {
 
 	outdated_items := make([dynamic]Outdated_Item, context.temp_allocator)
 
-	// Warm the per-formula / per-cask caches in parallel so the first run
-	// after a `brew update` doesn't hit sequential per-package downloads
-	// (which can take 30+ seconds). Stale caches (older than the bulk
-	// formula.json / cask.json dumps) are re-fetched automatically by the
-	// warm helpers.
+	// Quick catalog version pre-check from SQLite search-index.db (instant, zero network)
+	formula_names_to_query := make([dynamic]string, context.temp_allocator)
+	cask_tokens_to_query := make([dynamic]string, context.temp_allocator)
 	if !cask_only {
-		f_names := make([dynamic]string, 0, len(installed_formulae), context.temp_allocator)
 		for pkg in installed_formulae {
 			if matches_target(pkg.name, targets[:]) && !strings.contains(pkg.name, "/") {
-				append(&f_names, pkg.name)
+				append(&formula_names_to_query, pkg.name)
 			}
 		}
-		_ = api.warm_formulae_cache_parallel(f_names[:])
 	}
 	if !formula_only {
-		c_tokens := make([dynamic]string, 0, len(installed_casks), context.temp_allocator)
 		for pkg in installed_casks {
-			if matches_target(pkg.name, targets[:]) {
-				append(&c_tokens, pkg.name)
+			if matches_target(pkg.name, targets[:]) && !strings.contains(pkg.name, "/") {
+				append(&cask_tokens_to_query, pkg.name)
 			}
 		}
-		_ = api.warm_casks_cache_parallel(c_tokens[:])
 	}
+
+	cat_formula_versions := api.search_db_lookup_formula_versions(formula_names_to_query[:], context.temp_allocator)
+	cat_cask_versions := api.search_db_lookup_cask_versions(cask_tokens_to_query[:], context.temp_allocator)
 
 	cellar_dir := installer.CELLAR_DIR
 	caskroom_dir := installer.CASKROOM_DIR
@@ -5517,21 +5618,21 @@ run_outdated :: proc(args: []string) {
 		for pkg in installed_formulae {
 			if !matches_target(pkg.name, targets[:]) do continue
 
-			f, err := api.fetch_formula(pkg.name)
 			is_outdated := false
 			latest_ver := ""
-			if err == nil {
-				if min_version != "" {
-					latest_ver = strings.clone(min_version, context.temp_allocator)
-					is_outdated = is_update_available(pkg.version, min_version)
-				} else {
+			if min_version != "" {
+				latest_ver = strings.clone(min_version, context.temp_allocator)
+				is_outdated = is_update_available(pkg.version, min_version)
+			} else if cat_ver, found := cat_formula_versions[pkg.name]; found {
+				latest_ver = cat_ver
+				is_outdated = is_update_available(pkg.version, cat_ver)
+			} else {
+				f, err := api.fetch_formula(pkg.name)
+				if err == nil {
 					latest_ver = strings.clone(f.version, context.temp_allocator)
 					is_outdated = is_update_available(pkg.version, f.version)
+					api.destroy_formula(f)
 				}
-				api.destroy_formula(f)
-			} else if min_version != "" {
-				is_outdated = is_update_available(pkg.version, min_version)
-				latest_ver = strings.clone(min_version, context.temp_allocator)
 			}
 
 			if is_outdated {
@@ -5557,14 +5658,19 @@ run_outdated :: proc(args: []string) {
 		for pkg in installed_casks {
 			if !matches_target(pkg.name, targets[:]) do continue
 
-			c, err := api.fetch_cask(pkg.name)
 			is_outdated := false
 			latest_ver := ""
-			if err == nil {
-				if min_version != "" {
-					latest_ver = strings.clone(min_version, context.temp_allocator)
-					is_outdated = is_update_available(pkg.version, min_version)
-				} else {
+			cat_ver, in_cat := cat_cask_versions[pkg.name]
+
+			if min_version != "" {
+				latest_ver = strings.clone(min_version, context.temp_allocator)
+				is_outdated = is_update_available(pkg.version, min_version)
+			} else if in_cat && cat_ver != "latest" && !greedy_auto_updates && !greedy_latest {
+				latest_ver = cat_ver
+				is_outdated = is_update_available(pkg.version, cat_ver)
+			} else {
+				c, err := api.fetch_cask(pkg.name)
+				if err == nil {
 					latest_ver = strings.clone(c.version, context.temp_allocator)
 					if c.version == "latest" {
 						if greedy_latest {
@@ -5577,11 +5683,8 @@ run_outdated :: proc(args: []string) {
 					} else {
 						is_outdated = is_update_available(pkg.version, c.version)
 					}
+					api.destroy_cask(c)
 				}
-				api.destroy_cask(c)
-			} else if min_version != "" {
-				is_outdated = is_update_available(pkg.version, min_version)
-				latest_ver = strings.clone(min_version, context.temp_allocator)
 			}
 
 			if is_outdated {
@@ -5730,6 +5833,22 @@ maybe_auto_update :: proc() -> bool {
 	if ci := os.get_env("CI", context.temp_allocator); ci != "" && !os.is_tty(os.stdout) {
 		return true
 	}
+
+	db_path := fmt.tprintf("%s/db/upstream.json", installer.UBREW_ROOT)
+	if fi, err := os.stat(db_path, context.temp_allocator); err == nil {
+		now_sec := time.time_to_unix(time.now())
+		mod_sec := time.time_to_unix(fi.modification_time)
+		fresh_secs: i64 = 86400
+		if aus := os.get_env("HOMEBREW_AUTO_UPDATE_SECS", context.temp_allocator); aus != "" {
+			if parsed, ok := strconv.parse_i64(aus); ok {
+				fresh_secs = parsed
+			}
+		}
+		if now_sec - mod_sec < fresh_secs {
+			return true
+		}
+	}
+
 	// Returns false when the freshness-gated refresh could not establish a
 	// complete metadata snapshot (see run_update's W8 atomicity rule); the
 	// caller must refuse to continue rather than run against indeterminate
@@ -6097,6 +6216,15 @@ run_update :: proc(args: []string) -> bool {
 					}
 					continue
 				}
+				already_queued := false
+				for p in pulls {
+					if p.dest == dest {
+						already_queued = true
+						break
+					}
+				}
+				if already_queued do continue
+
 				append(&pulls, Shared_Pull_Job{
 					name   = entry.name,
 					dest   = dest,
@@ -6110,7 +6238,7 @@ run_update :: proc(args: []string) -> bool {
 			// fewer cores still work fine since the children sleep in
 			// network I/O, and GitHub throttles concurrent fetches to a
 			// handful anyway.
-			pull_concurrency := 8
+			pull_concurrency := 16
 			pull_ok := make([]bool, len(pulls), context.temp_allocator)
 			for start := 0; start < len(pulls); start += pull_concurrency {
 				window := min(len(pulls) - start, pull_concurrency)
@@ -6701,26 +6829,6 @@ run_upgrade :: proc(args: []string) {
 	greedy_latest := opt_greedy || opt_greedy_latest || greedy_default
 	greedy_auto_updates := opt_greedy || opt_greedy_auto_updates || greedy_default
 
-	installed_formulae := list_installed_formulae()
-	defer {
-		for f in installed_formulae {
-			delete(f.name)
-			delete(f.version)
-		}
-		delete(installed_formulae)
-	}
-	installed_casks := list_installed_casks()
-	defer {
-		for c in installed_casks {
-			delete(c.name)
-			delete(c.version)
-		}
-		delete(installed_casks)
-	}
-
-	pins := read_pins()
-	defer destroy_pins(pins)
-
 	Upgrade_Target :: struct {
 		name: string,
 		is_cask: bool,
@@ -6728,6 +6836,20 @@ run_upgrade :: proc(args: []string) {
 	}
 
 	targets := make([dynamic]Upgrade_Target, context.temp_allocator)
+	installed_formulae: [dynamic]Installed_Pkg
+	installed_casks:    [dynamic]Installed_Pkg
+	defer {
+		for f in installed_formulae {
+			delete(f.name)
+			delete(f.version)
+		}
+		delete(installed_formulae)
+		for c in installed_casks {
+			delete(c.name)
+			delete(c.version)
+		}
+		delete(installed_casks)
+	}
 
 	if len(pkg_names) > 0 {
 		for name in pkg_names {
@@ -6737,21 +6859,18 @@ run_upgrade :: proc(args: []string) {
 			cask_ver := ""
 
 			if !cask_only {
-				for f in installed_formulae {
-					if f.name == name {
+				if keg_path, ok := exec_formula_latest_keg(name); ok {
+					if idx := strings.last_index(keg_path, "/"); idx >= 0 {
 						found_formula = true
-						formula_ver = f.version
-						break
+						formula_ver = strings.clone(keg_path[idx+1:], context.temp_allocator)
 					}
 				}
 			}
-			if !formula_only {
-				for c in installed_casks {
-					if c.name == name {
-						found_cask = true
-						cask_ver = c.version
-						break
-					}
+			if !formula_only && !found_formula {
+				flat := installer.flatten_token(name)
+				if c_vers := get_all_versions_cask(flat, installer.CASKROOM_DIR); len(c_vers) > 0 {
+					found_cask = true
+					cask_ver = c_vers[len(c_vers)-1]
 				}
 			}
 
@@ -6774,7 +6893,11 @@ run_upgrade :: proc(args: []string) {
 			}
 		}
 	} else {
+		pins := read_pins()
+		defer destroy_pins(pins)
+
 		if !cask_only {
+			installed_formulae = list_installed_formulae()
 			for f in installed_formulae {
 				if is_pinned(pins, f.name) {
 					fmt.printf("==> Skipping pinned formula %s\n", f.name)
@@ -6784,6 +6907,7 @@ run_upgrade :: proc(args: []string) {
 			}
 		}
 		if !formula_only {
+			installed_casks = list_installed_casks()
 			for c in installed_casks {
 				if is_pinned(pins, c.name) {
 					fmt.printf("==> Skipping pinned cask %s\n", c.name)
@@ -6794,7 +6918,24 @@ run_upgrade :: proc(args: []string) {
 		}
 	}
 
-	// Warm cache
+	// Quick catalog version pre-check from SQLite search-index.db (instant, zero network)
+	formula_names_to_query := make([dynamic]string, context.temp_allocator)
+	cask_tokens_to_query := make([dynamic]string, context.temp_allocator)
+	for t in targets {
+		if t.is_cask {
+			append(&cask_tokens_to_query, t.name)
+		} else {
+			if !strings.contains(t.name, "/") {
+				append(&formula_names_to_query, t.name)
+			}
+		}
+	}
+
+	cat_formula_versions := api.search_db_lookup_formula_versions(formula_names_to_query[:], context.temp_allocator)
+	cat_cask_versions := api.search_db_lookup_cask_versions(cask_tokens_to_query[:], context.temp_allocator)
+
+	// Filter targets: if not forced and catalog version matches current version, target is up-to-date!
+	filtered_targets := make([dynamic]Upgrade_Target, context.temp_allocator)
 	formulae_to_warm := make([dynamic]string, context.temp_allocator)
 	casks_to_warm := make([dynamic]string, context.temp_allocator)
 	defer {
@@ -6803,17 +6944,41 @@ run_upgrade :: proc(args: []string) {
 	}
 
 	for t in targets {
+		if !force && min_version == "" {
+			if t.is_cask {
+				if latest_ver, found := cat_cask_versions[t.name]; found {
+					if latest_ver != "latest" && !is_update_available(t.current_version, latest_ver) {
+						continue // Already up to date! Skip network and metadata fetch completely.
+					}
+				}
+			} else {
+				if latest_ver, found := cat_formula_versions[t.name]; found {
+					if !is_update_available(t.current_version, latest_ver) {
+						continue // Already up to date! Skip network and metadata fetch completely.
+					}
+				}
+			}
+		}
+
+		append(&filtered_targets, t)
 		if t.is_cask {
 			append(&casks_to_warm, t.name)
-		} else {
-			if !strings.contains(t.name, "/") {
-				append(&formulae_to_warm, t.name)
-			}
+		} else if !strings.contains(t.name, "/") {
+			append(&formulae_to_warm, t.name)
 		}
 	}
 
-	_ = api.warm_formulae_cache_parallel(formulae_to_warm[:])
-	_ = api.warm_casks_cache_parallel(casks_to_warm[:])
+	if len(filtered_targets) == 0 {
+		fmt.println("==> All packages are up to date.")
+		return
+	}
+
+	if len(formulae_to_warm) > 0 {
+		_ = api.warm_formulae_cache_parallel(formulae_to_warm[:])
+	}
+	if len(casks_to_warm) > 0 {
+		_ = api.warm_casks_cache_parallel(casks_to_warm[:])
+	}
 
 	upgrades := make([dynamic]Upgrade_Item, context.temp_allocator)
 	defer {
@@ -6824,7 +6989,7 @@ run_upgrade :: proc(args: []string) {
 		}
 	}
 
-	for t in targets {
+	for t in filtered_targets {
 		if t.is_cask {
 			c, err := api.fetch_cask(t.name)
 			if err != nil { continue }
@@ -8796,23 +8961,28 @@ exec_formula_name :: proc(name: string) -> string {
 exec_formula_latest_keg :: proc(name: string) -> (string, bool) {
     short := exec_formula_name(name)
     cellar := fmt.tprintf("%s/%s", installer.CELLAR_DIR, short)
-    // `read_directory_by_path` returns its backing slice from a temp
-    // arena (not the heap), so `file_info_slice_delete` would
-    // call `free()` on a temp-allocated pointer and crash with
-    // "free(): invalid pointer". Use the temp allocator end-of-scope
-    // cleanup instead.
-    infos, err := os.read_directory_by_path(cellar, -1, context.temp_allocator)
-    if err != nil {
-        return "", false
-    }
-    // Pick the lexicographically-greatest subdir. For SemVer this
-    // works well enough; for formulae with pre-release tags the
-    // Cellar layout rarely collides.
+    cdir := strings.clone_to_cstring(cellar, context.temp_allocator)
+    dirp := posix.opendir(cdir)
+    if dirp == nil do return "", false
+    defer posix.closedir(dirp)
+
     latest := ""
-    for info in infos {
-        if info.type != .Directory { continue }
-        if latest == "" || is_newer(info.name, latest) {
-            latest = info.name
+    for {
+        ent := posix.readdir(dirp)
+        if ent == nil do break
+        cname := cstring(&ent.d_name[0])
+        ename := string(cname)
+        if ename == "." || ename == ".." || strings.has_prefix(ename, ".") {
+            continue
+        }
+        if ent.d_type == .DIR || ent.d_type == .UNKNOWN {
+            if ent.d_type == .UNKNOWN {
+                subpath := fmt.tprintf("%s/%s", cellar, ename)
+                if !os.is_dir(subpath) do continue
+            }
+            if latest == "" || is_newer(ename, latest) {
+                latest = strings.clone(ename, context.temp_allocator)
+            }
         }
     }
     if latest == "" {
@@ -9155,6 +9325,16 @@ ubrew_known_commands :: proc(include_aliases: bool) -> []string {
     for p in ubrew_primary_commands { append(&out, p) }
     for a in ubrew_alias_commands { append(&out, a) }
     return out[:]
+}
+
+is_builtin_command :: proc(cmd: string) -> bool {
+    for p in ubrew_primary_commands {
+        if cmd == p do return true
+    }
+    for a in ubrew_alias_commands {
+        if cmd == a do return true
+    }
+    return false
 }
 
 // ── path queries & shellenv ──
@@ -9507,17 +9687,6 @@ run_completions :: proc(args: []string) {
 }
 
 main :: proc() {
-    // Initialize runtime paths from UBREW_*/HOMEBREW_* env vars
-    // before any path-dependent work (install, list, doctor, etc).
-    installer.init_paths()
-    api.init_paths()
-    store.init_paths()
-    tap.init_paths()
-    history.init_paths()
-
-    // Homebrew env vars (HOMEBREW_NO_AUTO_UPDATE, HOMEBREW_AUTO_UPDATE_SECS,
-    // etc.) are honored where relevant by maybe_auto_update and run_update;
-    // no consume step is needed here.
     if len(os.args) < 2 || os.args[1] == "--help" || os.args[1] == "-h" {
         print_usage()
         os.exit(0)
@@ -9526,22 +9695,6 @@ main :: proc() {
     cmd := os.args[1]
     args_slice := os.args[2:]
 
-    // User-defined alias expansion
-    // Never let an alias shadow a built-in command; a mistaken
-    // `install=nuke` entry must not turn `ubrew install` into a
-    // destructive dispatch.
-    is_builtin := false
-    for k in ubrew_known_commands(true) {
-        if cmd == k {
-            is_builtin = true
-            break
-        }
-    }
-    user_aliases := read_aliases()
-    if target_cmd, found := user_aliases[cmd]; found && !is_builtin {
-        cmd = target_cmd
-    }
-
     if cmd == "help" {
         if len(os.args) < 3 {
             print_usage()
@@ -9549,6 +9702,29 @@ main :: proc() {
         }
         cmd = os.args[2]
         args_slice = []string{"--help"}
+    }
+
+    if cmd == "version" || cmd == "--version" || cmd == "-v" {
+        fmt.printf("ubrew %s\n", UBREW_VERSION)
+        os.exit(0)
+    }
+
+    // Initialize runtime paths from UBREW_*/HOMEBREW_* env vars
+    // before any path-dependent work (install, list, doctor, etc).
+    installer.init_paths()
+    api.init_paths()
+    store.init_paths()
+    tap.init_paths()
+    history.init_paths()
+
+    // User-defined alias expansion: only read alias file from disk if cmd
+    // is not already a built-in command. Built-in commands can never be shadowed.
+    if !is_builtin_command(cmd) {
+        user_aliases := read_aliases()
+        defer delete(user_aliases)
+        if target_cmd, found := user_aliases[cmd]; found {
+            cmd = target_cmd
+        }
     }
 
     // handle alias/readall dispatch AFTER help rewrites cmd, so
@@ -9562,11 +9738,6 @@ main :: proc() {
     if cmd == "readall" {
         run_readall(args_slice)
         return
-    }
-
-    if cmd == "version" || cmd == "--version" || cmd == "-v" {
-        fmt.printf("ubrew %s\n", UBREW_VERSION)
-        os.exit(0)
     }
 
     if cmd == "init" {
