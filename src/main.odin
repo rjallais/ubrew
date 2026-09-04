@@ -9325,6 +9325,11 @@ ubrew_alias_commands := []string{
     "service", "ui", "uninstall", "up", "wh", "x",
 }
 
+ubrew_option_commands := []string{
+    "--prefix", "--cellar", "--caskroom", "--cache", "--repo", "--repository", "-S",
+    "--version", "-v", "--help", "-h",
+}
+
 // ubrew_known_commands returns the canonical list of ubrew subcommand
 // names. If `include_aliases` is true, aliases are appended to the
 // primary list (the result is allocated on the heap; the caller may
@@ -9345,6 +9350,9 @@ is_builtin_command :: proc(cmd: string) -> bool {
     }
     for a in ubrew_alias_commands {
         if cmd == a do return true
+    }
+    for o in ubrew_option_commands {
+        if cmd == o do return true
     }
     return false
 }
