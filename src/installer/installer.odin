@@ -1904,6 +1904,25 @@ write_cask_metadata :: proc(c: cask.Cask, version_fallback: string) -> bool {
 	return true
 }
 
+path_contains_symlink :: proc(root, rel_path: string) -> bool {
+	parts := strings.split(rel_path, "/", context.temp_allocator)
+	defer delete(parts, context.temp_allocator)
+	curr := strings.clone(root, context.temp_allocator)
+	for part in parts {
+		if len(part) == 0 || part == "." {
+			continue
+		}
+		curr = fmt.tprintf("%s/%s", curr, part)
+		if fi, err := os.lstat(curr, context.temp_allocator); err == nil {
+			defer os.file_info_delete(fi, context.temp_allocator)
+			if fi.type == .Symlink {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 install_binary_cask :: proc(c: cask.Cask) -> bool {
 	if len(c.url) == 0 {
 		fmt.println("Error: Cask has no download URL.")
@@ -1962,6 +1981,10 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	// 1. Materialize preflight generated files into extract_dir before artifact linking
 	for pf in c.preflight_files {
 		if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
+			continue
+		}
+		if path_contains_symlink(extract_dir, pf.path) {
+			fmt.printf("Warning: rejecting preflight file traversing symlink: %s\n", pf.path)
 			continue
 		}
 		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)

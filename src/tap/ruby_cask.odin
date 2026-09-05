@@ -812,7 +812,17 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		}
 
 		// Inside preflight block: track nested blocks
-		if strings.has_suffix(trimmed, " do") || strings.has_prefix(trimmed, "def ") || strings.has_prefix(trimmed, "if ") {
+		opens_block := strings.has_suffix(trimmed, " do") ||
+		               strings.contains(trimmed, " do |") ||
+		               strings.has_prefix(trimmed, "def ") ||
+		               strings.has_prefix(trimmed, "if ") ||
+		               strings.has_prefix(trimmed, "unless ") ||
+		               strings.has_prefix(trimmed, "case ") ||
+		               trimmed == "begin" ||
+		               strings.has_prefix(trimmed, "begin ") ||
+		               strings.has_prefix(trimmed, "while ") ||
+		               strings.has_prefix(trimmed, "until ")
+		if opens_block {
 			preflight_depth += 1
 		} else if trimmed == "end" || strings.has_suffix(trimmed, " end") {
 			preflight_depth -= 1
@@ -933,6 +943,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 					path    = strings.clone(clean_path, context.allocator),
 					content = strings.clone(content, context.allocator),
 				})
+				strings.builder_destroy(&content_builder)
 				delete(path)
 				continue
 			}
