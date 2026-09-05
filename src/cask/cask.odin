@@ -27,6 +27,11 @@ Generic_Artifact :: struct {
 	target: string,
 }
 
+Preflight_File :: struct {
+	path:    string,
+	content: string,
+}
+
 Artifact :: union {
 	App_Artifact,
 	Font_Artifact,
@@ -37,13 +42,14 @@ Artifact :: union {
 }
 
 Cask :: struct {
-    token:        string,
-    name:         string,
-    desc:         string,
-    version:      string,
-    url:          string,
-    sha256:       string,
-    homepage:     string,
-    artifacts:    []Artifact,
-    auto_updates: bool,
+    token:           string,
+    name:            string,
+    desc:            string,
+    version:         string,
+    url:             string,
+    sha256:          string,
+    homepage:        string,
+    artifacts:       []Artifact,
+    preflight_files: []Preflight_File,
+    auto_updates:    bool,
 }

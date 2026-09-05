@@ -2002,6 +2002,44 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		}
 	}
 
+	// 1. Materialize preflight generated files into extract_dir
+	for pf in c.preflight_files {
+		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
+		parent := dir_name(target_file)
+		_ = os.make_directory_all(parent, os.perm(0o755))
+		if err := os.write_entire_file_from_string(target_file, pf.content); err != nil {
+			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, err)
+		} else {
+			fmt.printf("==> Staged preflight file: %s\n", pf.path)
+		}
+	}
+
+	// 2. Disable Electron built-in auto-update manifests (Homebrew parity)
+	if update_yml, ok := find_file_by_basename(extract_dir, "app-update.yml"); ok {
+		_ = os.remove(update_yml)
+		fmt.println("==> Removed Electron app-update.yml (package manager manages updates)")
+	}
+
+	// 3. Fallback ASAR icon extraction: if any generic artifact expects an icon
+	// that isn't loose in extract_dir, extract it from app.asar
+	for art in c.artifacts {
+		if ga, ok := art.(cask.Generic_Artifact); ok {
+			src_rel := resolve_arch_placeholders(ga.source)
+			if strings.has_suffix(strings.to_lower(src_rel, context.temp_allocator), ".png") {
+				src_path := fmt.tprintf("%s/%s", extract_dir, src_rel)
+				if !os.is_file(src_path) {
+					base := os.base(src_rel)
+					if _, found := find_file_by_basename(extract_dir, base); !found {
+						_ = find_and_extract_asar_icon(extract_dir, src_rel)
+					}
+				}
+			}
+		}
+	}
+
+	// Track installed .desktop files for desktop database and MIME registration
+	installed_desktop_files := make([dynamic]string, context.temp_allocator)
+
 	// Copy generic artifacts to target
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
@@ -2041,6 +2079,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 
 			// Apply post-copy adjustments for 1Password compatibility
 			if strings.has_suffix(resolved_target, ".desktop") {
+				append(&installed_desktop_files, strings.clone(resolved_target, context.temp_allocator))
 				if contents, err := os.read_entire_file_from_path(resolved_target, context.temp_allocator); err == nil {
 					text := string(contents)
 					bin_path := fmt.tprintf("%s/1password", bin_dir)
@@ -2100,6 +2139,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		)
 		desktop_path := fmt.tprintf("%s/code.desktop", apps_dir)
 		_ = os.write_entire_file_from_string(desktop_path, desktop_content)
+		append(&installed_desktop_files, desktop_path)
 
 		// code-url-handler.desktop
 		url_handler_content := fmt.tprintf(
@@ -2108,9 +2148,38 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		)
 		url_handler_path := fmt.tprintf("%s/code-url-handler.desktop", apps_dir)
 		_ = os.write_entire_file_from_string(url_handler_path, url_handler_content)
+		append(&installed_desktop_files, url_handler_path)
 
 		fmt.println("==> Generated VS Code desktop shortcuts")
 		installed += 2
+	}
+
+	// Linux Desktop & MIME integration
+	if len(installed_desktop_files) > 0 {
+		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
+		_ = platform.exec_cmd("update-desktop-database", []string{"update-desktop-database", apps_dir})
+
+		for df_path in installed_desktop_files {
+			df_base := os.base(df_path)
+			if contents, err := os.read_entire_file_from_path(df_path, context.temp_allocator); err == nil {
+				text := string(contents)
+				lines := strings.split(text, "\n", context.temp_allocator)
+				for line in lines {
+					trimmed := strings.trim_space(line)
+					if strings.has_prefix(trimmed, "MimeType=") {
+						mimes_str := trimmed[len("MimeType="):]
+						mimes := strings.split(mimes_str, ";", context.temp_allocator)
+						for mime in mimes {
+							m_trimmed := strings.trim_space(mime)
+							if len(m_trimmed) > 0 {
+								_ = platform.exec_cmd("xdg-mime", []string{"xdg-mime", "default", df_base, m_trimmed})
+							}
+						}
+					}
+				}
+			}
+		}
+		fmt.println("==> Updated desktop database and registered MIME scheme handlers")
 	}
 
 	if installed == 0 {
@@ -2777,10 +2846,14 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	// Clean up generic artifacts target paths
+	removed_desktop := false
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
 			target_resolved := resolve_arch_placeholders(ga.target)
 			resolved_target := expand_home(target_resolved, context.temp_allocator)
+			if strings.has_suffix(resolved_target, ".desktop") {
+				removed_desktop = true
+			}
 			if os.is_dir(resolved_target) {
 				if is_safe_to_remove_dir(resolved_target) {
 					_ = os.remove_all(resolved_target)
@@ -2796,6 +2869,12 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
 		_ = os.remove(fmt.tprintf("%s/code.desktop", apps_dir))
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
+		removed_desktop = true
+	}
+
+	if removed_desktop {
+		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
+		_ = platform.exec_cmd("update-desktop-database", []string{"update-desktop-database", apps_dir})
 	}
 
 	// Remove the whole Caskroom entry (version dirs, .metadata, and any

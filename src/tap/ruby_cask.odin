@@ -3,6 +3,8 @@ package tap
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "../cask"
+import "../platform"
 
 // Ruby_Cask represents the subset of Homebrew's Ruby cask DSL that we parse
 // out of `Casks/<name>.rb` files in tapped 3rd-party repositories. Only the
@@ -22,6 +24,7 @@ Ruby_Cask :: struct {
 	artifact_sources: [dynamic]string, // source paths from `artifact "..."` directives
 	artifact_targets: [dynamic]string, // target paths (same length as sources)
 	binary_targets:    [dynamic]string, // target names for binaries (same length as binaries; "" means basename)
+	preflight_files:   [dynamic]cask.Preflight_File,
 }
 
 Ruby_Variable :: struct {
@@ -75,6 +78,11 @@ destroy_ruby_cask :: proc(c: Ruby_Cask) {
 		delete(c.artifact_targets[i])
 	}
 	delete(c.artifact_targets)
+	for pf in c.preflight_files {
+		delete(pf.path)
+		delete(pf.content)
+	}
+	delete(c.preflight_files)
 }
 
 // Cask_Host is the local machine's view of the architecture for cask
@@ -196,7 +204,7 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 	} else {
 		sha256_picked = pick_sha256_for_host(src, local_arch_key, local_os_key, host)
 	}
-	c.sha256 = strings.clone(sha256_picked, context.allocator)
+	c.sha256 = sha256_picked
 
 	url_raw := ""
 	if len(url_line) > 0 {
@@ -236,6 +244,17 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 			delete(b)
 			c.artifact_targets[i] = interpolated
 		}
+	}
+
+	// 7. preflight file generation (File.write and write_file).
+	extract_preflight_file_writes(src, &c.preflight_files)
+	for pf, i in c.preflight_files {
+		interp_path := interpolate_cask_string(pf.path, c.version, arch_val, variables[:])
+		delete(pf.path)
+		interp_content := interpolate_cask_string(pf.content, c.version, arch_val, variables[:])
+		delete(pf.content)
+		c.preflight_files[i].path = interp_path
+		c.preflight_files[i].content = interp_content
 	}
 
 	if len(c.url) == 0 {
@@ -512,9 +531,11 @@ parse_simple_symbol_hash :: proc(src, key: string) -> ([dynamic]string, [dynamic
 					break
 				}
 				if len(pending_key) > 0 {
-					append(&keys, strings.clone(pending_key, context.allocator))
-					append(&values, strings.clone(val, context.allocator))
+					append(&keys, pending_key)
+					append(&values, val)
 					pending_key = ""
+				} else {
+					delete(val, context.allocator)
 				}
 				i = ni
 				continue
@@ -526,9 +547,13 @@ parse_simple_symbol_hash :: proc(src, key: string) -> ([dynamic]string, [dynamic
 				}
 				// Optional `:` immediately after.
 				if ni < len(rest) && rest[ni] == ':' {
+					if len(pending_key) > 0 {
+						delete(pending_key, context.allocator)
+					}
 					pending_key = word
 					i = ni + 1
 				} else {
+					delete(word, context.allocator)
 					i = ni
 				}
 				continue
@@ -538,6 +563,10 @@ parse_simple_symbol_hash :: proc(src, key: string) -> ([dynamic]string, [dynamic
 				continue
 			}
 			i += 1
+		}
+		if len(pending_key) > 0 {
+			delete(pending_key, context.allocator)
+			pending_key = ""
 		}
 		// Only honour the first occurrence.
 		break
@@ -714,9 +743,13 @@ extract_binary_and_artifact_directives :: proc(
 			if len(rest) > 0 {
 				val, _ := read_first_quoted(rest)
 				if len(val) > 0 {
-					append(binaries, strings.clone(val, context.allocator))
+					append(binaries, val)
 					target := extract_target_from_hash(rest)
-					append(binary_targets, strings.clone(target, context.allocator))
+					if len(target) > 0 {
+						append(binary_targets, target)
+					} else {
+						append(binary_targets, strings.clone("", context.allocator))
+					}
 				}
 			}
 			continue
@@ -736,11 +769,122 @@ extract_binary_and_artifact_directives :: proc(
 					next_line := strings.trim_space(lines[idx + 1])
 					target = extract_target_from_hash(next_line)
 				}
-				append(artifact_sources, strings.clone(path, context.allocator))
-				append(artifact_targets, strings.clone(target, context.allocator))
+				append(artifact_sources, path)
+				if len(target) > 0 {
+					append(artifact_targets, target)
+				} else {
+					append(artifact_targets, strings.clone("", context.allocator))
+				}
 			}
 			continue
 		}
+	}
+}
+
+// extract_preflight_file_writes parses `File.write(...)` and `write_file(...)`
+// blocks from preflight / preflight_steps sections.
+extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflight_File) {
+	lines := strings.split(src, "\n", context.temp_allocator)
+	defer delete(lines, context.temp_allocator)
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.trim_space(line)
+		i += 1
+		if len(trimmed) == 0 || trimmed[0] == '#' {
+			continue
+		}
+
+		is_file_write := false
+		arg_part := ""
+		if idx := strings.index(trimmed, "File.write("); idx >= 0 {
+			arg_part = strings.trim_space(trimmed[idx + len("File.write("):])
+			is_file_write = true
+		} else if strings.has_prefix(trimmed, "File.write ") {
+			arg_part = strings.trim_space(trimmed[len("File.write "):])
+			is_file_write = true
+		} else if strings.has_prefix(trimmed, "write_file ") {
+			arg_part = strings.trim_space(trimmed[len("write_file "):])
+			is_file_write = true
+		} else if strings.has_prefix(trimmed, "write_file(") {
+			arg_part = strings.trim_space(trimmed[len("write_file("):])
+			is_file_write = true
+		}
+
+		if !is_file_write {
+			continue
+		}
+
+		// Extract target path (first quoted string)
+		path, after_path := read_first_quoted(arg_part)
+		if len(path) == 0 {
+			continue
+		}
+
+		// Clean up "#{staged_path}/" or "{{staged_path}}/" prefix if present
+		clean_path := path
+		if strings.has_prefix(clean_path, "#{staged_path}/") {
+			clean_path = clean_path[len("#{staged_path}/"):]
+		} else if strings.has_prefix(clean_path, "{{staged_path}}/") {
+			clean_path = clean_path[len("{{staged_path}}/"):]
+		}
+
+		rest := arg_part[after_path:]
+
+		// Check for heredoc (<<~EOS, <<-EOS, <<EOS)
+		heredoc_idx := strings.index(rest, "<<")
+		if heredoc_idx >= 0 {
+			after_heredoc := rest[heredoc_idx + 2:]
+			if len(after_heredoc) > 0 && (after_heredoc[0] == '~' || after_heredoc[0] == '-') {
+				after_heredoc = after_heredoc[1:]
+			}
+			after_heredoc = strings.trim_space(after_heredoc)
+			term_end := 0
+			for term_end < len(after_heredoc) {
+				ch := after_heredoc[term_end]
+				if ch == ')' || ch == ',' || ch == ' ' || ch == '\t' || ch == '\r' {
+					break
+				}
+				term_end += 1
+			}
+			terminator := after_heredoc[:term_end]
+
+			if len(terminator) > 0 {
+				content_builder := strings.builder_make(context.temp_allocator)
+				for i < len(lines) {
+					cur_line := lines[i]
+					i += 1
+					if strings.trim_space(cur_line) == terminator {
+						break
+					}
+					strings.write_string(&content_builder, strings.trim_left(cur_line, " \t"))
+					strings.write_byte(&content_builder, '\n')
+				}
+				content := strings.to_string(content_builder)
+				append(files, cask.Preflight_File{
+					path    = strings.clone(clean_path, context.allocator),
+					content = strings.clone(content, context.allocator),
+				})
+				delete(path)
+				continue
+			}
+		}
+
+		// If not a heredoc, check if second argument is a quoted string
+		if comma_idx := strings.index_byte(rest, ','); comma_idx >= 0 {
+			second_arg := strings.trim_space(rest[comma_idx + 1:])
+			if content_str, _ := read_first_quoted(second_arg); len(content_str) > 0 {
+				append(files, cask.Preflight_File{
+					path    = strings.clone(clean_path, context.allocator),
+					content = content_str,
+				})
+				delete(path)
+				continue
+			}
+		}
+
+		delete(path)
 	}
 }
 
@@ -800,6 +944,28 @@ interpolate_cask_string :: proc(s, version, arch: string, variables: []Ruby_Vari
 		if strings.has_prefix(s[i:], "#{arch}") {
 			strings.write_string(&b, arch)
 			i += len("#{arch}")
+			continue
+		}
+		if strings.has_prefix(s[i:], "#{HOMEBREW_PREFIX}") {
+			strings.write_string(&b, platform.get_homebrew_prefix())
+			i += len("#{HOMEBREW_PREFIX}")
+			continue
+		}
+		if strings.has_prefix(s[i:], "{{HOMEBREW_PREFIX}}") {
+			strings.write_string(&b, platform.get_homebrew_prefix())
+			i += len("{{HOMEBREW_PREFIX}}")
+			continue
+		}
+		if strings.has_prefix(s[i:], "#{Dir.home}") {
+			home := os.get_env("HOME", context.temp_allocator)
+			strings.write_string(&b, home)
+			i += len("#{Dir.home}")
+			continue
+		}
+		if strings.has_prefix(s[i:], "{{Dir.home}}") {
+			home := os.get_env("HOME", context.temp_allocator)
+			strings.write_string(&b, home)
+			i += len("{{Dir.home}}")
 			continue
 		}
 
