@@ -1959,6 +1959,21 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		}
 	}
 
+	// 1. Materialize preflight generated files into extract_dir before artifact linking
+	for pf in c.preflight_files {
+		if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
+			continue
+		}
+		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
+		parent := dir_name(target_file)
+		_ = os.make_directory_all(parent, os.perm(0o755))
+		if err := os.write_entire_file_from_string(target_file, pf.content); err != nil {
+			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, err)
+		} else {
+			fmt.printf("==> Staged preflight file: %s\n", pf.path)
+		}
+	}
+
 	// Copy binary artifacts to target
 	installed := 0
 	for art in c.artifacts {
@@ -1999,18 +2014,6 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 				return false
 			}
 			installed += 1
-		}
-	}
-
-	// 1. Materialize preflight generated files into extract_dir
-	for pf in c.preflight_files {
-		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
-		parent := dir_name(target_file)
-		_ = os.make_directory_all(parent, os.perm(0o755))
-		if err := os.write_entire_file_from_string(target_file, pf.content); err != nil {
-			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, err)
-		} else {
-			fmt.printf("==> Staged preflight file: %s\n", pf.path)
 		}
 	}
 
@@ -2726,6 +2729,83 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 	return true
 }
 
+clear_desktop_mime_defaults :: proc(desktop_filename: string) {
+	home_dir := os.get_env("HOME", context.temp_allocator)
+	if len(home_dir) == 0 {
+		return
+	}
+	candidates := []string{
+		fmt.tprintf("%s/.config/mimeapps.list", home_dir),
+		fmt.tprintf("%s/.local/share/applications/mimeapps.list", home_dir),
+	}
+	for path in candidates {
+		if !os.is_file(path) {
+			continue
+		}
+		data, err := os.read_entire_file_from_path(path, context.temp_allocator)
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if !strings.contains(text, desktop_filename) {
+			continue
+		}
+		lines := strings.split(text, "\n", context.temp_allocator)
+		b := strings.builder_make(context.temp_allocator)
+		modified := false
+		for line in lines {
+			trimmed := strings.trim_space(line)
+			if strings.has_prefix(trimmed, "[") {
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
+				continue
+			}
+			eq := strings.index_byte(trimmed, '=')
+			if eq < 0 {
+				if len(line) > 0 {
+					strings.write_string(&b, line)
+					strings.write_byte(&b, '\n')
+				}
+				continue
+			}
+			key := strings.trim_space(trimmed[:eq])
+			val := strings.trim_space(trimmed[eq + 1:])
+			if val == desktop_filename {
+				// Single mapping matches the removed desktop file: remove this line
+				modified = true
+				continue
+			}
+			// Semicolon-separated list in [Added Associations]
+			if strings.contains(val, desktop_filename) {
+				items := strings.split(val, ";", context.temp_allocator)
+				new_items := make([dynamic]string, context.temp_allocator)
+				for item in items {
+					it := strings.trim_space(item)
+					if len(it) > 0 && it != desktop_filename {
+						append(&new_items, it)
+					}
+				}
+				if len(new_items) > 0 {
+					strings.write_string(&b, key)
+					strings.write_byte(&b, '=')
+					for it in new_items {
+						strings.write_string(&b, it)
+						strings.write_byte(&b, ';')
+					}
+					strings.write_byte(&b, '\n')
+				}
+				modified = true
+				continue
+			}
+			strings.write_string(&b, line)
+			strings.write_byte(&b, '\n')
+		}
+		if modified {
+			_ = os.write_entire_file_from_string(path, strings.to_string(b))
+		}
+	}
+}
+
 remove_cask :: proc(c: cask.Cask) -> bool {
 	home_dir := os.get_env("HOME", context.temp_allocator)
 	if home_dir == "" {
@@ -2853,6 +2933,7 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 			resolved_target := expand_home(target_resolved, context.temp_allocator)
 			if strings.has_suffix(resolved_target, ".desktop") {
 				removed_desktop = true
+				clear_desktop_mime_defaults(os.base(resolved_target))
 			}
 			if os.is_dir(resolved_target) {
 				if is_safe_to_remove_dir(resolved_target) {
@@ -2870,6 +2951,8 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		_ = os.remove(fmt.tprintf("%s/code.desktop", apps_dir))
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
 		removed_desktop = true
+		clear_desktop_mime_defaults("code.desktop")
+		clear_desktop_mime_defaults("code-url-handler.desktop")
 	}
 
 	if removed_desktop {

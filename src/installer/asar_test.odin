@@ -72,6 +72,7 @@ test_extract_asar_icon :: proc(t: ^testing.T) {
 
 	extracted_bytes, rerr := os.read_entire_file(out_icon, context.temp_allocator)
 	testing.expect(t, rerr == nil, "read extracted icon")
+	defer delete(extracted_bytes, context.temp_allocator)
 	testing.expect_value(t, string(extracted_bytes), fake_icon_data)
 }
 

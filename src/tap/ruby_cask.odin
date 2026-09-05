@@ -788,12 +788,39 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 	defer delete(lines, context.temp_allocator)
 
 	i := 0
+	in_preflight := false
+	preflight_depth := 0
 	for i < len(lines) {
 		line := lines[i]
 		trimmed := strings.trim_space(line)
 		i += 1
 		if len(trimmed) == 0 || trimmed[0] == '#' {
 			continue
+		}
+
+		if !in_preflight {
+			if strings.has_prefix(trimmed, "preflight do") ||
+			   trimmed == "preflight" ||
+			   strings.has_prefix(trimmed, "preflight_steps do") ||
+			   trimmed == "preflight_steps" ||
+			   strings.contains(trimmed, "preflight do") ||
+			   strings.contains(trimmed, "preflight_steps do") {
+				in_preflight = true
+				preflight_depth = 1
+			}
+			continue
+		}
+
+		// Inside preflight block: track nested blocks
+		if strings.has_suffix(trimmed, " do") || strings.has_prefix(trimmed, "def ") || strings.has_prefix(trimmed, "if ") {
+			preflight_depth += 1
+		} else if trimmed == "end" || strings.has_suffix(trimmed, " end") {
+			preflight_depth -= 1
+			if preflight_depth <= 0 {
+				in_preflight = false
+				preflight_depth = 0
+				continue
+			}
 		}
 
 		is_file_write := false
@@ -830,13 +857,23 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			clean_path = clean_path[len("{{staged_path}}/"):]
 		}
 
+		// Reject absolute paths and directory traversal
+		if strings.has_prefix(clean_path, "/") || strings.contains(clean_path, "..") {
+			delete(path)
+			continue
+		}
+
 		rest := arg_part[after_path:]
 
 		// Check for heredoc (<<~EOS, <<-EOS, <<EOS)
 		heredoc_idx := strings.index(rest, "<<")
 		if heredoc_idx >= 0 {
 			after_heredoc := rest[heredoc_idx + 2:]
-			if len(after_heredoc) > 0 && (after_heredoc[0] == '~' || after_heredoc[0] == '-') {
+			is_squiggly := false
+			if len(after_heredoc) > 0 && after_heredoc[0] == '~' {
+				is_squiggly = true
+				after_heredoc = after_heredoc[1:]
+			} else if len(after_heredoc) > 0 && after_heredoc[0] == '-' {
 				after_heredoc = after_heredoc[1:]
 			}
 			after_heredoc = strings.trim_space(after_heredoc)
@@ -851,16 +888,46 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			terminator := after_heredoc[:term_end]
 
 			if len(terminator) > 0 {
-				content_builder := strings.builder_make(context.temp_allocator)
+				raw_lines := make([dynamic]string, context.temp_allocator)
 				for i < len(lines) {
 					cur_line := lines[i]
 					i += 1
 					if strings.trim_space(cur_line) == terminator {
 						break
 					}
-					strings.write_string(&content_builder, strings.trim_left(cur_line, " \t"))
+					append(&raw_lines, cur_line)
+				}
+
+				min_indent := -1
+				if is_squiggly {
+					for rl in raw_lines {
+						if len(strings.trim_space(rl)) == 0 {
+							continue
+						}
+						indent := 0
+						for indent < len(rl) && (rl[indent] == ' ' || rl[indent] == '\t') {
+							indent += 1
+						}
+						if min_indent < 0 || indent < min_indent {
+							min_indent = indent
+						}
+					}
+				}
+				if min_indent < 0 {
+					min_indent = 0
+				}
+
+				content_builder := strings.builder_make(context.temp_allocator)
+				for rl in raw_lines {
+					line_to_write := rl
+					if is_squiggly && min_indent > 0 {
+						strip := min(min_indent, len(rl))
+						line_to_write = rl[strip:]
+					}
+					strings.write_string(&content_builder, line_to_write)
 					strings.write_byte(&content_builder, '\n')
 				}
+
 				content := strings.to_string(content_builder)
 				append(files, cask.Preflight_File{
 					path    = strings.clone(clean_path, context.allocator),

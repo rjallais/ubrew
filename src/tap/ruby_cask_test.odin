@@ -107,3 +107,25 @@ end
 		testing.expect(t, !strings.contains(c.preflight_files[0].content, "{{HOMEBREW_PREFIX}}"), "{{HOMEBREW_PREFIX}} should be interpolated")
 	}
 }
+
+@(test)
+test_postflight_write_file_not_staged :: proc(t: ^testing.T) {
+	fixture := `cask "test-postflight" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  postflight do
+    File.write("#{staged_path}/bad.desktop", <<~EOS)
+      [Desktop Entry]
+      Name=Bad
+    EOS
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-postflight")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 0)
+}
+
