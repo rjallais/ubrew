@@ -249,9 +249,11 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 	// 7. preflight file generation (File.write and write_file).
 	extract_preflight_file_writes(src, &c.preflight_files)
 	for pf, i in c.preflight_files {
-		interp_path := interpolate_cask_string(pf.path, c.version, arch_val, variables[:])
-		delete(pf.path)
-		c.preflight_files[i].path = interp_path
+		if !pf.raw_path {
+			interp_path := interpolate_cask_string(pf.path, c.version, arch_val, variables[:])
+			delete(pf.path)
+			c.preflight_files[i].path = interp_path
+		}
 		if !pf.raw {
 			interp_content := interpolate_cask_string(pf.content, c.version, arch_val, variables[:])
 			delete(pf.content)
@@ -856,18 +858,31 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			continue
 		}
 
+		// Determine whether path argument is single-quoted
+		is_path_single_quoted := false
+		for i := 0; i < len(arg_part); i += 1 {
+			if arg_part[i] == '\'' {
+				is_path_single_quoted = true
+				break
+			} else if arg_part[i] == '"' {
+				break
+			}
+		}
+
 		// Extract target path (first quoted string)
 		path, after_path := read_first_quoted(arg_part)
 		if len(path) == 0 {
 			continue
 		}
 
-		// Clean up "#{staged_path}/" or "{{staged_path}}/" prefix if present
+		// Clean up "#{staged_path}/" or "{{staged_path}}/" prefix if present on expandable paths
 		clean_path := path
-		if strings.has_prefix(clean_path, "#{staged_path}/") {
-			clean_path = clean_path[len("#{staged_path}/"):]
-		} else if strings.has_prefix(clean_path, "{{staged_path}}/") {
-			clean_path = clean_path[len("{{staged_path}}/"):]
+		if !is_path_single_quoted {
+			if strings.has_prefix(clean_path, "#{staged_path}/") {
+				clean_path = clean_path[len("#{staged_path}/"):]
+			} else if strings.has_prefix(clean_path, "{{staged_path}}/") {
+				clean_path = clean_path[len("{{staged_path}}/"):]
+			}
 		}
 
 		// Reject absolute paths and directory traversal
@@ -947,9 +962,10 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 				content := strings.to_string(content_builder)
 				append(files, cask.Preflight_File{
-					path    = strings.clone(clean_path, context.allocator),
-					content = strings.clone(content, context.allocator),
-					raw     = is_single_quoted,
+					path     = strings.clone(clean_path, context.allocator),
+					content  = strings.clone(content, context.allocator),
+					raw      = is_single_quoted,
+					raw_path = is_path_single_quoted,
 				})
 				strings.builder_destroy(&content_builder)
 				delete(path)
@@ -961,11 +977,12 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		if comma_idx := strings.index_byte(rest, ','); comma_idx >= 0 {
 			second_arg := strings.trim_space(rest[comma_idx + 1:])
 			is_single_quoted := len(second_arg) > 0 && second_arg[0] == '\''
-			if content_str, _ := read_first_quoted(second_arg); len(content_str) > 0 {
+			if content_str, content_end := read_first_quoted(second_arg); content_end > 0 {
 				append(files, cask.Preflight_File{
-					path    = strings.clone(clean_path, context.allocator),
-					content = content_str,
-					raw     = is_single_quoted,
+					path     = strings.clone(clean_path, context.allocator),
+					content  = content_str,
+					raw      = is_single_quoted,
+					raw_path = is_path_single_quoted,
 				})
 				delete(path)
 				continue

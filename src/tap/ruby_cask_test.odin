@@ -225,6 +225,36 @@ end
 	}
 }
 
+@(test)
+test_preflight_write_single_quoted_path_and_empty_content :: proc(t: ^testing.T) {
+	fixture := `cask "test-path-quote-and-empty" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    File.write('#{version}.desktop', <<~EOS)
+      [Desktop Entry]
+      Name=LiteralPath
+    EOS
+    File.write("#{staged_path}/empty-marker.txt", "")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-path-quote-and-empty")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "#{version}.desktop")
+		testing.expect(t, strings.contains(c.preflight_files[0].content, "Name=LiteralPath"))
+
+		testing.expect_value(t, c.preflight_files[1].path, "empty-marker.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "")
+	}
+}
+
+
 
 
 
