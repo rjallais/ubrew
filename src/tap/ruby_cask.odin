@@ -821,6 +821,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		               trimmed == "begin" ||
 		               strings.has_prefix(trimmed, "begin ") ||
 		               strings.has_prefix(trimmed, "while ") ||
+		               strings.has_prefix(trimmed, "for ") ||
 		               strings.has_prefix(trimmed, "until ")
 		if opens_block {
 			preflight_depth += 1

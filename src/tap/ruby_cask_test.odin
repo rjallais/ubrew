@@ -156,4 +156,32 @@ end
 	}
 }
 
+@(test)
+test_preflight_write_after_for_block :: proc(t: ^testing.T) {
+	fixture := `cask "test-for" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    for item in ["a", "b"]
+      # loop
+    end
+    File.write("#{staged_path}/valid.desktop", <<~EOS)
+      [Desktop Entry]
+      Name=Valid
+    EOS
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-for")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.desktop")
+	}
+}
+
+
 
