@@ -254,6 +254,35 @@ end
 	}
 }
 
+@(test)
+test_preflight_token_boundaries :: proc(t: ^testing.T) {
+	fixture := `cask "test-token-boundaries" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  not_preflight do
+    File.write("#{staged_path}/ignored.txt", "should not extract")
+  end
+
+  preflight do
+    puts "File.write('#{staged_path}/nested.txt', 'ignored')"
+    SomeFile.write("#{staged_path}/other.txt", "ignored")
+    ::File.write("#{staged_path}/valid.txt", "extracted")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-token-boundaries")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "extracted")
+	}
+}
+
+
 
 
 

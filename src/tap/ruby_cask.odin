@@ -803,12 +803,25 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		}
 
 		if !in_preflight {
-			if strings.has_prefix(trimmed, "preflight do") ||
-			   trimmed == "preflight" ||
-			   strings.has_prefix(trimmed, "preflight_steps do") ||
-			   trimmed == "preflight_steps" ||
-			   strings.contains(trimmed, "preflight do") ||
-			   strings.contains(trimmed, "preflight_steps do") {
+			is_preflight := false
+			if strings.has_prefix(trimmed, "preflight_steps") {
+				rest := trimmed[len("preflight_steps"):]
+				if len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '(' {
+					rest = strings.trim_space(rest)
+					if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
+						is_preflight = true
+					}
+				}
+			} else if strings.has_prefix(trimmed, "preflight") {
+				rest := trimmed[len("preflight"):]
+				if len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '(' {
+					rest = strings.trim_space(rest)
+					if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
+						is_preflight = true
+					}
+				}
+			}
+			if is_preflight {
 				in_preflight = true
 				preflight_depth = 1
 			}
@@ -840,17 +853,19 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		is_file_write := false
 		arg_part := ""
-		if idx := strings.index(trimmed, "File.write("); idx >= 0 {
+		if strings.has_prefix(trimmed, "File.write(") || strings.has_prefix(trimmed, "::File.write(") {
+			idx := strings.index(trimmed, "File.write(")
 			arg_part = strings.trim_space(trimmed[idx + len("File.write("):])
 			is_file_write = true
-		} else if strings.has_prefix(trimmed, "File.write ") {
-			arg_part = strings.trim_space(trimmed[len("File.write "):])
-			is_file_write = true
-		} else if strings.has_prefix(trimmed, "write_file ") {
-			arg_part = strings.trim_space(trimmed[len("write_file "):])
+		} else if strings.has_prefix(trimmed, "File.write ") || strings.has_prefix(trimmed, "::File.write ") {
+			idx := strings.index(trimmed, "File.write ")
+			arg_part = strings.trim_space(trimmed[idx + len("File.write "):])
 			is_file_write = true
 		} else if strings.has_prefix(trimmed, "write_file(") {
 			arg_part = strings.trim_space(trimmed[len("write_file("):])
+			is_file_write = true
+		} else if strings.has_prefix(trimmed, "write_file ") {
+			arg_part = strings.trim_space(trimmed[len("write_file "):])
 			is_file_write = true
 		}
 
