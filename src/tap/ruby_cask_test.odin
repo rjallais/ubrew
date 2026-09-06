@@ -282,6 +282,33 @@ end
 	}
 }
 
+@(test)
+test_preflight_end_with_comment :: proc(t: ^testing.T) {
+	fixture := `cask "test-end-comment" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    File.write("#{staged_path}/valid.txt", "valid")
+  end # finish preflight
+
+  postflight do
+    File.write("#{staged_path}/ignored.txt", "ignored")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-end-comment")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "valid")
+	}
+}
+
+
 
 
 

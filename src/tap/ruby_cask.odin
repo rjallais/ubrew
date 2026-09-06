@@ -829,6 +829,24 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		}
 
 		// Inside preflight block: track nested blocks
+		closes_block := false
+		if trimmed == "end" || strings.has_suffix(trimmed, " end") {
+			closes_block = true
+		} else if strings.has_prefix(trimmed, "end") {
+			rest := trimmed[3:]
+			if len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '#') {
+				rest = strings.trim_space(rest)
+				if len(rest) == 0 || rest[0] == '#' {
+					closes_block = true
+				}
+			}
+		} else if comment_idx := strings.index_byte(trimmed, '#'); comment_idx >= 0 {
+			before_comment := strings.trim_space(trimmed[:comment_idx])
+			if before_comment == "end" || strings.has_suffix(before_comment, " end") {
+				closes_block = true
+			}
+		}
+
 		opens_block := strings.has_suffix(trimmed, " do") ||
 		               strings.contains(trimmed, " do |") ||
 		               strings.has_prefix(trimmed, "def ") ||
@@ -842,7 +860,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		               strings.has_prefix(trimmed, "until ")
 		if opens_block {
 			preflight_depth += 1
-		} else if trimmed == "end" || strings.has_suffix(trimmed, " end") {
+		} else if closes_block {
 			preflight_depth -= 1
 			if preflight_depth <= 0 {
 				in_preflight = false
