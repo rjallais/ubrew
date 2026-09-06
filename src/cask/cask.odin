@@ -30,6 +30,7 @@ Generic_Artifact :: struct {
 Preflight_File :: struct {
 	path:    string,
 	content: string,
+	raw:     bool,
 }
 
 Artifact :: union {

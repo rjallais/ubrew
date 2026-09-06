@@ -193,11 +193,15 @@ test_preflight_write_quoted_heredoc_terminator :: proc(t: ^testing.T) {
     File.write("#{staged_path}/single.desktop", <<~'EOS')
       [Desktop Entry]
       Name=Single
+      Comment=Version #{version}
     EOS
     File.write("#{staged_path}/double.desktop", <<"EOS")
       [Desktop Entry]
       Name=Double
+      Comment=Version #{version}
     EOS
+    File.write("#{staged_path}/single-str.txt", 'Literal #{version}')
+    File.write("#{staged_path}/double-str.txt", "Expanded #{version}")
   end
 end
 `
@@ -205,12 +209,22 @@ end
 	testing.expect(t, ok, "parse_ruby_cask should succeed")
 	defer destroy_ruby_cask(c)
 
-	testing.expect_value(t, len(c.preflight_files), 2)
-	if len(c.preflight_files) == 2 {
+	testing.expect_value(t, len(c.preflight_files), 4)
+	if len(c.preflight_files) == 4 {
 		testing.expect_value(t, c.preflight_files[0].path, "single.desktop")
+		testing.expect(t, strings.contains(c.preflight_files[0].content, "Comment=Version #{version}"), "single quoted heredoc must not interpolate")
+
 		testing.expect_value(t, c.preflight_files[1].path, "double.desktop")
+		testing.expect(t, strings.contains(c.preflight_files[1].content, "Comment=Version 1.0.0"), "double quoted heredoc must interpolate")
+
+		testing.expect_value(t, c.preflight_files[2].path, "single-str.txt")
+		testing.expect_value(t, c.preflight_files[2].content, "Literal #{version}")
+
+		testing.expect_value(t, c.preflight_files[3].path, "double-str.txt")
+		testing.expect_value(t, c.preflight_files[3].content, "Expanded 1.0.0")
 	}
 }
+
 
 
 

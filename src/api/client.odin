@@ -804,6 +804,7 @@ ruby_to_cask :: proc(rc: tap.Ruby_Cask) -> (c: cask.Cask, ok: bool) {
 		append(&pf_list, cask.Preflight_File{
 			path    = strings.clone(pf.path, context.allocator),
 			content = strings.clone(pf.content, context.allocator),
+			raw     = pf.raw,
 		})
 	}
 	c.preflight_files = pf_list[:]

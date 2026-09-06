@@ -251,10 +251,12 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 	for pf, i in c.preflight_files {
 		interp_path := interpolate_cask_string(pf.path, c.version, arch_val, variables[:])
 		delete(pf.path)
-		interp_content := interpolate_cask_string(pf.content, c.version, arch_val, variables[:])
-		delete(pf.content)
 		c.preflight_files[i].path = interp_path
-		c.preflight_files[i].content = interp_content
+		if !pf.raw {
+			interp_content := interpolate_cask_string(pf.content, c.version, arch_val, variables[:])
+			delete(pf.content)
+			c.preflight_files[i].content = interp_content
+		}
 	}
 
 	if len(c.url) == 0 {
@@ -897,6 +899,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				term_end += 1
 			}
 			terminator := after_heredoc[:term_end]
+			is_single_quoted := len(terminator) >= 2 && terminator[0] == '\'' && terminator[len(terminator)-1] == '\''
 			if len(terminator) >= 2 && ((terminator[0] == '\'' && terminator[len(terminator)-1] == '\'') || (terminator[0] == '"' && terminator[len(terminator)-1] == '"')) {
 				terminator = terminator[1:len(terminator)-1]
 			}
@@ -946,6 +949,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				append(files, cask.Preflight_File{
 					path    = strings.clone(clean_path, context.allocator),
 					content = strings.clone(content, context.allocator),
+					raw     = is_single_quoted,
 				})
 				strings.builder_destroy(&content_builder)
 				delete(path)
@@ -956,10 +960,12 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		// If not a heredoc, check if second argument is a quoted string
 		if comma_idx := strings.index_byte(rest, ','); comma_idx >= 0 {
 			second_arg := strings.trim_space(rest[comma_idx + 1:])
+			is_single_quoted := len(second_arg) > 0 && second_arg[0] == '\''
 			if content_str, _ := read_first_quoted(second_arg); len(content_str) > 0 {
 				append(files, cask.Preflight_File{
 					path    = strings.clone(clean_path, context.allocator),
 					content = content_str,
+					raw     = is_single_quoted,
 				})
 				delete(path)
 				continue
