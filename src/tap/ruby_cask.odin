@@ -897,6 +897,9 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				term_end += 1
 			}
 			terminator := after_heredoc[:term_end]
+			if len(terminator) >= 2 && ((terminator[0] == '\'' && terminator[len(terminator)-1] == '\'') || (terminator[0] == '"' && terminator[len(terminator)-1] == '"')) {
+				terminator = terminator[1:len(terminator)-1]
+			}
 
 			if len(terminator) > 0 {
 				raw_lines := make([dynamic]string, context.temp_allocator)

@@ -183,5 +183,35 @@ end
 	}
 }
 
+@(test)
+test_preflight_write_quoted_heredoc_terminator :: proc(t: ^testing.T) {
+	fixture := `cask "test-quoted-heredoc" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    File.write("#{staged_path}/single.desktop", <<~'EOS')
+      [Desktop Entry]
+      Name=Single
+    EOS
+    File.write("#{staged_path}/double.desktop", <<"EOS")
+      [Desktop Entry]
+      Name=Double
+    EOS
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-quoted-heredoc")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "single.desktop")
+		testing.expect_value(t, c.preflight_files[1].path, "double.desktop")
+	}
+}
+
+
 
 
