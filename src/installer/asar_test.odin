@@ -177,4 +177,49 @@ test_find_and_extract_asar_icon_named_target :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(cdata), "REAL_APP_ASAR_ICON")
 }
 
+@(test)
+test_find_and_extract_asar_icon_security_rejections :: proc(t: ^testing.T) {
+	tmp := os.get_env("TMPDIR", context.temp_allocator)
+	if len(tmp) == 0 {
+		tmp = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-asar-security-test", tmp)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	asar_path := fmt.tprintf("%s/resources/app.asar", test_dir)
+	ok_create := create_synthetic_asar(asar_path, "icon.png", "ICON_CONTENT")
+	testing.expect(t, ok_create, "create synthetic asar")
+
+	// 1. Rejects absolute path
+	testing.expect(t, !find_and_extract_asar_icon(test_dir, "/tmp/evil.png"), "reject absolute path")
+
+	// 2. Rejects parent traversal
+	testing.expect(t, !find_and_extract_asar_icon(test_dir, "../evil.png"), "reject parent traversal ..")
+	testing.expect(t, !find_and_extract_asar_icon(test_dir, "foo/../../evil.png"), "reject nested traversal ..")
+
+	// 3. Rejects symlinked path component
+	outside_dir := fmt.tprintf("%s/ubrew-asar-outside", tmp)
+	_ = os.remove_all(outside_dir)
+	_ = os.make_directory_all(outside_dir, os.perm(0o755))
+	defer os.remove_all(outside_dir)
+
+	symlink_dir := fmt.tprintf("%s/symlink_dir", test_dir)
+	_ = os.symlink(outside_dir, symlink_dir)
+	testing.expect(t, !find_and_extract_asar_icon(test_dir, "symlink_dir/icon.png"), "reject destination traversing symlink")
+	testing.expect(t, !os.is_file(fmt.tprintf("%s/icon.png", outside_dir)), "outside dir untouched")
+
+	// 4. Rejects overwriting an existing symlink target file
+	outside_target := fmt.tprintf("%s/outside_target.png", outside_dir)
+	_ = os.write_entire_file_from_string(outside_target, "CANNOT_OVERWRITE")
+	symlink_file := fmt.tprintf("%s/target_symlink.png", test_dir)
+	_ = os.symlink(outside_target, symlink_file)
+	testing.expect(t, !find_and_extract_asar_icon(test_dir, "target_symlink.png"), "reject target over existing symlink")
+	data, err := os.read_entire_file(outside_target, context.temp_allocator)
+	testing.expect(t, err == nil, "read outside_target")
+	testing.expect_value(t, string(data), "CANNOT_OVERWRITE")
+}
+
+
 

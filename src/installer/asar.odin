@@ -117,6 +117,14 @@ extract_asar_icon :: proc(asar_path: string, out_path: string, target_icon_name:
 		return false
 	}
 
+	// Reject writing to a symlink
+	if fi, lstat_err := os.lstat(out_path, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			return false
+		}
+	}
+
 	// Ensure parent dir of out_path exists
 	parent_dir := dir_name(out_path)
 	_ = os.make_directory_all(parent_dir, os.perm(0o755))
@@ -126,21 +134,52 @@ extract_asar_icon :: proc(asar_path: string, out_path: string, target_icon_name:
 }
 
 // find_and_extract_asar_icon searches extract_dir for app.asar, and if
-// found, extracts the icon to extract_dir/out_filename.
+// found, safely extracts the icon to extract_dir/out_filename.
 find_and_extract_asar_icon :: proc(extract_dir, out_filename: string) -> bool {
+	if len(out_filename) == 0 {
+		return false
+	}
+
+	// Reject absolute paths and directory traversal
+	if strings.has_prefix(out_filename, "/") || strings.contains(out_filename, "..") {
+		fmt.printf("Warning: rejecting ASAR icon extraction with unsafe path: %s\n", out_filename)
+		return false
+	}
+
+	// Reject destination paths traversing symlinks inside extract_dir
+	if path_contains_symlink(extract_dir, out_filename) {
+		fmt.printf("Warning: rejecting ASAR icon extraction traversing symlink: %s\n", out_filename)
+		return false
+	}
+
+	target_path := fmt.tprintf("%s/%s", extract_dir, out_filename)
+	if fi, lstat_err := os.lstat(target_path, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			fmt.printf("Warning: rejecting ASAR icon extraction over symlink: %s\n", out_filename)
+			return false
+		}
+	}
+
 	asar_path, ok := find_file_by_basename(extract_dir, "app.asar")
 	if !ok {
 		return false
 	}
 
 	target_name := os.base(out_filename)
-	target_path := fmt.tprintf("%s/%s", extract_dir, out_filename)
 	if extract_asar_icon(asar_path, target_path, target_name) {
 		fmt.printf("==> Extracted app icon from ASAR to %s\n", out_filename)
 		// Also create a copy as "icon.png" in extract_dir if different name
 		if target_name != "icon.png" {
 			icon_copy := fmt.tprintf("%s/icon.png", extract_dir)
-			if !os.is_file(icon_copy) {
+			is_symlink := false
+			if fi, lstat_err := os.lstat(icon_copy, context.temp_allocator); lstat_err == nil {
+				defer os.file_info_delete(fi, context.temp_allocator)
+				if fi.type == .Symlink {
+					is_symlink = true
+				}
+			}
+			if !is_symlink && !os.is_file(icon_copy) {
 				_ = platform.cp_fallback(target_path, icon_copy)
 			}
 		}
