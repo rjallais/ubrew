@@ -9,7 +9,9 @@ package installer
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
+import "../cask"
 
 @(test)
 test_normalize_keg_dir_keeps_correctly_named_unpack :: proc(t: ^testing.T) {
@@ -225,4 +227,79 @@ write_test_file :: proc(t: ^testing.T, path, content: string) {
 	if err := os.write_entire_file_from_string(path, content); err != nil {
 		testing.fail_now(t, fmt.tprintf("could not write test file %q: %v", path, err))
 	}
+}
+
+@(test)
+test_preflight_materialize_and_neutralize_update :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-cask-preflight-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	// 1. Test preflight file creation
+	pf1 := cask.Preflight_File{
+		path    = "subdir/app.desktop",
+		content = "[Desktop Entry]\nName=TestApp\nMimeType=x-scheme-handler/test;\n",
+	}
+	ok1 := materialize_preflight_file(test_dir, pf1)
+	testing.expect(t, ok1, "materialize preflight file")
+	target_file := fmt.tprintf("%s/%s", test_dir, pf1.path)
+	testing.expect(t, os.is_file(target_file), "preflight file must exist on disk")
+
+	// 2. Test app-update.yml removal
+	update_yml := fmt.tprintf("%s/app-update.yml", test_dir)
+	_ = os.write_entire_file_from_string(update_yml, "owner: test\nrepo: app\n")
+	testing.expect(t, os.is_file(update_yml), "app-update.yml created")
+
+	found_update, ok := find_file_by_basename(test_dir, "app-update.yml")
+	testing.expect(t, ok, "find_file_by_basename should find app-update.yml")
+	if ok {
+		_ = os.remove(found_update)
+	}
+	testing.expect(t, !os.is_file(update_yml), "app-update.yml neutralized")
+}
+
+@(test)
+test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-cask-no-overwrite-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	target_file := fmt.tprintf("%s/config.txt", test_dir)
+	_ = os.write_entire_file_from_string(target_file, "original content")
+
+	// Preflight file with no_overwrite: true through production helper
+	pf_skip := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = true,
+	}
+	ok_skip := materialize_preflight_file(test_dir, pf_skip)
+	testing.expect(t, ok_skip, "materialize_preflight_file with no_overwrite should succeed (skip)")
+
+	data1, err1 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err1 == nil, "read target file after skip")
+	testing.expect_value(t, string(data1), "original content")
+
+	// Preflight file with no_overwrite: false (overwrite default) through production helper
+	pf_overwrite := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = false,
+	}
+	ok_overwrite := materialize_preflight_file(test_dir, pf_overwrite)
+	testing.expect(t, ok_overwrite, "materialize_preflight_file with default overwrite should succeed")
+
+	data2, err2 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err2 == nil, "read target file after overwrite")
+	testing.expect_value(t, string(data2), "new content")
 }
