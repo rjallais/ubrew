@@ -245,11 +245,9 @@ test_preflight_materialize_and_neutralize_update :: proc(t: ^testing.T) {
 		path    = "subdir/app.desktop",
 		content = "[Desktop Entry]\nName=TestApp\nMimeType=x-scheme-handler/test;\n",
 	}
+	ok1 := materialize_preflight_file(test_dir, pf1)
+	testing.expect(t, ok1, "materialize preflight file")
 	target_file := fmt.tprintf("%s/%s", test_dir, pf1.path)
-	parent := dir_name(target_file)
-	_ = os.make_directory_all(parent, os.perm(0o755))
-	write_err := os.write_entire_file_from_string(target_file, pf1.content)
-	testing.expect(t, write_err == nil, "write preflight file")
 	testing.expect(t, os.is_file(target_file), "preflight file must exist on disk")
 
 	// 2. Test app-update.yml removal
@@ -279,28 +277,28 @@ test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
 	target_file := fmt.tprintf("%s/config.txt", test_dir)
 	_ = os.write_entire_file_from_string(target_file, "original content")
 
-	// Preflight file with no_overwrite: true
+	// Preflight file with no_overwrite: true through production helper
 	pf_skip := cask.Preflight_File{
 		path         = "config.txt",
 		content      = "new content",
 		no_overwrite = true,
 	}
-	if !(pf_skip.no_overwrite && os.exists(target_file)) {
-		_ = os.write_entire_file_from_string(target_file, pf_skip.content)
-	}
+	ok_skip := materialize_preflight_file(test_dir, pf_skip)
+	testing.expect(t, ok_skip, "materialize_preflight_file with no_overwrite should succeed (skip)")
+
 	data1, err1 := os.read_entire_file(target_file, context.temp_allocator)
 	testing.expect(t, err1 == nil, "read target file after skip")
 	testing.expect_value(t, string(data1), "original content")
 
-	// Preflight file with no_overwrite: false (overwrite default)
+	// Preflight file with no_overwrite: false (overwrite default) through production helper
 	pf_overwrite := cask.Preflight_File{
 		path         = "config.txt",
 		content      = "new content",
 		no_overwrite = false,
 	}
-	if !(pf_overwrite.no_overwrite && os.exists(target_file)) {
-		_ = os.write_entire_file_from_string(target_file, pf_overwrite.content)
-	}
+	ok_overwrite := materialize_preflight_file(test_dir, pf_overwrite)
+	testing.expect(t, ok_overwrite, "materialize_preflight_file with default overwrite should succeed")
+
 	data2, err2 := os.read_entire_file(target_file, context.temp_allocator)
 	testing.expect(t, err2 == nil, "read target file after overwrite")
 	testing.expect_value(t, string(data2), "new content")

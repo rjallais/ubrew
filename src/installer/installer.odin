@@ -1923,6 +1923,52 @@ path_contains_symlink :: proc(root, rel_path: string) -> bool {
 	return false
 }
 
+materialize_preflight_file :: proc(extract_dir: string, pf: cask.Preflight_File) -> bool {
+	if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
+		return false
+	}
+	if path_contains_symlink(extract_dir, pf.path) {
+		fmt.printf("Warning: rejecting preflight file traversing symlink: %s\n", pf.path)
+		return false
+	}
+	target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
+	if fi, lstat_err := os.lstat(target_file, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			fmt.printf("Warning: rejecting preflight file over symlink: %s\n", pf.path)
+			return false
+		}
+	}
+
+	parent := dir_name(target_file)
+	_ = os.make_directory_all(parent, os.perm(0o755))
+
+	flags := os.O_WRONLY | os.O_CREATE | (pf.no_overwrite ? os.O_EXCL : os.O_TRUNC)
+	fd, open_err := os.open(target_file, flags, os.Permissions_Default_File)
+	if open_err != nil {
+		if pf.no_overwrite && os.exists(target_file) {
+			fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
+			return true
+		}
+		fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, open_err)
+		return false
+	}
+	_, write_err := os.write(fd, transmute([]u8)pf.content)
+	os.close(fd)
+	if write_err != nil {
+		fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, write_err)
+		return false
+	}
+	fmt.printf("==> Staged preflight file: %s\n", pf.path)
+	return true
+}
+
+materialize_preflight_files :: proc(extract_dir: string, preflight_files: []cask.Preflight_File) {
+	for pf in preflight_files {
+		materialize_preflight_file(extract_dir, pf)
+	}
+}
+
 install_binary_cask :: proc(c: cask.Cask) -> bool {
 	if len(c.url) == 0 {
 		fmt.println("Error: Cask has no download URL.")
@@ -1979,44 +2025,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	// 1. Materialize preflight generated files into extract_dir before artifact linking
-	for pf in c.preflight_files {
-		if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
-			continue
-		}
-		if path_contains_symlink(extract_dir, pf.path) {
-			fmt.printf("Warning: rejecting preflight file traversing symlink: %s\n", pf.path)
-			continue
-		}
-		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
-		if fi, lstat_err := os.lstat(target_file, context.temp_allocator); lstat_err == nil {
-			defer os.file_info_delete(fi, context.temp_allocator)
-			if fi.type == .Symlink {
-				fmt.printf("Warning: rejecting preflight file over symlink: %s\n", pf.path)
-				continue
-			}
-		}
-
-		parent := dir_name(target_file)
-		_ = os.make_directory_all(parent, os.perm(0o755))
-
-		flags := os.O_WRONLY | os.O_CREATE | (pf.no_overwrite ? os.O_EXCL : os.O_TRUNC)
-		fd, open_err := os.open(target_file, flags, os.Permissions_Default_File)
-		if open_err != nil {
-			if pf.no_overwrite && os.exists(target_file) {
-				fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
-				continue
-			}
-			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, open_err)
-			continue
-		}
-		_, write_err := os.write(fd, transmute([]u8)pf.content)
-		os.close(fd)
-		if write_err != nil {
-			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, write_err)
-		} else {
-			fmt.printf("==> Staged preflight file: %s\n", pf.path)
-		}
-	}
+	materialize_preflight_files(extract_dir, c.preflight_files)
 
 	// Copy binary artifacts to target
 	installed := 0
