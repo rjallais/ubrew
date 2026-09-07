@@ -1988,14 +1988,31 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 			continue
 		}
 		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
-		if pf.no_overwrite && os.exists(target_file) {
-			fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
-			continue
+		if fi, lstat_err := os.lstat(target_file, context.temp_allocator); lstat_err == nil {
+			defer os.file_info_delete(fi, context.temp_allocator)
+			if fi.type == .Symlink {
+				fmt.printf("Warning: rejecting preflight file over symlink: %s\n", pf.path)
+				continue
+			}
 		}
+
 		parent := dir_name(target_file)
 		_ = os.make_directory_all(parent, os.perm(0o755))
-		if err := os.write_entire_file_from_string(target_file, pf.content); err != nil {
-			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, err)
+
+		flags := os.O_WRONLY | os.O_CREATE | (pf.no_overwrite ? os.O_EXCL : os.O_TRUNC)
+		fd, open_err := os.open(target_file, flags, os.Permissions_Default_File)
+		if open_err != nil {
+			if pf.no_overwrite && os.exists(target_file) {
+				fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
+				continue
+			}
+			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, open_err)
+			continue
+		}
+		_, write_err := os.write(fd, transmute([]u8)pf.content)
+		os.close(fd)
+		if write_err != nil {
+			fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, write_err)
 		} else {
 			fmt.printf("==> Staged preflight file: %s\n", pf.path)
 		}

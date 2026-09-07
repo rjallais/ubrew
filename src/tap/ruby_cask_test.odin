@@ -503,6 +503,35 @@ end
 	}
 }
 
+@(test)
+test_preflight_else_in_non_os_conditional :: proc(t: ^testing.T) {
+	fixture := `cask "test-else-non-os" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  on_linux do
+    preflight do
+      if Hardware::CPU.arm?
+        File.write("#{staged_path}/arm.txt", "arm")
+      else
+        File.write("#{staged_path}/intel.txt", "intel")
+      end
+    end
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-else-non-os")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	// Both branches of Hardware::CPU.arm? inside on_linux remain in linux os_scope
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "arm.txt")
+		testing.expect_value(t, c.preflight_files[1].path, "intel.txt")
+	}
+}
+
 
 
 

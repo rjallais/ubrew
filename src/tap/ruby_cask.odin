@@ -891,6 +891,7 @@ is_active_os_for_target :: proc(os_scope: string, target_os: string) -> bool {
 Scope_Frame :: struct {
 	os_scope:     string,
 	is_preflight: bool,
+	os_from_cond: bool,
 }
 
 // extract_preflight_file_writes parses `File.write(...)` and `write_file(...)`
@@ -946,21 +947,26 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		if strings.has_prefix(unquoted, "elsif ") {
 			if len(scope_stack) > 0 {
+				top := &scope_stack[len(scope_stack) - 1]
 				if strings.contains(unquoted, "OS.linux?") || strings.contains(unquoted, "on_linux") ||
 				   strings.contains(unquoted, "!OS.mac?") || strings.contains(unquoted, "not OS.mac?") {
-					scope_stack[len(scope_stack) - 1].os_scope = "linux"
+					top.os_scope = "linux"
+					top.os_from_cond = true
 				} else if strings.contains(unquoted, "OS.mac?") || strings.contains(unquoted, "on_macos") ||
 				          strings.contains(unquoted, "!OS.linux?") || strings.contains(unquoted, "not OS.linux?") {
-					scope_stack[len(scope_stack) - 1].os_scope = "macos"
+					top.os_scope = "macos"
+					top.os_from_cond = true
 				}
 			}
 		} else if unquoted == "else" || strings.has_prefix(unquoted, "else ") {
 			if len(scope_stack) > 0 {
-				prev_scope := scope_stack[len(scope_stack) - 1].os_scope
-				if prev_scope == "macos" {
-					scope_stack[len(scope_stack) - 1].os_scope = "linux"
-				} else if prev_scope == "linux" {
-					scope_stack[len(scope_stack) - 1].os_scope = "macos"
+				top := &scope_stack[len(scope_stack) - 1]
+				if top.os_from_cond {
+					if top.os_scope == "macos" {
+						top.os_scope = "linux"
+					} else if top.os_scope == "linux" {
+						top.os_scope = "macos"
+					}
 				}
 			}
 		}
@@ -975,16 +981,21 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			}
 
 			new_os := parent_os
+			os_from_cond := false
 			if strings.has_prefix(unquoted, "unless ") {
 				if strings.contains(unquoted, "OS.mac?") {
 					new_os = "linux"
+					os_from_cond = true
 				} else if strings.contains(unquoted, "OS.linux?") {
 					new_os = "macos"
+					os_from_cond = true
 				}
 			} else if strings.contains(unquoted, "on_macos") || strings.contains(unquoted, "OS.mac?") {
 				new_os = "macos"
+				os_from_cond = true
 			} else if strings.contains(unquoted, "on_linux") || strings.contains(unquoted, "OS.linux?") {
 				new_os = "linux"
+				os_from_cond = true
 			}
 
 			new_preflight := parent_preflight
@@ -992,7 +1003,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				new_preflight = true
 			}
 
-			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight })
+			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight, os_from_cond = os_from_cond })
 		}
 
 		in_preflight := len(scope_stack) > 0 && scope_stack[len(scope_stack) - 1].is_preflight
