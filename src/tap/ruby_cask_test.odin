@@ -2,6 +2,7 @@ package tap
 
 import "core:strings"
 import "core:testing"
+import "../cask"
 
 @(test)
 test_parse_ruby_cask_preflight_file_writes :: proc(t: ^testing.T) {
@@ -328,6 +329,177 @@ end
 	if len(c.preflight_files) == 1 {
 		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
 		testing.expect_value(t, c.preflight_files[0].content, "valid")
+	}
+}
+
+@(test)
+test_interpolate_escaped_marker :: proc(t: ^testing.T) {
+	res1 := interpolate_cask_string("Literal \\#{version}", "1.0.0", "x64", nil)
+	defer delete(res1)
+	testing.expect_value(t, res1, "Literal \\#{version}")
+
+	res2 := interpolate_cask_string("Expanded #{version}", "1.0.0", "x64", nil)
+	defer delete(res2)
+	testing.expect_value(t, res2, "Expanded 1.0.0")
+
+	res3 := interpolate_cask_string("Escaped-Backslash \\\\#{version}", "1.0.0", "x64", nil)
+	defer delete(res3)
+	testing.expect_value(t, res3, "Escaped-Backslash \\\\1.0.0")
+
+	res4 := interpolate_cask_string("Triple-Backslash \\\\\\#{version}", "1.0.0", "x64", nil)
+	defer delete(res4)
+	testing.expect_value(t, res4, "Triple-Backslash \\\\\\#{version}")
+}
+
+@(test)
+test_preflight_block_opener_quotes_and_comments :: proc(t: ^testing.T) {
+	fixture := `cask "test-block-detection" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    puts "do |foo|"
+    puts " end"
+    items = ["a", "b"]
+    items.each do # comment on block opener
+      File.write("#{staged_path}/inside_each.txt", "from each")
+    end
+    File.write("#{staged_path}/valid.txt", "valid")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-block-detection")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "inside_each.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "from each")
+		testing.expect_value(t, c.preflight_files[1].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "valid")
+	}
+}
+
+@(test)
+test_preflight_platform_host_filtering :: proc(t: ^testing.T) {
+	fixture := `cask "test-platform-filtering" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  on_macos do
+    preflight do
+      File.write("#{staged_path}/macos_outer.txt", "macos outer")
+    end
+  end
+
+  on_linux do
+    preflight do
+      File.write("#{staged_path}/linux_outer.txt", "linux outer")
+    end
+  end
+
+  preflight do
+    on_macos do
+      File.write("#{staged_path}/macos_inner.txt", "macos inner")
+    end
+    on_linux do
+      File.write("#{staged_path}/linux_inner.txt", "linux inner")
+    end
+    if OS.mac?
+      File.write("#{staged_path}/macos_if.txt", "macos if")
+    end
+    if OS.linux?
+      File.write("#{staged_path}/linux_if.txt", "linux if")
+    end
+    File.write("#{staged_path}/common.txt", "common")
+  end
+end
+`
+	// parse_ruby_cask uses current_cask_host().os ("linux")
+	c, ok := parse_ruby_cask(fixture, "test-platform-filtering")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 4)
+	if len(c.preflight_files) == 4 {
+		testing.expect_value(t, c.preflight_files[0].path, "linux_outer.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "linux outer")
+
+		testing.expect_value(t, c.preflight_files[1].path, "linux_inner.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "linux inner")
+
+		testing.expect_value(t, c.preflight_files[2].path, "linux_if.txt")
+		testing.expect_value(t, c.preflight_files[2].content, "linux if")
+
+		testing.expect_value(t, c.preflight_files[3].path, "common.txt")
+		testing.expect_value(t, c.preflight_files[3].content, "common")
+	}
+
+	// Direct test passing target_os = "macos"
+	files_macos := make([dynamic]cask.Preflight_File, context.temp_allocator)
+	extract_preflight_file_writes(fixture, &files_macos, "macos")
+	defer {
+		for pf in files_macos {
+			delete(pf.path)
+			delete(pf.content)
+		}
+		delete(files_macos)
+	}
+	testing.expect_value(t, len(files_macos), 4)
+	if len(files_macos) == 4 {
+		testing.expect_value(t, files_macos[0].path, "macos_outer.txt")
+		testing.expect_value(t, files_macos[1].path, "macos_inner.txt")
+		testing.expect_value(t, files_macos[2].path, "macos_if.txt")
+		testing.expect_value(t, files_macos[3].path, "common.txt")
+	}
+}
+
+@(test)
+test_preflight_write_file_options :: proc(t: ^testing.T) {
+	fixture := `cask "test-write-file-options" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    write_file "#{staged_path}/default.txt", "default"
+    write_file "#{staged_path}/no_newline.txt", "no_newline", append_newline: false
+    write_file "#{staged_path}/no_overwrite.txt", "no_overwrite", overwrite: false
+    write_file "#{staged_path}/both.txt", "both", append_newline: false, overwrite: false
+    File.write("#{staged_path}/file_write.txt", "literal")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-write-file-options")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 5)
+	if len(c.preflight_files) == 5 {
+		// default write_file appends newline, no_overwrite is false
+		testing.expect_value(t, c.preflight_files[0].path, "default.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "default\n")
+		testing.expect_value(t, c.preflight_files[0].no_overwrite, false)
+
+		// append_newline: false prevents appending newline
+		testing.expect_value(t, c.preflight_files[1].path, "no_newline.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "no_newline")
+		testing.expect_value(t, c.preflight_files[1].no_overwrite, false)
+
+		// overwrite: false sets no_overwrite = true
+		testing.expect_value(t, c.preflight_files[2].path, "no_overwrite.txt")
+		testing.expect_value(t, c.preflight_files[2].content, "no_overwrite\n")
+		testing.expect_value(t, c.preflight_files[2].no_overwrite, true)
+
+		// both options together
+		testing.expect_value(t, c.preflight_files[3].path, "both.txt")
+		testing.expect_value(t, c.preflight_files[3].content, "both")
+		testing.expect_value(t, c.preflight_files[3].no_overwrite, true)
+
+		// File.write does not append newline and overwrite defaults to true (no_overwrite false)
+		testing.expect_value(t, c.preflight_files[4].path, "file_write.txt")
+		testing.expect_value(t, c.preflight_files[4].content, "literal")
+		testing.expect_value(t, c.preflight_files[4].no_overwrite, false)
 	}
 }
 

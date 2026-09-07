@@ -28,10 +28,11 @@ Generic_Artifact :: struct {
 }
 
 Preflight_File :: struct {
-	path:     string,
-	content:  string,
-	raw:      bool,
-	raw_path: bool,
+	path:         string,
+	content:      string,
+	raw:          bool,
+	raw_path:     bool,
+	no_overwrite: bool,
 }
 
 Artifact :: union {

@@ -247,7 +247,7 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 	}
 
 	// 7. preflight file generation (File.write and write_file).
-	extract_preflight_file_writes(src, &c.preflight_files)
+	extract_preflight_file_writes(src, &c.preflight_files, host.os)
 	for pf, i in c.preflight_files {
 		if !pf.raw_path {
 			interp_path := interpolate_cask_string(pf.path, c.version, arch_val, variables[:])
@@ -789,10 +789,15 @@ extract_binary_and_artifact_directives :: proc(
 // that is not enclosed within single or double quotes, or -1 if none exists.
 find_unquoted_comment_index :: proc(s: string) -> int {
 	in_quote: byte = 0
+	escaped := false
 	for i := 0; i < len(s); i += 1 {
 		c := s[i]
 		if in_quote != 0 {
-			if c == in_quote && (i == 0 || s[i-1] != '\\') {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == in_quote {
 				in_quote = 0
 			}
 		} else if c == '"' || c == '\'' {
@@ -804,15 +809,100 @@ find_unquoted_comment_index :: proc(s: string) -> int {
 	return -1
 }
 
+// strip_quoted_literals replaces characters inside single or double quotes with spaces,
+// preserving string length and token boundaries for outer parsing.
+strip_quoted_literals :: proc(s: string, allocator := context.temp_allocator) -> string {
+	bytes := make([]byte, len(s), allocator)
+	in_quote: byte = 0
+	escaped := false
+
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if in_quote != 0 {
+			if escaped {
+				escaped = false
+				bytes[i] = ' '
+			} else if c == '\\' {
+				escaped = true
+				bytes[i] = ' '
+			} else if c == in_quote {
+				in_quote = 0
+				bytes[i] = ' '
+			} else {
+				bytes[i] = ' '
+			}
+		} else {
+			if c == '"' || c == '\'' {
+				in_quote = c
+				bytes[i] = ' '
+			} else {
+				bytes[i] = c
+			}
+		}
+	}
+	return string(bytes)
+}
+
+is_ruby_block_opener :: proc(unquoted: string) -> bool {
+	if unquoted == "do" || strings.has_suffix(unquoted, " do") ||
+	   strings.contains(unquoted, " do ") || strings.contains(unquoted, " do |") ||
+	   strings.contains(unquoted, " do|") {
+		return true
+	}
+	if strings.has_prefix(unquoted, "def ") ||
+	   strings.has_prefix(unquoted, "if ") || unquoted == "if" ||
+	   strings.has_prefix(unquoted, "unless ") || unquoted == "unless" ||
+	   strings.has_prefix(unquoted, "case ") || unquoted == "case" ||
+	   unquoted == "begin" || strings.has_prefix(unquoted, "begin ") ||
+	   strings.has_prefix(unquoted, "while ") ||
+	   strings.has_prefix(unquoted, "for ") ||
+	   strings.has_prefix(unquoted, "until ") {
+		return true
+	}
+	return false
+}
+
+is_ruby_block_closer :: proc(unquoted: string) -> bool {
+	if unquoted == "end" || strings.has_suffix(unquoted, " end") {
+		return true
+	}
+	if strings.has_prefix(unquoted, "end") {
+		rest := unquoted[3:]
+		if len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == ';') {
+			return true
+		}
+	}
+	return false
+}
+
+is_active_os_for_target :: proc(os_scope: string, target_os: string) -> bool {
+	if len(os_scope) == 0 {
+		return true
+	}
+	norm_scope := os_scope
+	if norm_scope == "darwin" { norm_scope = "macos" }
+
+	norm_target := target_os
+	if norm_target == "darwin" { norm_target = "macos" }
+
+	return norm_scope == norm_target
+}
+
+Scope_Frame :: struct {
+	os_scope:     string,
+	is_preflight: bool,
+}
+
 // extract_preflight_file_writes parses `File.write(...)` and `write_file(...)`
-// blocks from preflight / preflight_steps sections.
-extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflight_File) {
+// blocks from preflight / preflight_steps sections, scoped to active host OS.
+extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflight_File, target_os: string = "linux") {
 	lines := strings.split(src, "\n", context.temp_allocator)
 	defer delete(lines, context.temp_allocator)
 
+	scope_stack := make([dynamic]Scope_Frame, 0, 16, context.temp_allocator)
+	defer delete(scope_stack)
+
 	i := 0
-	in_preflight := false
-	preflight_depth := 0
 	for i < len(lines) {
 		line := lines[i]
 		trimmed := strings.trim_space(line)
@@ -821,74 +911,100 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			continue
 		}
 
-		if !in_preflight {
-			is_preflight := false
-			if strings.has_prefix(trimmed, "preflight_steps") {
-				rest := trimmed[len("preflight_steps"):]
-				if len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '(' {
-					rest = strings.trim_space(rest)
-					if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
-						is_preflight = true
-					}
-				}
-			} else if strings.has_prefix(trimmed, "preflight") {
-				rest := trimmed[len("preflight"):]
-				if len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '(' {
-					rest = strings.trim_space(rest)
-					if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
-						is_preflight = true
-					}
-				}
+		code_part := trimmed
+		if comment_idx := find_unquoted_comment_index(trimmed); comment_idx >= 0 {
+			code_part = strings.trim_space(trimmed[:comment_idx])
+		}
+		if len(code_part) == 0 {
+			continue
+		}
+
+		unquoted := strings.trim_space(strip_quoted_literals(code_part))
+
+		closes_block := is_ruby_block_closer(unquoted)
+		opens_block := is_ruby_block_opener(unquoted)
+
+		is_preflight_decl := false
+		if strings.has_prefix(unquoted, "preflight_steps") {
+			rest := strings.trim_space(unquoted[len("preflight_steps"):])
+			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
+				is_preflight_decl = true
 			}
-			if is_preflight {
-				in_preflight = true
-				preflight_depth = 1
+		} else if strings.has_prefix(unquoted, "preflight") {
+			rest := strings.trim_space(unquoted[len("preflight"):])
+			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
+				is_preflight_decl = true
+			}
+		}
+
+		if closes_block && !opens_block {
+			if len(scope_stack) > 0 {
+				pop(&scope_stack)
 			}
 			continue
 		}
 
-		// Inside preflight block: track nested blocks
-		closes_block := false
-		if trimmed == "end" || strings.has_suffix(trimmed, " end") {
-			closes_block = true
-		} else if strings.has_prefix(trimmed, "end") {
-			rest := trimmed[3:]
-			if len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '#') {
-				rest = strings.trim_space(rest)
-				if len(rest) == 0 || rest[0] == '#' {
-					closes_block = true
+		if strings.has_prefix(unquoted, "elsif ") {
+			if len(scope_stack) > 0 {
+				if strings.contains(unquoted, "OS.linux?") || strings.contains(unquoted, "on_linux") ||
+				   strings.contains(unquoted, "!OS.mac?") || strings.contains(unquoted, "not OS.mac?") {
+					scope_stack[len(scope_stack) - 1].os_scope = "linux"
+				} else if strings.contains(unquoted, "OS.mac?") || strings.contains(unquoted, "on_macos") ||
+				          strings.contains(unquoted, "!OS.linux?") || strings.contains(unquoted, "not OS.linux?") {
+					scope_stack[len(scope_stack) - 1].os_scope = "macos"
 				}
 			}
-		} else if comment_idx := find_unquoted_comment_index(trimmed); comment_idx >= 0 {
-			before_comment := strings.trim_space(trimmed[:comment_idx])
-			if before_comment == "end" || strings.has_suffix(before_comment, " end") {
-				closes_block = true
+		} else if unquoted == "else" || strings.has_prefix(unquoted, "else ") {
+			if len(scope_stack) > 0 {
+				prev_scope := scope_stack[len(scope_stack) - 1].os_scope
+				if prev_scope == "macos" {
+					scope_stack[len(scope_stack) - 1].os_scope = "linux"
+				} else if prev_scope == "linux" {
+					scope_stack[len(scope_stack) - 1].os_scope = "macos"
+				}
 			}
 		}
 
-		opens_block := strings.has_suffix(trimmed, " do") ||
-		               strings.contains(trimmed, " do |") ||
-		               strings.has_prefix(trimmed, "def ") ||
-		               strings.has_prefix(trimmed, "if ") ||
-		               strings.has_prefix(trimmed, "unless ") ||
-		               strings.has_prefix(trimmed, "case ") ||
-		               trimmed == "begin" ||
-		               strings.has_prefix(trimmed, "begin ") ||
-		               strings.has_prefix(trimmed, "while ") ||
-		               strings.has_prefix(trimmed, "for ") ||
-		               strings.has_prefix(trimmed, "until ")
-		if opens_block {
-			preflight_depth += 1
-		} else if closes_block {
-			preflight_depth -= 1
-			if preflight_depth <= 0 {
-				in_preflight = false
-				preflight_depth = 0
-				continue
+		if opens_block || is_preflight_decl {
+			parent_os := ""
+			parent_preflight := false
+			if len(scope_stack) > 0 {
+				top := scope_stack[len(scope_stack) - 1]
+				parent_os = top.os_scope
+				parent_preflight = top.is_preflight
 			}
+
+			new_os := parent_os
+			if strings.has_prefix(unquoted, "unless ") {
+				if strings.contains(unquoted, "OS.mac?") {
+					new_os = "linux"
+				} else if strings.contains(unquoted, "OS.linux?") {
+					new_os = "macos"
+				}
+			} else if strings.contains(unquoted, "on_macos") || strings.contains(unquoted, "OS.mac?") {
+				new_os = "macos"
+			} else if strings.contains(unquoted, "on_linux") || strings.contains(unquoted, "OS.linux?") {
+				new_os = "linux"
+			}
+
+			new_preflight := parent_preflight
+			if is_preflight_decl {
+				new_preflight = true
+			}
+
+			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight })
 		}
+
+		in_preflight := len(scope_stack) > 0 && scope_stack[len(scope_stack) - 1].is_preflight
+		if !in_preflight {
+			continue
+		}
+
+		current_os := len(scope_stack) > 0 ? scope_stack[len(scope_stack) - 1].os_scope : ""
+		is_active := is_active_os_for_target(current_os, target_os)
 
 		is_file_write := false
+		is_write_file := false
 		arg_part := ""
 		if strings.has_prefix(trimmed, "File.write(") || strings.has_prefix(trimmed, "::File.write(") {
 			idx := strings.index(trimmed, "File.write(")
@@ -901,9 +1017,11 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		} else if strings.has_prefix(trimmed, "write_file(") {
 			arg_part = strings.trim_space(trimmed[len("write_file("):])
 			is_file_write = true
+			is_write_file = true
 		} else if strings.has_prefix(trimmed, "write_file ") {
 			arg_part = strings.trim_space(trimmed[len("write_file "):])
 			is_file_write = true
+			is_write_file = true
 		}
 
 		if !is_file_write {
@@ -912,11 +1030,11 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		// Determine whether path argument is single-quoted
 		is_path_single_quoted := false
-		for i := 0; i < len(arg_part); i += 1 {
-			if arg_part[i] == '\'' {
+		for j := 0; j < len(arg_part); j += 1 {
+			if arg_part[j] == '\'' {
 				is_path_single_quoted = true
 				break
-			} else if arg_part[i] == '"' {
+			} else if arg_part[j] == '"' {
 				break
 			}
 		}
@@ -938,10 +1056,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		}
 
 		// Reject absolute paths and directory traversal
-		if strings.has_prefix(clean_path, "/") || strings.contains(clean_path, "..") {
-			delete(path)
-			continue
-		}
+		invalid_path := strings.has_prefix(clean_path, "/") || strings.contains(clean_path, "..")
 
 		rest := arg_part[after_path:]
 
@@ -966,13 +1081,14 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				term_end += 1
 			}
 			terminator := after_heredoc[:term_end]
+			opts_str := after_heredoc[term_end:]
 			is_single_quoted := len(terminator) >= 2 && terminator[0] == '\'' && terminator[len(terminator)-1] == '\''
 			if len(terminator) >= 2 && ((terminator[0] == '\'' && terminator[len(terminator)-1] == '\'') || (terminator[0] == '"' && terminator[len(terminator)-1] == '"')) {
 				terminator = terminator[1:len(terminator)-1]
 			}
 
 			if len(terminator) > 0 {
-				raw_lines := make([dynamic]string, context.temp_allocator)
+				raw_lines := make([dynamic]string, 0, 16, context.temp_allocator)
 				for i < len(lines) {
 					cur_line := lines[i]
 					i += 1
@@ -980,6 +1096,11 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 						break
 					}
 					append(&raw_lines, cur_line)
+				}
+
+				if !is_active || invalid_path {
+					delete(path)
+					continue
 				}
 
 				min_indent := -1
@@ -1013,11 +1134,14 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				}
 
 				content := strings.to_string(content_builder)
+				no_overwrite := strings.contains(opts_str, "overwrite: false")
+
 				append(files, cask.Preflight_File{
-					path     = strings.clone(clean_path, context.allocator),
-					content  = strings.clone(content, context.allocator),
-					raw      = is_single_quoted,
-					raw_path = is_path_single_quoted,
+					path         = strings.clone(clean_path, context.allocator),
+					content      = strings.clone(content, context.allocator),
+					raw          = is_single_quoted,
+					raw_path     = is_path_single_quoted,
+					no_overwrite = no_overwrite,
 				})
 				strings.builder_destroy(&content_builder)
 				delete(path)
@@ -1030,11 +1154,29 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			second_arg := strings.trim_space(rest[comma_idx + 1:])
 			is_single_quoted := len(second_arg) > 0 && second_arg[0] == '\''
 			if content_str, content_end := read_first_quoted(second_arg); content_end > 0 {
+				if !is_active || invalid_path {
+					delete(path)
+					delete(content_str)
+					continue
+				}
+
+				opts_str := second_arg[content_end:]
+				no_overwrite := strings.contains(opts_str, "overwrite: false")
+				final_content := content_str
+				if is_write_file {
+					if !strings.contains(opts_str, "append_newline: false") && !strings.has_suffix(final_content, "\n") {
+						new_content := strings.concatenate({final_content, "\n"}, context.allocator)
+						delete(final_content)
+						final_content = new_content
+					}
+				}
+
 				append(files, cask.Preflight_File{
-					path     = strings.clone(clean_path, context.allocator),
-					content  = content_str,
-					raw      = is_single_quoted,
-					raw_path = is_path_single_quoted,
+					path         = strings.clone(clean_path, context.allocator),
+					content      = final_content,
+					raw          = is_single_quoted,
+					raw_path     = is_path_single_quoted,
+					no_overwrite = no_overwrite,
 				})
 				delete(path)
 				continue
@@ -1083,6 +1225,21 @@ interpolate_cask_string :: proc(s, version, arch: string, variables: []Ruby_Vari
 
 	i := 0
 	for i < len(s) {
+		if strings.has_prefix(s[i:], "#{") {
+			num_backslashes := 0
+			k := i - 1
+			for k >= 0 && s[k] == '\\' {
+				num_backslashes += 1
+				k -= 1
+			}
+			if num_backslashes % 2 == 1 {
+				// Escaped with backslash (e.g. `\#{version}`), treat '#' as literal
+				strings.write_byte(&b, s[i])
+				i += 1
+				continue
+			}
+		}
+
 		if strings.has_prefix(s[i:], "#{version.csv.first}") {
 			strings.write_string(&b, version_first)
 			i += len("#{version.csv.first}")

@@ -264,3 +264,44 @@ test_preflight_materialize_and_neutralize_update :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !os.is_file(update_yml), "app-update.yml neutralized")
 }
+
+@(test)
+test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-cask-no-overwrite-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	target_file := fmt.tprintf("%s/config.txt", test_dir)
+	_ = os.write_entire_file_from_string(target_file, "original content")
+
+	// Preflight file with no_overwrite: true
+	pf_skip := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = true,
+	}
+	if !(pf_skip.no_overwrite && os.exists(target_file)) {
+		_ = os.write_entire_file_from_string(target_file, pf_skip.content)
+	}
+	data1, err1 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err1 == nil, "read target file after skip")
+	testing.expect_value(t, string(data1), "original content")
+
+	// Preflight file with no_overwrite: false (overwrite default)
+	pf_overwrite := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = false,
+	}
+	if !(pf_overwrite.no_overwrite && os.exists(target_file)) {
+		_ = os.write_entire_file_from_string(target_file, pf_overwrite.content)
+	}
+	data2, err2 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err2 == nil, "read target file after overwrite")
+	testing.expect_value(t, string(data2), "new content")
+}

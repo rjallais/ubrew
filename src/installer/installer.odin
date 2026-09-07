@@ -1988,6 +1988,10 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 			continue
 		}
 		target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
+		if pf.no_overwrite && os.exists(target_file) {
+			fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
+			continue
+		}
 		parent := dir_name(target_file)
 		_ = os.make_directory_all(parent, os.perm(0o755))
 		if err := os.write_entire_file_from_string(target_file, pf.content); err != nil {
