@@ -133,11 +133,12 @@ find_and_extract_asar_icon :: proc(extract_dir, out_filename: string) -> bool {
 		return false
 	}
 
+	target_name := os.base(out_filename)
 	target_path := fmt.tprintf("%s/%s", extract_dir, out_filename)
-	if extract_asar_icon(asar_path, target_path, "icon.png") {
+	if extract_asar_icon(asar_path, target_path, target_name) {
 		fmt.printf("==> Extracted app icon from ASAR to %s\n", out_filename)
 		// Also create a copy as "icon.png" in extract_dir if different name
-		if out_filename != "icon.png" {
+		if target_name != "icon.png" {
 			icon_copy := fmt.tprintf("%s/icon.png", extract_dir)
 			if !os.is_file(icon_copy) {
 				_ = platform.cp_fallback(target_path, icon_copy)

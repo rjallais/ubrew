@@ -2084,10 +2084,9 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 			if strings.has_suffix(strings.to_lower(src_rel, context.temp_allocator), ".png") {
 				src_path := fmt.tprintf("%s/%s", extract_dir, src_rel)
 				if !os.is_file(src_path) {
-					base := os.base(src_rel)
-					if _, found := find_file_by_basename(extract_dir, base); !found {
-						_ = find_and_extract_asar_icon(extract_dir, src_rel)
-					}
+					// Attempt ASAR extraction before generic basename search to prevent
+					// unrelated same-named files in subdirectories from suppressing extraction.
+					_ = find_and_extract_asar_icon(extract_dir, src_rel)
 				}
 			}
 		}
