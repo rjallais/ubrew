@@ -888,8 +888,9 @@ is_active_os_for_target :: proc(os_scope: string, target_os: string) -> bool {
 	return norm_scope == norm_target
 }
 
-find_heredoc_terminator :: proc(code_part, unquoted: string) -> (string, bool) {
-	idx := strings.index(unquoted, "<<")
+find_heredoc_terminator :: proc(code_part: string) -> (string, bool) {
+	masked := strip_quoted_literals(code_part)
+	idx := strings.index(masked, "<<")
 	if idx < 0 || idx + 2 >= len(code_part) {
 		return "", false
 	}
@@ -1081,16 +1082,150 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			is_write_file = true
 		}
 
-		if !is_file_write {
-			if term, has_heredoc := find_heredoc_terminator(code_part, unquoted); has_heredoc {
-				for i < len(lines) {
-					cur_line := lines[i]
-					i += 1
-					if strings.trim_space(cur_line) == term {
+		term, has_heredoc := find_heredoc_terminator(code_part)
+		if has_heredoc {
+			raw_lines := make([dynamic]string, 0, 16, context.temp_allocator)
+			for i < len(lines) {
+				cur_line := lines[i]
+				i += 1
+				if strings.trim_space(cur_line) == term {
+					break
+				}
+				append(&raw_lines, cur_line)
+			}
+
+			if !is_file_write {
+				continue
+			}
+
+			in_preflight := len(scope_stack) > 0 && scope_stack[len(scope_stack) - 1].is_preflight
+			if !in_preflight {
+				continue
+			}
+
+			current_os := len(scope_stack) > 0 ? scope_stack[len(scope_stack) - 1].os_scope : ""
+			is_active := is_active_os_for_target(current_os, target_os)
+			if !is_active {
+				continue
+			}
+
+			// Determine whether path argument is single-quoted
+			is_path_single_quoted := false
+			for j := 0; j < len(arg_part); j += 1 {
+				if arg_part[j] == '\'' {
+					is_path_single_quoted = true
+					break
+				} else if arg_part[j] == '"' {
+					break
+				}
+			}
+
+			// Extract target path (first quoted string)
+			path, after_path := read_first_quoted(arg_part)
+			if len(path) == 0 {
+				continue
+			}
+
+			// Clean up "#{staged_path}/" or "{{staged_path}}/" prefix if present on expandable paths
+			clean_path := path
+			if !is_path_single_quoted {
+				if strings.has_prefix(clean_path, "#{staged_path}/") {
+					clean_path = clean_path[len("#{staged_path}/"):]
+				} else if strings.has_prefix(clean_path, "{{staged_path}}/") {
+					clean_path = clean_path[len("{{staged_path}}/"):]
+				}
+			}
+
+			// Reject absolute paths and directory traversal
+			invalid_path := strings.has_prefix(clean_path, "/") || strings.contains(clean_path, "..")
+			if invalid_path {
+				delete(path)
+				continue
+			}
+
+			rest := arg_part[after_path:]
+			comma_idx := strings.index_byte(rest, ',')
+			if comma_idx < 0 {
+				delete(path)
+				continue
+			}
+			second_arg := strings.trim_space(rest[comma_idx + 1:])
+
+			heredoc_idx := strings.index(second_arg, "<<")
+			is_squiggly := false
+			is_single_quoted := false
+			opts_str := ""
+			if heredoc_idx >= 0 {
+				after_heredoc := second_arg[heredoc_idx + 2:]
+				if len(after_heredoc) > 0 && after_heredoc[0] == '~' {
+					is_squiggly = true
+					after_heredoc = after_heredoc[1:]
+				} else if len(after_heredoc) > 0 && after_heredoc[0] == '-' {
+					after_heredoc = after_heredoc[1:]
+				}
+				after_heredoc = strings.trim_space(after_heredoc)
+				term_end := 0
+				for term_end < len(after_heredoc) {
+					ch := after_heredoc[term_end]
+					if ch == ')' || ch == ',' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\r' {
 						break
+					}
+					term_end += 1
+				}
+				raw_term := after_heredoc[:term_end]
+				opts_str = after_heredoc[term_end:]
+				is_single_quoted = len(raw_term) >= 2 && raw_term[0] == '\'' && raw_term[len(raw_term)-1] == '\''
+			}
+
+			min_indent := -1
+			if is_squiggly {
+				for rl in raw_lines {
+					if len(strings.trim_space(rl)) == 0 {
+						continue
+					}
+					indent := 0
+					for indent < len(rl) && (rl[indent] == ' ' || rl[indent] == '\t') {
+						indent += 1
+					}
+					if min_indent < 0 || indent < min_indent {
+						min_indent = indent
 					}
 				}
 			}
+			if min_indent < 0 {
+				min_indent = 0
+			}
+
+			content_builder := strings.builder_make(context.temp_allocator)
+			append_newline := !strings.contains(opts_str, "append_newline: false")
+			for rl, idx in raw_lines {
+				line_to_write := rl
+				if is_squiggly && min_indent > 0 {
+					strip := min(min_indent, len(rl))
+					line_to_write = rl[strip:]
+				}
+				strings.write_string(&content_builder, line_to_write)
+				if append_newline || idx < len(raw_lines) - 1 {
+					strings.write_byte(&content_builder, '\n')
+				}
+			}
+
+			content := strings.to_string(content_builder)
+			no_overwrite := strings.contains(opts_str, "overwrite: false")
+
+			append(files, cask.Preflight_File{
+				path         = strings.clone(clean_path, context.allocator),
+				content      = strings.clone(content, context.allocator),
+				raw          = is_single_quoted,
+				raw_path     = is_path_single_quoted,
+				no_overwrite = no_overwrite,
+			})
+			strings.builder_destroy(&content_builder)
+			delete(path)
+			continue
+		}
+
+		if !is_file_write {
 			continue
 		}
 
@@ -1101,6 +1236,9 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		current_os := len(scope_stack) > 0 ? scope_stack[len(scope_stack) - 1].os_scope : ""
 		is_active := is_active_os_for_target(current_os, target_os)
+		if !is_active {
+			continue
+		}
 
 		// Determine whether path argument is single-quoted
 		is_path_single_quoted := false
@@ -1131,9 +1269,12 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		// Reject absolute paths and directory traversal
 		invalid_path := strings.has_prefix(clean_path, "/") || strings.contains(clean_path, "..")
+		if invalid_path {
+			delete(path)
+			continue
+		}
 
 		rest := arg_part[after_path:]
-
 		comma_idx := strings.index_byte(rest, ',')
 		if comma_idx < 0 {
 			delete(path)
@@ -1141,16 +1282,10 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		}
 		second_arg := strings.trim_space(rest[comma_idx + 1:])
 
-		// 1. Check if second argument is a quoted string
+		// Check if second argument is a quoted string
 		if len(second_arg) > 0 && (second_arg[0] == '"' || second_arg[0] == '\'') {
 			is_single_quoted := second_arg[0] == '\''
 			if content_str, content_end := read_first_quoted(second_arg); content_end > 0 {
-				if !is_active || invalid_path {
-					delete(path)
-					delete(content_str)
-					continue
-				}
-
 				opts_str := second_arg[content_end:]
 				no_overwrite := strings.contains(opts_str, "overwrite: false")
 				final_content := content_str
@@ -1169,115 +1304,6 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 					raw_path     = is_path_single_quoted,
 					no_overwrite = no_overwrite,
 				})
-				delete(path)
-				continue
-			}
-		}
-
-		// 2. Scan rest with quote-aware state so << inside quoted content is not treated as a heredoc opener
-		heredoc_idx := -1
-		in_quote: byte = 0
-		for k := 0; k < len(second_arg) - 1; k += 1 {
-			c := second_arg[k]
-			if in_quote != 0 {
-				if c == in_quote && (k == 0 || second_arg[k-1] != '\\') {
-					in_quote = 0
-				}
-			} else {
-				if c == '"' || c == '\'' {
-					in_quote = c
-				} else if c == '<' && second_arg[k+1] == '<' {
-					heredoc_idx = k
-					break
-				}
-			}
-		}
-
-		if heredoc_idx >= 0 {
-			after_heredoc := second_arg[heredoc_idx + 2:]
-			is_squiggly := false
-			if len(after_heredoc) > 0 && after_heredoc[0] == '~' {
-				is_squiggly = true
-				after_heredoc = after_heredoc[1:]
-			} else if len(after_heredoc) > 0 && after_heredoc[0] == '-' {
-				after_heredoc = after_heredoc[1:]
-			}
-			after_heredoc = strings.trim_space(after_heredoc)
-			term_end := 0
-			for term_end < len(after_heredoc) {
-				ch := after_heredoc[term_end]
-				if ch == ')' || ch == ',' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\r' {
-					break
-				}
-				term_end += 1
-			}
-			terminator := after_heredoc[:term_end]
-			opts_str := after_heredoc[term_end:]
-			is_single_quoted := len(terminator) >= 2 && terminator[0] == '\'' && terminator[len(terminator)-1] == '\''
-			if len(terminator) >= 2 && ((terminator[0] == '\'' && terminator[len(terminator)-1] == '\'') || (terminator[0] == '"' && terminator[len(terminator)-1] == '"')) {
-				terminator = terminator[1:len(terminator)-1]
-			}
-
-			if len(terminator) > 0 {
-				raw_lines := make([dynamic]string, 0, 16, context.temp_allocator)
-				for i < len(lines) {
-					cur_line := lines[i]
-					i += 1
-					if strings.trim_space(cur_line) == terminator {
-						break
-					}
-					append(&raw_lines, cur_line)
-				}
-
-				if !is_active || invalid_path {
-					delete(path)
-					continue
-				}
-
-				min_indent := -1
-				if is_squiggly {
-					for rl in raw_lines {
-						if len(strings.trim_space(rl)) == 0 {
-							continue
-						}
-						indent := 0
-						for indent < len(rl) && (rl[indent] == ' ' || rl[indent] == '\t') {
-							indent += 1
-						}
-						if min_indent < 0 || indent < min_indent {
-							min_indent = indent
-						}
-					}
-				}
-				if min_indent < 0 {
-					min_indent = 0
-				}
-
-				content_builder := strings.builder_make(context.temp_allocator)
-				append_newline := !strings.contains(opts_str, "append_newline: false")
-				for rl, idx in raw_lines {
-					line_to_write := rl
-					if is_squiggly && min_indent > 0 {
-						strip := min(min_indent, len(rl))
-						line_to_write = rl[strip:]
-					}
-					strings.write_string(&content_builder, line_to_write)
-					if append_newline || idx < len(raw_lines) - 1 {
-						strings.write_byte(&content_builder, '\n')
-					}
-				}
-
-				content := strings.to_string(content_builder)
-				no_overwrite := strings.contains(opts_str, "overwrite: false")
-
-				append(files, cask.Preflight_File{
-					path         = strings.clone(clean_path, context.allocator),
-					content      = strings.clone(content, context.allocator),
-					raw          = is_single_quoted,
-					raw_path     = is_path_single_quoted,
-					no_overwrite = no_overwrite,
-				})
-				strings.builder_destroy(&content_builder)
 				delete(path)
 				continue
 			}

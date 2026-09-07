@@ -729,3 +729,54 @@ end
 	}
 }
 
+@(test)
+test_postflight_file_write_heredoc_does_not_leak_into_preflight :: proc(t: ^testing.T) {
+	fixture := `cask "test-postflight-heredoc" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  postflight do
+    File.write "#{staged_path}/runner.sh", <<~EOS
+      preflight do
+        write_file "#{staged_path}/evil.txt", "evil"
+      end
+    EOS
+    File.write("#{staged_path}/another.sh", <<~EOS)
+      echo "hello"
+    EOS
+  end
+
+  preflight do
+    write_file "#{staged_path}/legit.txt", "legit"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-postflight-heredoc")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "legit.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "legit\n")
+	}
+}
+
+@(test)
+test_find_heredoc_terminator_offset_alignment :: proc(t: ^testing.T) {
+	// Leading quote string before << operator to verify byte offset alignment
+	line1 := `"prefix_with_quotes", <<~EOS`
+	term1, ok1 := find_heredoc_terminator(line1)
+	testing.expect(t, ok1, "heredoc should be detected after quoted prefix")
+	testing.expect_value(t, term1, "EOS")
+
+	line2 := `File.write("#{staged_path}/test", <<~'CUSTOM_TERM', overwrite: false)`
+	term2, ok2 := find_heredoc_terminator(line2)
+	testing.expect(t, ok2, "heredoc should be detected with custom terminator")
+	testing.expect_value(t, term2, "CUSTOM_TERM")
+
+	line3 := `x = "string with << inside" + " more"`
+	_, ok3 := find_heredoc_terminator(line3)
+	testing.expect(t, !ok3, "quoted << should not be treated as heredoc")
+}
+
