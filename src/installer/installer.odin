@@ -2783,18 +2783,80 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 }
 
 clear_desktop_mime_defaults :: proc(desktop_filename: string) {
-	home_dir := os.get_env("HOME", context.temp_allocator)
-	if len(home_dir) == 0 {
+	if len(desktop_filename) == 0 {
 		return
 	}
-	candidates := []string{
-		fmt.tprintf("%s/.config/mimeapps.list", home_dir),
-		fmt.tprintf("%s/.local/share/applications/mimeapps.list", home_dir),
+
+	home_dir := os.get_env("HOME", context.temp_allocator)
+	xdg_config := os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
+	xdg_data := os.get_env("XDG_DATA_HOME", context.temp_allocator)
+
+	dirs := make([dynamic]string, context.temp_allocator)
+
+	add_dir :: proc(dirs: ^[dynamic]string, dir: string) {
+		if len(dir) == 0 {
+			return
+		}
+		for d in dirs {
+			if d == dir {
+				return
+			}
+		}
+		append(dirs, dir)
 	}
-	for path in candidates {
-		if !os.is_file(path) {
+
+	if len(xdg_config) > 0 {
+		add_dir(&dirs, xdg_config)
+	}
+	if len(home_dir) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/.config", home_dir))
+	}
+
+	if len(xdg_data) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/applications", xdg_data))
+		add_dir(&dirs, xdg_data)
+	}
+	if len(home_dir) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/.local/share/applications", home_dir))
+	}
+
+	if len(dirs) == 0 {
+		return
+	}
+
+	candidates := make([dynamic]string, context.temp_allocator)
+
+	add_candidate :: proc(candidates: ^[dynamic]string, path: string) {
+		if len(path) == 0 || !os.is_file(path) {
+			return
+		}
+		for c in candidates {
+			if c == path {
+				return
+			}
+		}
+		append(candidates, path)
+	}
+
+	for dir in dirs {
+		if !os.is_dir(dir) {
 			continue
 		}
+		add_candidate(&candidates, fmt.tprintf("%s/mimeapps.list", dir))
+
+		if infos, read_err := os.read_directory_by_path(dir, -1, context.allocator); read_err == nil {
+			defer os.file_info_slice_delete(infos, context.allocator)
+			for info in infos {
+				if info.type == .Regular || info.type == .Symlink {
+					if info.name == "mimeapps.list" || strings.has_suffix(info.name, "-mimeapps.list") {
+						add_candidate(&candidates, strings.clone(info.fullpath, context.temp_allocator))
+					}
+				}
+			}
+		}
+	}
+
+	for path in candidates {
 		data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 		if err != nil {
 			continue
@@ -2805,8 +2867,10 @@ clear_desktop_mime_defaults :: proc(desktop_filename: string) {
 		}
 		lines := strings.split(text, "\n", context.temp_allocator)
 		b := strings.builder_make(context.temp_allocator)
+		defer strings.builder_destroy(&b)
+
 		modified := false
-		for line in lines {
+		for line, i in lines {
 			trimmed := strings.trim_space(line)
 			if strings.has_prefix(trimmed, "[") {
 				strings.write_string(&b, line)
@@ -2815,43 +2879,44 @@ clear_desktop_mime_defaults :: proc(desktop_filename: string) {
 			}
 			eq := strings.index_byte(trimmed, '=')
 			if eq < 0 {
-				if len(line) > 0 {
-					strings.write_string(&b, line)
-					strings.write_byte(&b, '\n')
+				if i == len(lines) - 1 && len(line) == 0 {
+					continue
 				}
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
 				continue
 			}
 			key := strings.trim_space(trimmed[:eq])
 			val := strings.trim_space(trimmed[eq + 1:])
-			if val == desktop_filename {
-				// Single mapping matches the removed desktop file: remove this line
-				modified = true
+
+			items := strings.split(val, ";", context.temp_allocator)
+			has_match := false
+			new_items := make([dynamic]string, context.temp_allocator)
+			for item in items {
+				it := strings.trim_space(item)
+				if it == desktop_filename {
+					has_match = true
+				} else if len(it) > 0 {
+					append(&new_items, it)
+				}
+			}
+
+			if !has_match {
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
 				continue
 			}
-			// Semicolon-separated list in [Added Associations]
-			if strings.contains(val, desktop_filename) {
-				items := strings.split(val, ";", context.temp_allocator)
-				new_items := make([dynamic]string, context.temp_allocator)
-				for item in items {
-					it := strings.trim_space(item)
-					if len(it) > 0 && it != desktop_filename {
-						append(&new_items, it)
-					}
+
+			modified = true
+			if len(new_items) > 0 {
+				strings.write_string(&b, key)
+				strings.write_byte(&b, '=')
+				for it in new_items {
+					strings.write_string(&b, it)
+					strings.write_byte(&b, ';')
 				}
-				if len(new_items) > 0 {
-					strings.write_string(&b, key)
-					strings.write_byte(&b, '=')
-					for it in new_items {
-						strings.write_string(&b, it)
-						strings.write_byte(&b, ';')
-					}
-					strings.write_byte(&b, '\n')
-				}
-				modified = true
-				continue
+				strings.write_byte(&b, '\n')
 			}
-			strings.write_string(&b, line)
-			strings.write_byte(&b, '\n')
 		}
 		if modified {
 			_ = os.write_entire_file_from_string(path, strings.to_string(b))
