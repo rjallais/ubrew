@@ -289,6 +289,7 @@ test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
 	data1, err1 := os.read_entire_file(target_file, context.temp_allocator)
 	testing.expect(t, err1 == nil, "read target file after skip")
 	testing.expect_value(t, string(data1), "original content")
+	delete(data1, context.temp_allocator)
 
 	// Preflight file with no_overwrite: false (overwrite default) through production helper
 	pf_overwrite := cask.Preflight_File{
@@ -302,6 +303,7 @@ test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
 	data2, err2 := os.read_entire_file(target_file, context.temp_allocator)
 	testing.expect(t, err2 == nil, "read target file after overwrite")
 	testing.expect_value(t, string(data2), "new content")
+	delete(data2, context.temp_allocator)
 }
 
 @(test)
@@ -368,17 +370,20 @@ test_clear_desktop_mime_defaults_custom_xdg :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(s1, "app-handler.desktop"), "app-handler removed from cfg_mime")
 	testing.expect(t, strings.contains(s1, "text/plain=app.desktop;other.desktop;"), "text/plain preserved in cfg_mime")
 	testing.expect(t, strings.contains(s1, "image/png=other.desktop;"), "image/png preserved in cfg_mime")
+	delete(d1, context.temp_allocator)
 
 	d2, err2 := os.read_entire_file(cfg_gnome, context.temp_allocator)
 	testing.expect(t, err2 == nil, "read cfg_gnome")
 	s2 := string(d2)
 	testing.expect(t, !strings.contains(s2, "app-handler.desktop"), "app-handler removed from cfg_gnome")
 	testing.expect(t, strings.contains(s2, "x-scheme-handler/app=other-app.desktop;"), "other-app preserved in cfg_gnome")
+	delete(d2, context.temp_allocator)
 
 	d3, err3 := os.read_entire_file(data_mime, context.temp_allocator)
 	testing.expect(t, err3 == nil, "read data_mime")
 	s3 := string(d3)
 	testing.expect(t, !strings.contains(s3, "app-handler.desktop"), "app-handler removed from data_mime")
+	delete(d3, context.temp_allocator)
 
 	// Remove app.desktop and ensure other-app.desktop substring is NOT removed
 	clear_desktop_mime_defaults("app.desktop")
@@ -387,14 +392,17 @@ test_clear_desktop_mime_defaults_custom_xdg :: proc(t: ^testing.T) {
 	testing.expect(t, err1b == nil, "read cfg_mime after second clear")
 	s1b := string(d1b)
 	testing.expect(t, strings.contains(s1b, "text/plain=other.desktop;"), "app.desktop removed from text/plain list")
+	delete(d1b, context.temp_allocator)
 
 	d2b, err2b := os.read_entire_file(cfg_gnome, context.temp_allocator)
 	testing.expect(t, err2b == nil, "read cfg_gnome after second clear")
 	s2b := string(d2b)
 	testing.expect(t, strings.contains(s2b, "other-app.desktop;"), "other-app.desktop not stripped by app.desktop removal")
+	delete(d2b, context.temp_allocator)
 
 	d4, err4 := os.read_entire_file(data_kde, context.temp_allocator)
 	testing.expect(t, err4 == nil, "read data_kde")
 	s4 := string(d4)
 	testing.expect(t, !strings.contains(s4, "app.desktop"), "app.desktop removed from data_kde")
+	delete(d4, context.temp_allocator)
 }

@@ -892,6 +892,7 @@ Scope_Frame :: struct {
 	os_scope:     string,
 	is_preflight: bool,
 	os_from_cond: bool,
+	parent_os:    string,
 }
 
 // extract_preflight_file_writes parses `File.write(...)` and `write_file(...)`
@@ -926,16 +927,25 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 		opens_block := is_ruby_block_opener(unquoted)
 
 		is_preflight_decl := false
-		if strings.has_prefix(unquoted, "preflight_steps") {
-			rest := strings.trim_space(unquoted[len("preflight_steps"):])
-			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
-				is_preflight_decl = true
+		check_preflight_decl :: proc(s, name: string) -> bool {
+			if !strings.has_prefix(s, name) {
+				return false
 			}
-		} else if strings.has_prefix(unquoted, "preflight") {
-			rest := strings.trim_space(unquoted[len("preflight"):])
-			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") {
-				is_preflight_decl = true
+			if len(s) > len(name) {
+				next_ch := s[len(name)]
+				if next_ch == '_' || (next_ch >= 'a' && next_ch <= 'z') || (next_ch >= 'A' && next_ch <= 'Z') || (next_ch >= '0' && next_ch <= '9') {
+					return false
+				}
 			}
+			rest := strings.trim_space(s[len(name):])
+			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") || strings.has_prefix(rest, "{") || strings.contains(rest, " {") {
+				return true
+			}
+			return false
+		}
+
+		if check_preflight_decl(unquoted, "preflight_steps") || check_preflight_decl(unquoted, "preflight") {
+			is_preflight_decl = true
 		}
 
 		if closes_block && !opens_block {
@@ -956,6 +966,9 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				          strings.contains(unquoted, "!OS.linux?") || strings.contains(unquoted, "not OS.linux?") {
 					top.os_scope = "macos"
 					top.os_from_cond = true
+				} else {
+					top.os_scope = top.parent_os
+					top.os_from_cond = false
 				}
 			}
 		} else if unquoted == "else" || strings.has_prefix(unquoted, "else ") {
@@ -1003,7 +1016,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				new_preflight = true
 			}
 
-			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight, os_from_cond = os_from_cond })
+			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight, os_from_cond = os_from_cond, parent_os = parent_os })
 		}
 
 		in_preflight := len(scope_stack) > 0 && scope_stack[len(scope_stack) - 1].is_preflight
@@ -1134,14 +1147,17 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				}
 
 				content_builder := strings.builder_make(context.temp_allocator)
-				for rl in raw_lines {
+				append_newline := !strings.contains(opts_str, "append_newline: false")
+				for rl, idx in raw_lines {
 					line_to_write := rl
 					if is_squiggly && min_indent > 0 {
 						strip := min(min_indent, len(rl))
 						line_to_write = rl[strip:]
 					}
 					strings.write_string(&content_builder, line_to_write)
-					strings.write_byte(&content_builder, '\n')
+					if append_newline || idx < len(raw_lines) - 1 {
+						strings.write_byte(&content_builder, '\n')
+					}
 				}
 
 				content := strings.to_string(content_builder)

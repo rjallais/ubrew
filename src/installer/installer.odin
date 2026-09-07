@@ -1963,10 +1963,13 @@ materialize_preflight_file :: proc(extract_dir: string, pf: cask.Preflight_File)
 	return true
 }
 
-materialize_preflight_files :: proc(extract_dir: string, preflight_files: []cask.Preflight_File) {
+materialize_preflight_files :: proc(extract_dir: string, preflight_files: []cask.Preflight_File) -> bool {
 	for pf in preflight_files {
-		materialize_preflight_file(extract_dir, pf)
+		if !materialize_preflight_file(extract_dir, pf) {
+			return false
+		}
 	}
+	return true
 }
 
 install_binary_cask :: proc(c: cask.Cask) -> bool {
@@ -2025,7 +2028,10 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	// 1. Materialize preflight generated files into extract_dir before artifact linking
-	materialize_preflight_files(extract_dir, c.preflight_files)
+	if !materialize_preflight_files(extract_dir, c.preflight_files) {
+		fmt.println("Error: Failed to materialize preflight files.")
+		return false
+	}
 
 	// Copy binary artifacts to target
 	installed := 0
@@ -2806,16 +2812,14 @@ clear_desktop_mime_defaults :: proc(desktop_filename: string) {
 
 	if len(xdg_config) > 0 {
 		add_dir(&dirs, xdg_config)
-	}
-	if len(home_dir) > 0 {
+	} else if len(home_dir) > 0 {
 		add_dir(&dirs, fmt.tprintf("%s/.config", home_dir))
 	}
 
 	if len(xdg_data) > 0 {
 		add_dir(&dirs, fmt.tprintf("%s/applications", xdg_data))
 		add_dir(&dirs, xdg_data)
-	}
-	if len(home_dir) > 0 {
+	} else if len(home_dir) > 0 {
 		add_dir(&dirs, fmt.tprintf("%s/.local/share/applications", home_dir))
 	}
 

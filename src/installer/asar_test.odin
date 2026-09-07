@@ -169,12 +169,14 @@ test_find_and_extract_asar_icon_named_target :: proc(t: ^testing.T) {
 	data, rerr := os.read_entire_file(extracted_path, context.temp_allocator)
 	testing.expect(t, rerr == nil, "read extracted app.png")
 	testing.expect_value(t, string(data), "REAL_APP_ASAR_ICON")
+	delete(data, context.temp_allocator)
 
 	// Also verify icon.png copy was created
 	icon_copy := fmt.tprintf("%s/icon.png", test_dir)
 	cdata, cerr := os.read_entire_file(icon_copy, context.temp_allocator)
 	testing.expect(t, cerr == nil, "read icon.png copy")
 	testing.expect_value(t, string(cdata), "REAL_APP_ASAR_ICON")
+	delete(cdata, context.temp_allocator)
 }
 
 @(test)
@@ -219,6 +221,80 @@ test_find_and_extract_asar_icon_security_rejections :: proc(t: ^testing.T) {
 	data, err := os.read_entire_file(outside_target, context.temp_allocator)
 	testing.expect(t, err == nil, "read outside_target")
 	testing.expect_value(t, string(data), "CANNOT_OVERWRITE")
+	delete(data, context.temp_allocator)
+}
+
+@(test)
+test_find_asar_file_entry_prefers_exact_nested_over_fallback :: proc(t: ^testing.T) {
+	tmp := os.get_env("TMPDIR", context.temp_allocator)
+	if len(tmp) == 0 {
+		tmp = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-asar-nested-test", tmp)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	asar_path := fmt.tprintf("%s/resources/app.asar", test_dir)
+	parent := dir_name(asar_path)
+	_ = os.make_directory_all(parent, os.perm(0o755))
+
+	p1 := "FALLBACK_ICON"
+	p2 := "NESTED_EXACT_APP_ICON"
+	json_hdr := fmt.tprintf(
+		"{{\"files\":{{\"icon.png\":{{\"size\":%d,\"offset\":\"0\"}},\"assets\":{{\"files\":{{\"myapp.png\":{{\"size\":%d,\"offset\":\"%d\"}}}}}}}}}}",
+		len(p1),
+		len(p2),
+		len(p1),
+	)
+	json_len := len(json_hdr)
+	padded_len := (json_len + 3) & ~int(3)
+
+	buf := make([dynamic]u8, context.temp_allocator)
+	defer delete(buf)
+
+	u32_to_bytes :: proc(val: u32) -> [4]u8 {
+		return [4]u8{
+			u8(val & 0xFF),
+			u8((val >> 8) & 0xFF),
+			u8((val >> 16) & 0xFF),
+			u8((val >> 24) & 0xFF),
+		}
+	}
+
+	h0 := u32_to_bytes(4)
+	h4 := u32_to_bytes(u32(padded_len + 8))
+	h8 := u32_to_bytes(u32(padded_len + 4))
+	h12 := u32_to_bytes(u32(json_len))
+
+	for b in h0 { append(&buf, b) }
+	for b in h4 { append(&buf, b) }
+	for b in h8 { append(&buf, b) }
+	for b in h12 { append(&buf, b) }
+
+	for i in 0..<json_len {
+		append(&buf, json_hdr[i])
+	}
+	for i in json_len..<padded_len {
+		append(&buf, 0)
+	}
+	for i in 0..<len(p1) {
+		append(&buf, p1[i])
+	}
+	for i in 0..<len(p2) {
+		append(&buf, p2[i])
+	}
+
+	testing.expect(t, os.write_entire_file(asar_path, buf[:]) == nil, "write synthetic nested asar")
+
+	ok := find_and_extract_asar_icon(test_dir, "myapp.png")
+	testing.expect(t, ok, "extract nested exact myapp.png")
+
+	extracted_path := fmt.tprintf("%s/myapp.png", test_dir)
+	edata, err := os.read_entire_file(extracted_path, context.temp_allocator)
+	testing.expect(t, err == nil, "read extracted myapp.png")
+	testing.expect_value(t, string(edata), "NESTED_EXACT_APP_ICON")
+	delete(edata, context.temp_allocator)
 }
 
 

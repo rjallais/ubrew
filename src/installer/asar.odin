@@ -190,46 +190,65 @@ find_and_extract_asar_icon :: proc(extract_dir, out_filename: string) -> bool {
 }
 
 find_asar_file_entry :: proc(dir_obj: json.Object, target_name: string) -> (json.Object, bool) {
-	// Direct match
-	if val, ok := dir_obj[target_name]; ok {
-		if obj, is_obj := val.(json.Object); is_obj {
-			if _, has_size := obj["size"]; has_size {
-				return obj, true
-			}
-		}
-	}
-	// Fallback to "icon.png"
-	if target_name != "icon.png" {
-		if val, ok := dir_obj["icon.png"]; ok {
-			if obj, is_obj := val.(json.Object); is_obj {
-				if _, has_size := obj["size"]; has_size {
-					return obj, true
+	find_exact :: proc(obj: json.Object, name: string) -> (json.Object, bool) {
+		if val, ok := obj[name]; ok {
+			if file_obj, is_obj := val.(json.Object); is_obj {
+				if _, has_size := file_obj["size"]; has_size {
+					return file_obj, true
 				}
 			}
 		}
-	}
-	// Direct .png match in current directory
-	for k, val in dir_obj {
-		if strings.has_suffix(strings.to_lower(k, context.temp_allocator), ".png") {
-			if obj, is_obj := val.(json.Object); is_obj {
-				if _, has_size := obj["size"]; has_size {
-					return obj, true
-				}
-			}
-		}
-	}
-	// Recurse into subdirectories (entries that have a "files" object)
-	for _, val in dir_obj {
-		if obj, is_obj := val.(json.Object); is_obj {
-			if sub_files, has_sub := obj["files"]; has_sub {
-				if sub_obj, sub_is_obj := sub_files.(json.Object); sub_is_obj {
-					if entry, found := find_asar_file_entry(sub_obj, target_name); found {
-						return entry, true
+		for _, val in obj {
+			if sub, is_obj := val.(json.Object); is_obj {
+				if sub_files, has_sub := sub["files"]; has_sub {
+					if sub_dir, sub_is_dir := sub_files.(json.Object); sub_is_dir {
+						if entry, found := find_exact(sub_dir, name); found {
+							return entry, true
+						}
 					}
 				}
 			}
 		}
+		return nil, false
 	}
-	return nil, false
+
+	find_png :: proc(obj: json.Object) -> (json.Object, bool) {
+		for k, val in obj {
+			if strings.has_suffix(strings.to_lower(k, context.temp_allocator), ".png") {
+				if file_obj, is_obj := val.(json.Object); is_obj {
+					if _, has_size := file_obj["size"]; has_size {
+						return file_obj, true
+					}
+				}
+			}
+		}
+		for _, val in obj {
+			if sub, is_obj := val.(json.Object); is_obj {
+				if sub_files, has_sub := sub["files"]; has_sub {
+					if sub_dir, sub_is_dir := sub_files.(json.Object); sub_is_dir {
+						if entry, found := find_png(sub_dir); found {
+							return entry, true
+						}
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
+	// 1. Exact match for target_name anywhere in ASAR
+	if len(target_name) > 0 {
+		if entry, found := find_exact(dir_obj, target_name); found {
+			return entry, true
+		}
+	}
+	// 2. Fallback to icon.png anywhere in ASAR
+	if target_name != "icon.png" {
+		if entry, found := find_exact(dir_obj, "icon.png"); found {
+			return entry, true
+		}
+	}
+	// 3. Fallback to any .png
+	return find_png(dir_obj)
 }
 

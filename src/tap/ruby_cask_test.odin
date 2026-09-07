@@ -467,6 +467,17 @@ test_preflight_write_file_options :: proc(t: ^testing.T) {
     write_file "#{staged_path}/no_overwrite.txt", "no_overwrite", overwrite: false
     write_file "#{staged_path}/both.txt", "both", append_newline: false, overwrite: false
     File.write("#{staged_path}/file_write.txt", "literal")
+    write_file "#{staged_path}/heredoc_default.txt", <<~EOS
+      first line
+      second line
+    EOS
+    write_file "#{staged_path}/heredoc_no_nl.txt", <<~EOS, append_newline: false
+      first line
+      second line
+    EOS
+    write_file "#{staged_path}/heredoc_single_line_no_nl.txt", <<~EOS, append_newline: false
+      single line
+    EOS
   end
 end
 `
@@ -474,8 +485,8 @@ end
 	testing.expect(t, ok, "parse_ruby_cask should succeed")
 	defer destroy_ruby_cask(c)
 
-	testing.expect_value(t, len(c.preflight_files), 5)
-	if len(c.preflight_files) == 5 {
+	testing.expect_value(t, len(c.preflight_files), 8)
+	if len(c.preflight_files) == 8 {
 		// default write_file appends newline, no_overwrite is false
 		testing.expect_value(t, c.preflight_files[0].path, "default.txt")
 		testing.expect_value(t, c.preflight_files[0].content, "default\n")
@@ -500,6 +511,21 @@ end
 		testing.expect_value(t, c.preflight_files[4].path, "file_write.txt")
 		testing.expect_value(t, c.preflight_files[4].content, "literal")
 		testing.expect_value(t, c.preflight_files[4].no_overwrite, false)
+
+		// heredoc with default append_newline preserves trailing newline
+		testing.expect_value(t, c.preflight_files[5].path, "heredoc_default.txt")
+		testing.expect_value(t, c.preflight_files[5].content, "first line\nsecond line\n")
+		testing.expect_value(t, c.preflight_files[5].no_overwrite, false)
+
+		// heredoc with append_newline: false preserves internal newlines but omits final newline
+		testing.expect_value(t, c.preflight_files[6].path, "heredoc_no_nl.txt")
+		testing.expect_value(t, c.preflight_files[6].content, "first line\nsecond line")
+		testing.expect_value(t, c.preflight_files[6].no_overwrite, false)
+
+		// heredoc single line with append_newline: false omits final newline
+		testing.expect_value(t, c.preflight_files[7].path, "heredoc_single_line_no_nl.txt")
+		testing.expect_value(t, c.preflight_files[7].content, "single line")
+		testing.expect_value(t, c.preflight_files[7].no_overwrite, false)
 	}
 }
 
@@ -532,9 +558,67 @@ end
 	}
 }
 
+@(test)
+test_preflight_helpers_not_treated_as_preflight_decl :: proc(t: ^testing.T) {
+	fixture := `cask "test-helpers" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
 
+  preflight_helper do
+    write_file "#{staged_path}/ignored1.txt", "ignored"
+  end
 
+  preflight_steps_helper do
+    write_file "#{staged_path}/ignored2.txt", "ignored"
+  end
 
+  preflight do
+    write_file "#{staged_path}/actual.txt", "actual"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-helpers")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "actual.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "actual\n")
+	}
+}
+
+@(test)
+test_preflight_non_os_elsif_restores_parent_scope :: proc(t: ^testing.T) {
+	fixture := `cask "test-elsif" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  on_linux do
+    preflight do
+      if OS.mac?
+        write_file "#{staged_path}/mac.txt", "mac"
+      elsif Hardware::CPU.arm?
+        write_file "#{staged_path}/linux_arm.txt", "linux arm"
+      else
+        write_file "#{staged_path}/linux_other.txt", "linux other"
+      end
+    end
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-elsif")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "linux_arm.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "linux arm\n")
+		testing.expect_value(t, c.preflight_files[1].path, "linux_other.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "linux other\n")
+	}
+}
 
 
 
