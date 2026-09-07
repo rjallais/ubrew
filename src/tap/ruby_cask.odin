@@ -888,6 +888,44 @@ is_active_os_for_target :: proc(os_scope: string, target_os: string) -> bool {
 	return norm_scope == norm_target
 }
 
+find_heredoc_terminator :: proc(code_part, unquoted: string) -> (string, bool) {
+	idx := strings.index(unquoted, "<<")
+	if idx < 0 || idx + 2 >= len(code_part) {
+		return "", false
+	}
+	after := code_part[idx + 2:]
+	if len(after) == 0 {
+		return "", false
+	}
+	if after[0] == '~' || after[0] == '-' {
+		after = after[1:]
+	} else if after[0] == ' ' || after[0] == '\t' {
+		// Bare << with trailing space is a bitshift or shovel operator, not a heredoc
+		return "", false
+	}
+	after = strings.trim_space(after)
+	if len(after) == 0 {
+		return "", false
+	}
+	first_ch := after[0]
+	if !((first_ch >= 'a' && first_ch <= 'z') || (first_ch >= 'A' && first_ch <= 'Z') || first_ch == '_' || first_ch == '\'' || first_ch == '"') {
+		return "", false
+	}
+	term_end := 0
+	for term_end < len(after) {
+		ch := after[term_end]
+		if ch == ')' || ch == ',' || ch == ']' || ch == '}' || ch == ' ' || ch == '\t' || ch == '\r' || ch == ';' {
+			break
+		}
+		term_end += 1
+	}
+	term := after[:term_end]
+	if len(term) >= 2 && ((term[0] == '\'' && term[len(term)-1] == '\'') || (term[0] == '"' && term[len(term)-1] == '"')) {
+		term = term[1:len(term)-1]
+	}
+	return term, len(term) > 0
+}
+
 Scope_Frame :: struct {
 	os_scope:     string,
 	is_preflight: bool,
@@ -938,7 +976,10 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				}
 			}
 			rest := strings.trim_space(s[len(name):])
-			if len(rest) == 0 || strings.has_prefix(rest, "do") || strings.contains(rest, " do") || strings.has_prefix(rest, "{") || strings.contains(rest, " {") {
+			if rest == "do" || strings.has_prefix(rest, "do ") || strings.has_prefix(rest, "do|") || strings.has_prefix(rest, "do |") {
+				return true
+			}
+			if strings.has_suffix(rest, " do") || strings.contains(rest, " do ") || strings.contains(rest, " do|") || strings.contains(rest, " do |") {
 				return true
 			}
 			return false
@@ -1019,6 +1060,40 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			append(&scope_stack, Scope_Frame{ os_scope = new_os, is_preflight = new_preflight, os_from_cond = os_from_cond, parent_os = parent_os })
 		}
 
+		is_file_write := false
+		is_write_file := false
+		arg_part := ""
+		if strings.has_prefix(code_part, "File.write(") || strings.has_prefix(code_part, "::File.write(") {
+			idx := strings.index(code_part, "File.write(")
+			arg_part = strings.trim_space(code_part[idx + len("File.write("):])
+			is_file_write = true
+		} else if strings.has_prefix(code_part, "File.write ") || strings.has_prefix(code_part, "::File.write ") {
+			idx := strings.index(code_part, "File.write ")
+			arg_part = strings.trim_space(code_part[idx + len("File.write "):])
+			is_file_write = true
+		} else if strings.has_prefix(code_part, "write_file(") {
+			arg_part = strings.trim_space(code_part[len("write_file("):])
+			is_file_write = true
+			is_write_file = true
+		} else if strings.has_prefix(code_part, "write_file ") {
+			arg_part = strings.trim_space(code_part[len("write_file "):])
+			is_file_write = true
+			is_write_file = true
+		}
+
+		if !is_file_write {
+			if term, has_heredoc := find_heredoc_terminator(code_part, unquoted); has_heredoc {
+				for i < len(lines) {
+					cur_line := lines[i]
+					i += 1
+					if strings.trim_space(cur_line) == term {
+						break
+					}
+				}
+			}
+			continue
+		}
+
 		in_preflight := len(scope_stack) > 0 && scope_stack[len(scope_stack) - 1].is_preflight
 		if !in_preflight {
 			continue
@@ -1026,31 +1101,6 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		current_os := len(scope_stack) > 0 ? scope_stack[len(scope_stack) - 1].os_scope : ""
 		is_active := is_active_os_for_target(current_os, target_os)
-
-		is_file_write := false
-		is_write_file := false
-		arg_part := ""
-		if strings.has_prefix(trimmed, "File.write(") || strings.has_prefix(trimmed, "::File.write(") {
-			idx := strings.index(trimmed, "File.write(")
-			arg_part = strings.trim_space(trimmed[idx + len("File.write("):])
-			is_file_write = true
-		} else if strings.has_prefix(trimmed, "File.write ") || strings.has_prefix(trimmed, "::File.write ") {
-			idx := strings.index(trimmed, "File.write ")
-			arg_part = strings.trim_space(trimmed[idx + len("File.write "):])
-			is_file_write = true
-		} else if strings.has_prefix(trimmed, "write_file(") {
-			arg_part = strings.trim_space(trimmed[len("write_file("):])
-			is_file_write = true
-			is_write_file = true
-		} else if strings.has_prefix(trimmed, "write_file ") {
-			arg_part = strings.trim_space(trimmed[len("write_file "):])
-			is_file_write = true
-			is_write_file = true
-		}
-
-		if !is_file_write {
-			continue
-		}
 
 		// Determine whether path argument is single-quoted
 		is_path_single_quoted := false
@@ -1084,10 +1134,67 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		rest := arg_part[after_path:]
 
-		// Check for heredoc (<<~EOS, <<-EOS, <<EOS)
-		heredoc_idx := strings.index(rest, "<<")
+		comma_idx := strings.index_byte(rest, ',')
+		if comma_idx < 0 {
+			delete(path)
+			continue
+		}
+		second_arg := strings.trim_space(rest[comma_idx + 1:])
+
+		// 1. Check if second argument is a quoted string
+		if len(second_arg) > 0 && (second_arg[0] == '"' || second_arg[0] == '\'') {
+			is_single_quoted := second_arg[0] == '\''
+			if content_str, content_end := read_first_quoted(second_arg); content_end > 0 {
+				if !is_active || invalid_path {
+					delete(path)
+					delete(content_str)
+					continue
+				}
+
+				opts_str := second_arg[content_end:]
+				no_overwrite := strings.contains(opts_str, "overwrite: false")
+				final_content := content_str
+				if is_write_file {
+					if !strings.contains(opts_str, "append_newline: false") && !strings.has_suffix(final_content, "\n") {
+						new_content := strings.concatenate({final_content, "\n"}, context.allocator)
+						delete(final_content)
+						final_content = new_content
+					}
+				}
+
+				append(files, cask.Preflight_File{
+					path         = strings.clone(clean_path, context.allocator),
+					content      = final_content,
+					raw          = is_single_quoted,
+					raw_path     = is_path_single_quoted,
+					no_overwrite = no_overwrite,
+				})
+				delete(path)
+				continue
+			}
+		}
+
+		// 2. Scan rest with quote-aware state so << inside quoted content is not treated as a heredoc opener
+		heredoc_idx := -1
+		in_quote: byte = 0
+		for k := 0; k < len(second_arg) - 1; k += 1 {
+			c := second_arg[k]
+			if in_quote != 0 {
+				if c == in_quote && (k == 0 || second_arg[k-1] != '\\') {
+					in_quote = 0
+				}
+			} else {
+				if c == '"' || c == '\'' {
+					in_quote = c
+				} else if c == '<' && second_arg[k+1] == '<' {
+					heredoc_idx = k
+					break
+				}
+			}
+		}
+
 		if heredoc_idx >= 0 {
-			after_heredoc := rest[heredoc_idx + 2:]
+			after_heredoc := second_arg[heredoc_idx + 2:]
 			is_squiggly := false
 			if len(after_heredoc) > 0 && after_heredoc[0] == '~' {
 				is_squiggly = true
@@ -1099,7 +1206,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 			term_end := 0
 			for term_end < len(after_heredoc) {
 				ch := after_heredoc[term_end]
-				if ch == ')' || ch == ',' || ch == ' ' || ch == '\t' || ch == '\r' {
+				if ch == ')' || ch == ',' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\r' {
 					break
 				}
 				term_end += 1
@@ -1171,40 +1278,6 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 					no_overwrite = no_overwrite,
 				})
 				strings.builder_destroy(&content_builder)
-				delete(path)
-				continue
-			}
-		}
-
-		// If not a heredoc, check if second argument is a quoted string
-		if comma_idx := strings.index_byte(rest, ','); comma_idx >= 0 {
-			second_arg := strings.trim_space(rest[comma_idx + 1:])
-			is_single_quoted := len(second_arg) > 0 && second_arg[0] == '\''
-			if content_str, content_end := read_first_quoted(second_arg); content_end > 0 {
-				if !is_active || invalid_path {
-					delete(path)
-					delete(content_str)
-					continue
-				}
-
-				opts_str := second_arg[content_end:]
-				no_overwrite := strings.contains(opts_str, "overwrite: false")
-				final_content := content_str
-				if is_write_file {
-					if !strings.contains(opts_str, "append_newline: false") && !strings.has_suffix(final_content, "\n") {
-						new_content := strings.concatenate({final_content, "\n"}, context.allocator)
-						delete(final_content)
-						final_content = new_content
-					}
-				}
-
-				append(files, cask.Preflight_File{
-					path         = strings.clone(clean_path, context.allocator),
-					content      = final_content,
-					raw          = is_single_quoted,
-					raw_path     = is_path_single_quoted,
-					no_overwrite = no_overwrite,
-				})
 				delete(path)
 				continue
 			}

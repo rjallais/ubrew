@@ -620,7 +620,112 @@ end
 	}
 }
 
+@(test)
+test_preflight_brace_syntax_rejected_and_postflight_not_staged :: proc(t: ^testing.T) {
+	fixture := `cask "test-brace" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
 
+  preflight {
+    write_file "#{staged_path}/ignored.txt", "ignored"
+  }
 
+  postflight do
+    write_file "#{staged_path}/post.txt", "post"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-brace")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
 
+	testing.expect_value(t, len(c.preflight_files), 0)
+}
+
+@(test)
+test_preflight_do_token_boundary :: proc(t: ^testing.T) {
+	fixture := `cask "test-do-boundary" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight download
+    write_file "#{staged_path}/ignored.txt", "ignored"
+  end
+
+  preflight do
+    write_file "#{staged_path}/valid.txt", "valid"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-do-boundary")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "valid\n")
+	}
+}
+
+@(test)
+test_generic_heredoc_skipped_without_corrupting_scope :: proc(t: ^testing.T) {
+	fixture := `cask "test-generic-heredoc" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  postflight do
+    system_command "/bin/sh", args: ["-c", <<~EOS]
+      if [ -d "/foo" ]; then
+        preflight do
+          write_file "#{staged_path}/evil.txt", "evil"
+        end
+      fi
+    EOS
+    write_file "#{staged_path}/post.txt", "post"
+  end
+
+  preflight do
+    write_file "#{staged_path}/real.txt", "real"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-generic-heredoc")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "real.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "real\n")
+	}
+}
+
+@(test)
+test_preflight_quoted_content_with_heredoc_marker_and_comments :: proc(t: ^testing.T) {
+	fixture := `cask "test-quotes-and-comments" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    write_file "#{staged_path}/quoted_shift.txt", "content with <<~EOS inside", overwrite: true
+    write_file "#{staged_path}/comment_opts.txt", "comment test", overwrite: false # append_newline: false
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-quotes-and-comments")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 2)
+	if len(c.preflight_files) == 2 {
+		testing.expect_value(t, c.preflight_files[0].path, "quoted_shift.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "content with <<~EOS inside\n")
+		testing.expect_value(t, c.preflight_files[0].no_overwrite, false)
+
+		testing.expect_value(t, c.preflight_files[1].path, "comment_opts.txt")
+		testing.expect_value(t, c.preflight_files[1].content, "comment test\n")
+		testing.expect_value(t, c.preflight_files[1].no_overwrite, true)
+	}
+}
 
