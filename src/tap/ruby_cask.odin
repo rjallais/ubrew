@@ -785,6 +785,25 @@ extract_binary_and_artifact_directives :: proc(
 	}
 }
 
+// find_unquoted_comment_index returns the byte index of the first '#' in `s`
+// that is not enclosed within single or double quotes, or -1 if none exists.
+find_unquoted_comment_index :: proc(s: string) -> int {
+	in_quote: byte = 0
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if in_quote != 0 {
+			if c == in_quote && (i == 0 || s[i-1] != '\\') {
+				in_quote = 0
+			}
+		} else if c == '"' || c == '\'' {
+			in_quote = c
+		} else if c == '#' {
+			return i
+		}
+	}
+	return -1
+}
+
 // extract_preflight_file_writes parses `File.write(...)` and `write_file(...)`
 // blocks from preflight / preflight_steps sections.
 extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflight_File) {
@@ -840,7 +859,7 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 					closes_block = true
 				}
 			}
-		} else if comment_idx := strings.index_byte(trimmed, '#'); comment_idx >= 0 {
+		} else if comment_idx := find_unquoted_comment_index(trimmed); comment_idx >= 0 {
 			before_comment := strings.trim_space(trimmed[:comment_idx])
 			if before_comment == "end" || strings.has_suffix(before_comment, " end") {
 				closes_block = true

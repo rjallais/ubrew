@@ -308,6 +308,30 @@ end
 	}
 }
 
+@(test)
+test_preflight_comment_in_quoted_string :: proc(t: ^testing.T) {
+	fixture := `cask "test-comment-in-string" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    puts " end#literal"
+    File.write("#{staged_path}/valid.txt", "valid")
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-comment-in-string")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "valid")
+	}
+}
+
+
 
 
 
