@@ -102,6 +102,9 @@ extract_asar_icon :: proc(asar_path: string, out_path: string, target_icon_name:
 	if file_size <= 0 || file_size > 100 * 1024 * 1024 {
 		return false
 	}
+	if file_offset < 0 {
+		return false
+	}
 
 	abs_offset := 16 + padded_size + file_offset
 	_, seek_err := os.seek(f, abs_offset, io.Seek_From.Start)

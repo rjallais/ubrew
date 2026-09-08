@@ -261,6 +261,19 @@ parse_ruby_cask :: proc(src: string, cask_name: string) -> (c: Ruby_Cask, ok: bo
 		}
 	}
 
+	// Re-validate interpolated paths against absolute paths and directory traversal
+	kept := make([dynamic]cask.Preflight_File, 0, len(c.preflight_files), context.allocator)
+	for pf in c.preflight_files {
+		if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
+			delete(pf.path)
+			delete(pf.content)
+			continue
+		}
+		append(&kept, pf)
+	}
+	delete(c.preflight_files)
+	c.preflight_files = kept
+
 	if len(c.url) == 0 {
 		return c, false
 	}

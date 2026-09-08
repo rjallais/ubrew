@@ -806,3 +806,27 @@ end
 	}
 }
 
+@(test)
+test_preflight_interpolated_path_traversal_rejected :: proc(t: ^testing.T) {
+	fixture := `cask "test-interp-traversal" do
+  version "../../evil"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    write_file "#{staged_path}/#{version}/app.desktop", "evil"
+    write_file "#{staged_path}/valid.desktop", "good"
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-interp-traversal")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.desktop")
+		testing.expect_value(t, c.preflight_files[0].content, "good\n")
+	}
+}
+
+

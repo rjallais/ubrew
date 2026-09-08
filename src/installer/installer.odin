@@ -2232,7 +2232,9 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 						mimes := strings.split(mimes_str, ";", context.temp_allocator)
 						for mime in mimes {
 							m_trimmed := strings.trim_space(mime)
-							if len(m_trimmed) > 0 {
+							// Only claim URL scheme handlers; never take over
+							// the user's default app for generic MIME types.
+							if len(m_trimmed) > 0 && strings.has_prefix(m_trimmed, "x-scheme-handler/") {
 								_ = platform.exec_cmd("xdg-mime", []string{"xdg-mime", "default", df_base, m_trimmed})
 							}
 						}
