@@ -798,6 +798,19 @@ ruby_to_cask :: proc(rc: tap.Ruby_Cask) -> (c: cask.Cask, ok: bool) {
 	}
 
 	c.artifacts = artifacts_list[:]
+
+	pf_list := make([dynamic]cask.Preflight_File, context.allocator)
+	for pf in rc.preflight_files {
+		append(&pf_list, cask.Preflight_File{
+			path         = strings.clone(pf.path, context.allocator),
+			content      = strings.clone(pf.content, context.allocator),
+			raw          = pf.raw,
+			raw_path     = pf.raw_path,
+			no_overwrite = pf.no_overwrite,
+		})
+	}
+	c.preflight_files = pf_list[:]
+
 	return c, true
 }
 
@@ -1234,6 +1247,11 @@ destroy_cask :: proc(c: cask.Cask) {
 	}
     }
     delete(c.artifacts)
+    for pf in c.preflight_files {
+        delete(pf.path)
+        delete(pf.content)
+    }
+    delete(c.preflight_files)
 }
 
 fetch_formula :: proc(name: string) -> (f: formula.Formula, err: json.Error) {

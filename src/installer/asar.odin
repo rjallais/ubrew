@@ -1,0 +1,257 @@
+package installer
+
+import "core:encoding/json"
+import "core:fmt"
+import "core:io"
+import "core:os"
+import "core:strconv"
+import "core:strings"
+import "../platform"
+
+// extract_asar_icon parses an Electron ASAR package, locates the icon
+// (defaulting to "icon.png"), and writes it directly to out_path.
+// Implements the Electron ASAR binary header specification:
+//   offset 8:  uint32_le (padded header size + 4)
+//   offset 12: uint32_le (true JSON header length)
+//   offset 16: JSON header payload
+//   payload begins at offset 16 + padded_size
+extract_asar_icon :: proc(asar_path: string, out_path: string, target_icon_name: string = "icon.png") -> bool {
+	f, err := os.open(asar_path, os.O_RDONLY)
+	if err != os.ERROR_NONE {
+		return false
+	}
+	defer os.close(f)
+
+	// Read 16-byte fixed header
+	hdr_buf: [16]u8
+	n, rerr := os.read(f, hdr_buf[:])
+	if rerr != os.ERROR_NONE || n < 16 {
+		return false
+	}
+
+	raw_padded := u32(hdr_buf[8]) | (u32(hdr_buf[9]) << 8) | (u32(hdr_buf[10]) << 16) | (u32(hdr_buf[11]) << 24)
+	raw_true   := u32(hdr_buf[12]) | (u32(hdr_buf[13]) << 8) | (u32(hdr_buf[14]) << 16) | (u32(hdr_buf[15]) << 24)
+
+	padded_size := i64(raw_padded) - 4
+	true_size := i64(raw_true)
+
+	if padded_size < 0 || true_size <= 0 || true_size > 50 * 1024 * 1024 {
+		return false
+	}
+
+	// Read the JSON header
+	json_buf := make([]u8, int(true_size), context.temp_allocator)
+	defer delete(json_buf, context.temp_allocator)
+
+	jn, jerr := os.read(f, json_buf)
+	if jerr != os.ERROR_NONE || i64(jn) < true_size {
+		return false
+	}
+
+	val, parse_err := json.parse(json_buf, json.DEFAULT_SPECIFICATION, false, context.allocator)
+	if parse_err != nil {
+		return false
+	}
+	defer json.destroy_value(val, context.allocator)
+
+	root_obj, is_obj := val.(json.Object)
+	if !is_obj {
+		return false
+	}
+
+	files_val, has_files := root_obj["files"]
+	if !has_files {
+		return false
+	}
+	files_obj, files_is_obj := files_val.(json.Object)
+	if !files_is_obj {
+		return false
+	}
+
+	icon_obj, has_icon := find_asar_file_entry(files_obj, target_icon_name)
+	if !has_icon {
+		return false
+	}
+
+	size_val, has_size := icon_obj["size"]
+	offset_val, has_offset := icon_obj["offset"]
+	if !has_size || !has_offset {
+		return false
+	}
+
+	file_size: i64 = 0
+	#partial switch v in size_val {
+	case json.Integer:
+		file_size = i64(v)
+	case json.Float:
+		file_size = i64(v)
+	}
+
+	file_offset: i64 = 0
+	#partial switch v in offset_val {
+	case json.String:
+		parsed, ok := strconv.parse_i64(string(v))
+		if !ok {
+			return false
+		}
+		file_offset = parsed
+	case json.Integer:
+		file_offset = i64(v)
+	}
+
+	if file_size <= 0 || file_size > 100 * 1024 * 1024 {
+		return false
+	}
+	if file_offset < 0 {
+		return false
+	}
+
+	abs_offset := 16 + padded_size + file_offset
+	_, seek_err := os.seek(f, abs_offset, io.Seek_From.Start)
+	if seek_err != os.ERROR_NONE {
+		return false
+	}
+
+	payload := make([]u8, int(file_size), context.temp_allocator)
+	defer delete(payload, context.temp_allocator)
+
+	pn, perr := os.read(f, payload)
+	if perr != os.ERROR_NONE || i64(pn) < file_size {
+		return false
+	}
+
+	// Reject writing to a symlink
+	if fi, lstat_err := os.lstat(out_path, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			return false
+		}
+	}
+
+	// Ensure parent dir of out_path exists
+	parent_dir := dir_name(out_path)
+	_ = os.make_directory_all(parent_dir, os.perm(0o755))
+
+	werr := os.write_entire_file(out_path, payload)
+	return werr == nil
+}
+
+// find_and_extract_asar_icon searches extract_dir for app.asar, and if
+// found, safely extracts the icon to extract_dir/out_filename.
+find_and_extract_asar_icon :: proc(extract_dir, out_filename: string) -> bool {
+	if len(out_filename) == 0 {
+		return false
+	}
+
+	// Reject absolute paths and directory traversal
+	if strings.has_prefix(out_filename, "/") || strings.contains(out_filename, "..") {
+		fmt.printf("Warning: rejecting ASAR icon extraction with unsafe path: %s\n", out_filename)
+		return false
+	}
+
+	// Reject destination paths traversing symlinks inside extract_dir
+	if path_contains_symlink(extract_dir, out_filename) {
+		fmt.printf("Warning: rejecting ASAR icon extraction traversing symlink: %s\n", out_filename)
+		return false
+	}
+
+	target_path := fmt.tprintf("%s/%s", extract_dir, out_filename)
+	if fi, lstat_err := os.lstat(target_path, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			fmt.printf("Warning: rejecting ASAR icon extraction over symlink: %s\n", out_filename)
+			return false
+		}
+	}
+
+	asar_path, ok := find_file_by_basename(extract_dir, "app.asar")
+	if !ok {
+		return false
+	}
+
+	target_name := os.base(out_filename)
+	if extract_asar_icon(asar_path, target_path, target_name) {
+		fmt.printf("==> Extracted app icon from ASAR to %s\n", out_filename)
+		// Also create a copy as "icon.png" in extract_dir if different name
+		if target_name != "icon.png" {
+			icon_copy := fmt.tprintf("%s/icon.png", extract_dir)
+			is_symlink := false
+			if fi, lstat_err := os.lstat(icon_copy, context.temp_allocator); lstat_err == nil {
+				defer os.file_info_delete(fi, context.temp_allocator)
+				if fi.type == .Symlink {
+					is_symlink = true
+				}
+			}
+			if !is_symlink && !os.is_file(icon_copy) {
+				_ = platform.cp_fallback(target_path, icon_copy)
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+find_asar_file_entry :: proc(dir_obj: json.Object, target_name: string) -> (json.Object, bool) {
+	find_exact :: proc(obj: json.Object, name: string) -> (json.Object, bool) {
+		if val, ok := obj[name]; ok {
+			if file_obj, is_obj := val.(json.Object); is_obj {
+				if _, has_size := file_obj["size"]; has_size {
+					return file_obj, true
+				}
+			}
+		}
+		for _, val in obj {
+			if sub, is_obj := val.(json.Object); is_obj {
+				if sub_files, has_sub := sub["files"]; has_sub {
+					if sub_dir, sub_is_dir := sub_files.(json.Object); sub_is_dir {
+						if entry, found := find_exact(sub_dir, name); found {
+							return entry, true
+						}
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
+	find_png :: proc(obj: json.Object) -> (json.Object, bool) {
+		for k, val in obj {
+			if strings.has_suffix(strings.to_lower(k, context.temp_allocator), ".png") {
+				if file_obj, is_obj := val.(json.Object); is_obj {
+					if _, has_size := file_obj["size"]; has_size {
+						return file_obj, true
+					}
+				}
+			}
+		}
+		for _, val in obj {
+			if sub, is_obj := val.(json.Object); is_obj {
+				if sub_files, has_sub := sub["files"]; has_sub {
+					if sub_dir, sub_is_dir := sub_files.(json.Object); sub_is_dir {
+						if entry, found := find_png(sub_dir); found {
+							return entry, true
+						}
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
+	// 1. Exact match for target_name anywhere in ASAR
+	if len(target_name) > 0 {
+		if entry, found := find_exact(dir_obj, target_name); found {
+			return entry, true
+		}
+	}
+	// 2. Fallback to icon.png anywhere in ASAR
+	if target_name != "icon.png" {
+		if entry, found := find_exact(dir_obj, "icon.png"); found {
+			return entry, true
+		}
+	}
+	// 3. Fallback to any .png
+	return find_png(dir_obj)
+}
+

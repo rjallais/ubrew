@@ -9,7 +9,9 @@ package installer
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
+import "../cask"
 
 @(test)
 test_normalize_keg_dir_keeps_correctly_named_unpack :: proc(t: ^testing.T) {
@@ -225,4 +227,182 @@ write_test_file :: proc(t: ^testing.T, path, content: string) {
 	if err := os.write_entire_file_from_string(path, content); err != nil {
 		testing.fail_now(t, fmt.tprintf("could not write test file %q: %v", path, err))
 	}
+}
+
+@(test)
+test_preflight_materialize_and_neutralize_update :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-cask-preflight-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	// 1. Test preflight file creation
+	pf1 := cask.Preflight_File{
+		path    = "subdir/app.desktop",
+		content = "[Desktop Entry]\nName=TestApp\nMimeType=x-scheme-handler/test;\n",
+	}
+	ok1 := materialize_preflight_file(test_dir, pf1)
+	testing.expect(t, ok1, "materialize preflight file")
+	target_file := fmt.tprintf("%s/%s", test_dir, pf1.path)
+	testing.expect(t, os.is_file(target_file), "preflight file must exist on disk")
+
+	// 2. Test app-update.yml removal
+	update_yml := fmt.tprintf("%s/app-update.yml", test_dir)
+	_ = os.write_entire_file_from_string(update_yml, "owner: test\nrepo: app\n")
+	testing.expect(t, os.is_file(update_yml), "app-update.yml created")
+
+	found_update, ok := find_file_by_basename(test_dir, "app-update.yml")
+	testing.expect(t, ok, "find_file_by_basename should find app-update.yml")
+	if ok {
+		_ = os.remove(found_update)
+	}
+	testing.expect(t, !os.is_file(update_yml), "app-update.yml neutralized")
+}
+
+@(test)
+test_preflight_no_overwrite_preserves_existing_file :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-cask-no-overwrite-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	target_file := fmt.tprintf("%s/config.txt", test_dir)
+	_ = os.write_entire_file_from_string(target_file, "original content")
+
+	// Preflight file with no_overwrite: true through production helper
+	pf_skip := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = true,
+	}
+	ok_skip := materialize_preflight_file(test_dir, pf_skip)
+	testing.expect(t, ok_skip, "materialize_preflight_file with no_overwrite should succeed (skip)")
+
+	data1, err1 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err1 == nil, "read target file after skip")
+	testing.expect_value(t, string(data1), "original content")
+	delete(data1, context.temp_allocator)
+
+	// Preflight file with no_overwrite: false (overwrite default) through production helper
+	pf_overwrite := cask.Preflight_File{
+		path         = "config.txt",
+		content      = "new content",
+		no_overwrite = false,
+	}
+	ok_overwrite := materialize_preflight_file(test_dir, pf_overwrite)
+	testing.expect(t, ok_overwrite, "materialize_preflight_file with default overwrite should succeed")
+
+	data2, err2 := os.read_entire_file(target_file, context.temp_allocator)
+	testing.expect(t, err2 == nil, "read target file after overwrite")
+	testing.expect_value(t, string(data2), "new content")
+	delete(data2, context.temp_allocator)
+}
+
+@(test)
+test_clear_desktop_mime_defaults_custom_xdg :: proc(t: ^testing.T) {
+	tmp_dir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp_dir == "" {
+		tmp_dir = "/tmp"
+	}
+	test_dir := fmt.tprintf("%s/ubrew-custom-xdg-test", tmp_dir)
+	_ = os.remove_all(test_dir)
+	_ = os.make_directory_all(test_dir, os.perm(0o755))
+	defer os.remove_all(test_dir)
+
+	custom_config := fmt.tprintf("%s/config", test_dir)
+	custom_data := fmt.tprintf("%s/share", test_dir)
+	custom_apps := fmt.tprintf("%s/applications", custom_data)
+	_ = os.make_directory_all(custom_config, os.perm(0o755))
+	_ = os.make_directory_all(custom_apps, os.perm(0o755))
+
+	old_config := os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
+	old_data := os.get_env("XDG_DATA_HOME", context.temp_allocator)
+	defer {
+		_ = os.set_env("XDG_CONFIG_HOME", old_config)
+		_ = os.set_env("XDG_DATA_HOME", old_data)
+	}
+
+	_ = os.set_env("XDG_CONFIG_HOME", custom_config)
+	_ = os.set_env("XDG_DATA_HOME", custom_data)
+
+	// 1. $XDG_CONFIG_HOME/mimeapps.list
+	cfg_mime := fmt.tprintf("%s/mimeapps.list", custom_config)
+	_ = os.write_entire_file_from_string(
+		cfg_mime,
+		"[Default Applications]\nx-scheme-handler/app=app-handler.desktop\ntext/plain=app.desktop;other.desktop;\nimage/png=other.desktop;\n",
+	)
+
+	// 2. Desktop-specific $XDG_CONFIG_HOME/gnome-mimeapps.list
+	cfg_gnome := fmt.tprintf("%s/gnome-mimeapps.list", custom_config)
+	_ = os.write_entire_file_from_string(
+		cfg_gnome,
+		"[Default Applications]\nx-scheme-handler/app=app-handler.desktop;\n[Added Associations]\nx-scheme-handler/app=app-handler.desktop;other-app.desktop;\n",
+	)
+
+	// 3. $XDG_DATA_HOME/applications/mimeapps.list
+	data_mime := fmt.tprintf("%s/applications/mimeapps.list", custom_data)
+	_ = os.write_entire_file_from_string(
+		data_mime,
+		"[Default Applications]\nx-scheme-handler/app=app-handler.desktop\n",
+	)
+
+	// 4. Desktop-specific $XDG_DATA_HOME/applications/kde-mimeapps.list
+	data_kde := fmt.tprintf("%s/applications/kde-mimeapps.list", custom_data)
+	_ = os.write_entire_file_from_string(
+		data_kde,
+		"[Added Associations]\ntext/markdown=app.desktop;\n",
+	)
+
+	// Remove app-handler.desktop
+	clear_desktop_mime_defaults("app-handler.desktop")
+
+	d1, err1 := os.read_entire_file(cfg_mime, context.temp_allocator)
+	testing.expect(t, err1 == nil, "read cfg_mime")
+	s1 := string(d1)
+	testing.expect(t, !strings.contains(s1, "app-handler.desktop"), "app-handler removed from cfg_mime")
+	testing.expect(t, strings.contains(s1, "text/plain=app.desktop;other.desktop;"), "text/plain preserved in cfg_mime")
+	testing.expect(t, strings.contains(s1, "image/png=other.desktop;"), "image/png preserved in cfg_mime")
+	delete(d1, context.temp_allocator)
+
+	d2, err2 := os.read_entire_file(cfg_gnome, context.temp_allocator)
+	testing.expect(t, err2 == nil, "read cfg_gnome")
+	s2 := string(d2)
+	testing.expect(t, !strings.contains(s2, "app-handler.desktop"), "app-handler removed from cfg_gnome")
+	testing.expect(t, strings.contains(s2, "x-scheme-handler/app=other-app.desktop;"), "other-app preserved in cfg_gnome")
+	delete(d2, context.temp_allocator)
+
+	d3, err3 := os.read_entire_file(data_mime, context.temp_allocator)
+	testing.expect(t, err3 == nil, "read data_mime")
+	s3 := string(d3)
+	testing.expect(t, !strings.contains(s3, "app-handler.desktop"), "app-handler removed from data_mime")
+	delete(d3, context.temp_allocator)
+
+	// Remove app.desktop and ensure other-app.desktop substring is NOT removed
+	clear_desktop_mime_defaults("app.desktop")
+
+	d1b, err1b := os.read_entire_file(cfg_mime, context.temp_allocator)
+	testing.expect(t, err1b == nil, "read cfg_mime after second clear")
+	s1b := string(d1b)
+	testing.expect(t, strings.contains(s1b, "text/plain=other.desktop;"), "app.desktop removed from text/plain list")
+	delete(d1b, context.temp_allocator)
+
+	d2b, err2b := os.read_entire_file(cfg_gnome, context.temp_allocator)
+	testing.expect(t, err2b == nil, "read cfg_gnome after second clear")
+	s2b := string(d2b)
+	testing.expect(t, strings.contains(s2b, "other-app.desktop;"), "other-app.desktop not stripped by app.desktop removal")
+	delete(d2b, context.temp_allocator)
+
+	d4, err4 := os.read_entire_file(data_kde, context.temp_allocator)
+	testing.expect(t, err4 == nil, "read data_kde")
+	s4 := string(d4)
+	testing.expect(t, !strings.contains(s4, "app.desktop"), "app.desktop removed from data_kde")
+	delete(d4, context.temp_allocator)
 }

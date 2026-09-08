@@ -1904,6 +1904,74 @@ write_cask_metadata :: proc(c: cask.Cask, version_fallback: string) -> bool {
 	return true
 }
 
+path_contains_symlink :: proc(root, rel_path: string) -> bool {
+	parts := strings.split(rel_path, "/", context.temp_allocator)
+	defer delete(parts, context.temp_allocator)
+	curr := strings.clone(root, context.temp_allocator)
+	for part in parts {
+		if len(part) == 0 || part == "." {
+			continue
+		}
+		curr = fmt.tprintf("%s/%s", curr, part)
+		if fi, err := os.lstat(curr, context.temp_allocator); err == nil {
+			defer os.file_info_delete(fi, context.temp_allocator)
+			if fi.type == .Symlink {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+materialize_preflight_file :: proc(extract_dir: string, pf: cask.Preflight_File) -> bool {
+	if strings.has_prefix(pf.path, "/") || strings.contains(pf.path, "..") {
+		return false
+	}
+	if path_contains_symlink(extract_dir, pf.path) {
+		fmt.printf("Warning: rejecting preflight file traversing symlink: %s\n", pf.path)
+		return false
+	}
+	target_file := fmt.tprintf("%s/%s", extract_dir, pf.path)
+	if fi, lstat_err := os.lstat(target_file, context.temp_allocator); lstat_err == nil {
+		defer os.file_info_delete(fi, context.temp_allocator)
+		if fi.type == .Symlink {
+			fmt.printf("Warning: rejecting preflight file over symlink: %s\n", pf.path)
+			return false
+		}
+	}
+
+	parent := dir_name(target_file)
+	_ = os.make_directory_all(parent, os.perm(0o755))
+
+	flags := os.O_WRONLY | os.O_CREATE | (pf.no_overwrite ? os.O_EXCL : os.O_TRUNC)
+	fd, open_err := os.open(target_file, flags, os.Permissions_Default_File)
+	if open_err != nil {
+		if pf.no_overwrite && os.exists(target_file) {
+			fmt.printf("==> Skipping existing preflight file (overwrite: false): %s\n", pf.path)
+			return true
+		}
+		fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, open_err)
+		return false
+	}
+	_, write_err := os.write(fd, transmute([]u8)pf.content)
+	os.close(fd)
+	if write_err != nil {
+		fmt.printf("Warning: failed writing preflight file %s: %v\n", pf.path, write_err)
+		return false
+	}
+	fmt.printf("==> Staged preflight file: %s\n", pf.path)
+	return true
+}
+
+materialize_preflight_files :: proc(extract_dir: string, preflight_files: []cask.Preflight_File) -> bool {
+	for pf in preflight_files {
+		if !materialize_preflight_file(extract_dir, pf) {
+			return false
+		}
+	}
+	return true
+}
+
 install_binary_cask :: proc(c: cask.Cask) -> bool {
 	if len(c.url) == 0 {
 		fmt.println("Error: Cask has no download URL.")
@@ -1959,6 +2027,12 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		}
 	}
 
+	// 1. Materialize preflight generated files into extract_dir before artifact linking
+	if !materialize_preflight_files(extract_dir, c.preflight_files) {
+		fmt.println("Error: Failed to materialize preflight files.")
+		return false
+	}
+
 	// Copy binary artifacts to target
 	installed := 0
 	for art in c.artifacts {
@@ -2002,6 +2076,31 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		}
 	}
 
+	// 2. Disable Electron built-in auto-update manifests (Homebrew parity)
+	if update_yml, ok := find_file_by_basename(extract_dir, "app-update.yml"); ok {
+		_ = os.remove(update_yml)
+		fmt.println("==> Removed Electron app-update.yml (package manager manages updates)")
+	}
+
+	// 3. Fallback ASAR icon extraction: if any generic artifact expects an icon
+	// that isn't loose in extract_dir, extract it from app.asar
+	for art in c.artifacts {
+		if ga, ok := art.(cask.Generic_Artifact); ok {
+			src_rel := resolve_arch_placeholders(ga.source)
+			if strings.has_suffix(strings.to_lower(src_rel, context.temp_allocator), ".png") {
+				src_path := fmt.tprintf("%s/%s", extract_dir, src_rel)
+				if !os.is_file(src_path) {
+					// Attempt ASAR extraction before generic basename search to prevent
+					// unrelated same-named files in subdirectories from suppressing extraction.
+					_ = find_and_extract_asar_icon(extract_dir, src_rel)
+				}
+			}
+		}
+	}
+
+	// Track installed .desktop files for desktop database and MIME registration
+	installed_desktop_files := make([dynamic]string, context.temp_allocator)
+
 	// Copy generic artifacts to target
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
@@ -2041,6 +2140,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 
 			// Apply post-copy adjustments for 1Password compatibility
 			if strings.has_suffix(resolved_target, ".desktop") {
+				append(&installed_desktop_files, strings.clone(resolved_target, context.temp_allocator))
 				if contents, err := os.read_entire_file_from_path(resolved_target, context.temp_allocator); err == nil {
 					text := string(contents)
 					bin_path := fmt.tprintf("%s/1password", bin_dir)
@@ -2100,6 +2200,7 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		)
 		desktop_path := fmt.tprintf("%s/code.desktop", apps_dir)
 		_ = os.write_entire_file_from_string(desktop_path, desktop_content)
+		append(&installed_desktop_files, desktop_path)
 
 		// code-url-handler.desktop
 		url_handler_content := fmt.tprintf(
@@ -2108,9 +2209,40 @@ install_binary_cask :: proc(c: cask.Cask) -> bool {
 		)
 		url_handler_path := fmt.tprintf("%s/code-url-handler.desktop", apps_dir)
 		_ = os.write_entire_file_from_string(url_handler_path, url_handler_content)
+		append(&installed_desktop_files, url_handler_path)
 
 		fmt.println("==> Generated VS Code desktop shortcuts")
 		installed += 2
+	}
+
+	// Linux Desktop & MIME integration
+	if len(installed_desktop_files) > 0 {
+		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
+		_ = platform.exec_cmd("update-desktop-database", []string{"update-desktop-database", apps_dir})
+
+		for df_path in installed_desktop_files {
+			df_base := os.base(df_path)
+			if contents, err := os.read_entire_file_from_path(df_path, context.temp_allocator); err == nil {
+				text := string(contents)
+				lines := strings.split(text, "\n", context.temp_allocator)
+				for line in lines {
+					trimmed := strings.trim_space(line)
+					if strings.has_prefix(trimmed, "MimeType=") {
+						mimes_str := trimmed[len("MimeType="):]
+						mimes := strings.split(mimes_str, ";", context.temp_allocator)
+						for mime in mimes {
+							m_trimmed := strings.trim_space(mime)
+							// Only claim URL scheme handlers; never take over
+							// the user's default app for generic MIME types.
+							if len(m_trimmed) > 0 && strings.has_prefix(m_trimmed, "x-scheme-handler/") {
+								_ = platform.exec_cmd("xdg-mime", []string{"xdg-mime", "default", df_base, m_trimmed})
+							}
+						}
+					}
+				}
+			}
+		}
+		fmt.println("==> Updated desktop database and registered MIME scheme handlers")
 	}
 
 	if installed == 0 {
@@ -2657,6 +2789,146 @@ install_appimage_cask :: proc(c: cask.Cask) -> bool {
 	return true
 }
 
+clear_desktop_mime_defaults :: proc(desktop_filename: string) {
+	if len(desktop_filename) == 0 {
+		return
+	}
+
+	home_dir := os.get_env("HOME", context.temp_allocator)
+	xdg_config := os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
+	xdg_data := os.get_env("XDG_DATA_HOME", context.temp_allocator)
+
+	dirs := make([dynamic]string, context.temp_allocator)
+
+	add_dir :: proc(dirs: ^[dynamic]string, dir: string) {
+		if len(dir) == 0 {
+			return
+		}
+		for d in dirs {
+			if d == dir {
+				return
+			}
+		}
+		append(dirs, dir)
+	}
+
+	if len(xdg_config) > 0 {
+		add_dir(&dirs, xdg_config)
+	} else if len(home_dir) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/.config", home_dir))
+	}
+
+	if len(xdg_data) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/applications", xdg_data))
+		add_dir(&dirs, xdg_data)
+	} else if len(home_dir) > 0 {
+		add_dir(&dirs, fmt.tprintf("%s/.local/share/applications", home_dir))
+	}
+
+	if len(dirs) == 0 {
+		return
+	}
+
+	candidates := make([dynamic]string, context.temp_allocator)
+
+	add_candidate :: proc(candidates: ^[dynamic]string, path: string) {
+		if len(path) == 0 || !os.is_file(path) {
+			return
+		}
+		for c in candidates {
+			if c == path {
+				return
+			}
+		}
+		append(candidates, path)
+	}
+
+	for dir in dirs {
+		if !os.is_dir(dir) {
+			continue
+		}
+		add_candidate(&candidates, fmt.tprintf("%s/mimeapps.list", dir))
+
+		if infos, read_err := os.read_directory_by_path(dir, -1, context.allocator); read_err == nil {
+			defer os.file_info_slice_delete(infos, context.allocator)
+			for info in infos {
+				if info.type == .Regular || info.type == .Symlink {
+					if info.name == "mimeapps.list" || strings.has_suffix(info.name, "-mimeapps.list") {
+						add_candidate(&candidates, strings.clone(info.fullpath, context.temp_allocator))
+					}
+				}
+			}
+		}
+	}
+
+	for path in candidates {
+		data, err := os.read_entire_file_from_path(path, context.temp_allocator)
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if !strings.contains(text, desktop_filename) {
+			continue
+		}
+		lines := strings.split(text, "\n", context.temp_allocator)
+		b := strings.builder_make(context.temp_allocator)
+		defer strings.builder_destroy(&b)
+
+		modified := false
+		for line, i in lines {
+			trimmed := strings.trim_space(line)
+			if strings.has_prefix(trimmed, "[") {
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
+				continue
+			}
+			eq := strings.index_byte(trimmed, '=')
+			if eq < 0 {
+				if i == len(lines) - 1 && len(line) == 0 {
+					continue
+				}
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
+				continue
+			}
+			key := strings.trim_space(trimmed[:eq])
+			val := strings.trim_space(trimmed[eq + 1:])
+
+			items := strings.split(val, ";", context.temp_allocator)
+			has_match := false
+			new_items := make([dynamic]string, context.temp_allocator)
+			for item in items {
+				it := strings.trim_space(item)
+				if it == desktop_filename {
+					has_match = true
+				} else if len(it) > 0 {
+					append(&new_items, it)
+				}
+			}
+
+			if !has_match {
+				strings.write_string(&b, line)
+				strings.write_byte(&b, '\n')
+				continue
+			}
+
+			modified = true
+			if len(new_items) > 0 {
+				strings.write_string(&b, key)
+				strings.write_byte(&b, '=')
+				for it in new_items {
+					strings.write_string(&b, it)
+					strings.write_byte(&b, ';')
+				}
+				strings.write_byte(&b, '\n')
+			}
+		}
+		if modified {
+			_ = os.write_entire_file_from_string(path, strings.to_string(b))
+		}
+	}
+}
+
 remove_cask :: proc(c: cask.Cask) -> bool {
 	home_dir := os.get_env("HOME", context.temp_allocator)
 	if home_dir == "" {
@@ -2777,10 +3049,15 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 	}
 
 	// Clean up generic artifacts target paths
+	removed_desktop := false
 	for art in c.artifacts {
 		if ga, ok := art.(cask.Generic_Artifact); ok {
 			target_resolved := resolve_arch_placeholders(ga.target)
 			resolved_target := expand_home(target_resolved, context.temp_allocator)
+			if strings.has_suffix(resolved_target, ".desktop") {
+				removed_desktop = true
+				clear_desktop_mime_defaults(os.base(resolved_target))
+			}
 			if os.is_dir(resolved_target) {
 				if is_safe_to_remove_dir(resolved_target) {
 					_ = os.remove_all(resolved_target)
@@ -2796,6 +3073,14 @@ remove_cask :: proc(c: cask.Cask) -> bool {
 		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
 		_ = os.remove(fmt.tprintf("%s/code.desktop", apps_dir))
 		_ = os.remove(fmt.tprintf("%s/code-url-handler.desktop", apps_dir))
+		removed_desktop = true
+		clear_desktop_mime_defaults("code.desktop")
+		clear_desktop_mime_defaults("code-url-handler.desktop")
+	}
+
+	if removed_desktop {
+		apps_dir := fmt.tprintf("%s/.local/share/applications", home_dir)
+		_ = platform.exec_cmd("update-desktop-database", []string{"update-desktop-database", apps_dir})
 	}
 
 	// Remove the whole Caskroom entry (version dirs, .metadata, and any
