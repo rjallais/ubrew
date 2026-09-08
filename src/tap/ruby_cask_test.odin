@@ -780,3 +780,29 @@ test_find_heredoc_terminator_offset_alignment :: proc(t: ^testing.T) {
 	testing.expect(t, !ok3, "quoted << should not be treated as heredoc")
 }
 
+@(test)
+test_preflight_unterminated_quote_does_not_panic :: proc(t: ^testing.T) {
+	fixture := `cask "test-unterminated" do
+  version "1.0.0"
+  url "https://example.com/app.tar.gz"
+
+  preflight do
+    File.write("unterminated, <<~EOS)
+      some body
+    EOS
+    write_file "#{staged_path}/valid.txt", "valid content"
+    write_file "#{staged_path}/unterminated_content.txt", "unterminated
+  end
+end
+`
+	c, ok := parse_ruby_cask(fixture, "test-unterminated")
+	testing.expect(t, ok, "parse_ruby_cask should succeed")
+	defer destroy_ruby_cask(c)
+
+	testing.expect_value(t, len(c.preflight_files), 1)
+	if len(c.preflight_files) == 1 {
+		testing.expect_value(t, c.preflight_files[0].path, "valid.txt")
+		testing.expect_value(t, c.preflight_files[0].content, "valid content\n")
+	}
+}
+

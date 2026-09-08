@@ -1122,7 +1122,10 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 			// Extract target path (first quoted string)
 			path, after_path := read_first_quoted(arg_part)
-			if len(path) == 0 {
+			if len(path) == 0 || after_path <= 0 {
+				if len(path) > 0 {
+					delete(path)
+				}
 				continue
 			}
 
@@ -1253,7 +1256,10 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 
 		// Extract target path (first quoted string)
 		path, after_path := read_first_quoted(arg_part)
-		if len(path) == 0 {
+		if len(path) == 0 || after_path <= 0 {
+			if len(path) > 0 {
+				delete(path)
+			}
 			continue
 		}
 
@@ -1306,6 +1312,8 @@ extract_preflight_file_writes :: proc(src: string, files: ^[dynamic]cask.Preflig
 				})
 				delete(path)
 				continue
+			} else if len(content_str) > 0 {
+				delete(content_str)
 			}
 		}
 
